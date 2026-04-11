@@ -4,8 +4,25 @@
 # On Windows, Bun can't launch or connect to Playwright's Chromium
 # (oven-sh/bun#4253, #9911). This script produces a server bundle
 # that runs under Node.js with Bun API polyfills.
+#
+# The bundle is ONLY needed on Windows. On macOS and Linux, bun drives
+# Playwright directly, so running this step is wasted work and (per #960)
+# also currently fails under newer bun versions because `bun build
+# --outfile` cannot emit multi-file output. Guard with an OS check and
+# exit cleanly on non-Windows platforms so the rest of `bun run build`
+# continues uninterrupted.
 
 set -e
+
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    # Windows: fall through and build the bundle
+    ;;
+  *)
+    echo "Skipping Node-compatible server bundle (non-Windows platform)"
+    exit 0
+    ;;
+esac
 
 GSTACK_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 SRC_DIR="$GSTACK_DIR/browse/src"
