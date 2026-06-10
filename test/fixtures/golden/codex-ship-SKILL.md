@@ -610,7 +610,55 @@ If CEO Review is missing, mention as informational ("CEO Review not run — reco
 
 For Design Review: run `source <($GSTACK_ROOT/bin/gstack-diff-scope <base> 2>/dev/null)`. If `SCOPE_FRONTEND=true` and no design review exists, mention: "Design Review not run — Step 9 includes the lite check; consider /design-review for a full visual audit."
 
-Continue to Step 2 without a preflight approval question. Apply the review gates when Step 9 runs.
+Continue to Step 1.5 without a preflight approval question. Apply the review gates when Step 9 runs.
+
+---
+
+## Step 1.5: Upstream duplicate audit (pr-prep gate)
+
+Catches the case where a contributor's branch would file a PR that
+duplicates an already-open upstream PR or issue. Without this gate
+the duplicate gets filed and is closed days later, costing reviewer
+time + contributor goodwill.
+
+Skip on:
+- Forks that don't have a tracked upstream remote
+- Branches where the base is the user's own fork (no upstream to dup)
+- Explicit `--skip-pr-prep` flag
+
+Otherwise run `/pr-prep` inline with `GSTACK_FROM_SHIP=1`:
+
+```bash
+# Skip if no upstream remote configured (solo-repo case)
+if ! gh repo view --json nameWithOwner -q .nameWithOwner >/dev/null 2>&1; then
+  echo "[ship] no upstream repo detected, skipping pr-prep audit"
+else
+  GSTACK_FROM_SHIP=1 $GSTACK_ROOT/bin/gstack-skill pr-prep --base "$BASE_BRANCH" --json > /tmp/ship-pr-prep.json 2>&1
+  PR_PREP_EXIT=$?
+  if [ "$PR_PREP_EXIT" -eq 1 ]; then
+    # EXACT_DUP found
+    cat /tmp/ship-pr-prep.json
+    echo ""
+    echo "✗ Ship aborted: pr-prep found exact duplicate upstream work."
+    echo "  Resolution paths:"
+    echo "    1. Close your version, comment on the upstream PR with your angle"
+    echo "    2. Cherry-pick unique parts to a new branch + file separately"
+    echo "    3. Override with /ship --skip-pr-prep if coordinated with the upstream PR author"
+    exit 1
+  fi
+  # CLEAN / OVERLAP / SIBLING — render summary, continue
+  jq -r '.summary' /tmp/ship-pr-prep.json 2>/dev/null || true
+fi
+```
+
+Note: the JSON report path (`/tmp/ship-pr-prep.json`) is read again in
+Step 19 (PR body assembly) to surface SIBLING / OVERLAP findings as a
+collapsed "Upstream context" section in the PR body. SIBLING context
+helps reviewers triage faster; it does NOT block ship.
+
+If the pr-prep skill is not installed (older gstack install), fall
+through with a stderr warn and continue. Don't hard-fail ship on a
+missing skill.
 
 ---
 
