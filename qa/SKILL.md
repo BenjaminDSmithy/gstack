@@ -138,6 +138,8 @@ Completeness: use `Completeness: N/10` only when options differ in coverage. 10 
 
 Accepted shortcuts leave a trail: when the user selects an option that is BOTH Completeness ≤ 7 AND a durable-scope call (architecture or scope-cut — never a turn-level choice), log it via `gstack-decision-log` with the ceiling and the upgrade trigger in the rationale, and — as part of implementing that option, same edit, no follow-up question — mark each cut corner in code with `gstack-shortcut(dec-<id>): <ceiling>, upgrade when <trigger>` in the language's comment syntax. Never agent-initiated: the marker exists only downstream of the user's explicit choice. /retro harvests these into a debt ledger, joined on the decision id.
 
+Single-select is the DEFAULT — options are mutually exclusive. Set `multiSelect: true` only when every option is an independently-selectable atom whose pro/con/effort stands alone; then score `Completeness: <atom>=X/10` per atom. Bundles or combinations of the same underlying items (`E1+E3`, `All three`, `E1 only`, `Defer all`) are mutually exclusive by construction — `multiSelect: false`, score per option LETTER, and never write "Multi-select" into the question text. Tell: a defer/none option or a do-everything option in the list proves the question is single-select. With 5+ independent atoms use the split chain below, not multiSelect.
+
 `Pros / cons:` in question text; descriptions use literal ✅/❌ bullets, not Pro:/Con:. Each real option: ≥2 pros and ≥1 con, ≥40 chars each. One-way/destructive escape: `✅ No cons — this is a hard-stop choice`.
 
 Neutral posture: `Recommendation: <default> — this is a taste call, no strong preference either way`; `(recommended)` STAYS on the default option for AUTO_DECIDE.
@@ -176,6 +178,7 @@ Before calling AskUserQuestion, verify:
 - [ ] ELI10 paragraph present (stakes line too)
 - [ ] Recommendation line present with concrete reason
 - [ ] Completeness scored (coverage) OR kind-note present (kind)
+- [ ] `multiSelect: false` unless every option is an independently-selectable atom (bundles/combinations ⇒ single-select)
 - [ ] `Pros / cons:` in question; options: ≥2 ✅, ≥1 ❌, ≥40 chars/bullet (or escape)
 - [ ] (recommended) label on one option (even for neutral-posture)
 - [ ] Dual-scale effort labels on effort-bearing options (human / CC)
