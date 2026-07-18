@@ -33,6 +33,7 @@ gbrain:
       sort: mtime_desc
       limit: 3
       render_as: "## Recent design docs"
+disable-model-invocation: true
 ---
 <!-- AUTO-GENERATED from SKILL.md.tmpl — do not edit directly -->
 <!-- Regenerate: bun run gen:skill-docs -->
