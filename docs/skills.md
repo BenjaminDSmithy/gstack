@@ -638,6 +638,46 @@ Claude: [Explores 12 pages, fills 3 forms, tests 2 flows]
 
 ---
 
+## `/pr-prep`
+
+This is my **duplicate check mode**.
+
+The worst outcome for an open-source contribution is not a rejected PR. It is a PR nobody looks at for three weeks and then closes as a duplicate of something that was already open when you started. You lose the work, the maintainer loses a triage slot, and the person who filed first gets a second review thread to babysit.
+
+That collision is knowable up front. The upstream tracker is public and one `gh` call away. `/pr-prep` makes the check part of the workflow instead of something you remember to do when you happen to think of it.
+
+It walks `git log <base>..HEAD`, pulls search keywords out of each commit's subject and changed paths, queries upstream issues and PRs, and buckets every commit:
+
+| Bucket | Meaning |
+|---|---|
+| `EXACT_DUP` | An open PR with a strong title or changed-file overlap. Do not file. |
+| `OVERLAP` | Real overlap with open work. File, but say how yours differs. |
+| `SIBLING` | Adjacent open issues, no competing PR. Worth linking. |
+| `CLEAN` | Nothing above threshold. Go. |
+
+`EXACT_DUP` exits non-zero. It does not lecture you — it prints the colliding PR, its author, how long it has been open, and three concrete ways out: close yours and comment on theirs, cherry-pick the genuinely unique parts, or override with `--force` if you have already coordinated with the other author.
+
+### Where the thresholds live
+
+The bucketing is a pure function in `bin/gstack-pr-prep-score` — title Jaccard, changed-file overlap on open PRs, state weighting — with unit tests. The skill pipes candidates through it rather than re-deriving the numbers in prose, so what runs and what is documented cannot drift apart.
+
+### Reading the tracker safely
+
+Upstream titles are text a stranger wrote, and the audit asks a model to judge them. They arrive through `bin/gstack-issue-guard`, the same trust envelope `/spec` and `/review` use, so a PR title can never talk to your agent. An empty envelope means zero matches; no envelope at all means the query failed, and a failed query never clears a commit.
+
+### Beyond duplicates
+
+Two soft checks ride along, because they cost one more pass over commits you have already walked:
+
+- **Second opinion.** CLEAN commits get an independent review from `codex` — a different model family, so it catches what the author's own model missed. Skipped with a warning if `codex` is not installed.
+- **Commit style.** Each commit is checked against the upstream repo's own convention, read from its CONTRIBUTING.md and then from the shape of its actual `git log`. Never blocks. Style is not a duplicate — it is just the cheapest goodwill a contributor can buy.
+
+### In `/ship`
+
+`/ship` runs the audit at Step 1.5, before it pushes anything. No upstream repo means the gate skips and costs nothing. `EXACT_DUP` aborts the ship; `OVERLAP` and `SIBLING` ride along into the PR body as collapsed context so the reviewer sees the neighbourhood without digging.
+
+---
+
 ## `/ship`
 
 This is my **release machine mode**.

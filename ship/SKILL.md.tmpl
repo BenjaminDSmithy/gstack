@@ -130,13 +130,18 @@ Skip on:
 Otherwise run the gate. First the precondition probe:
 
 ```bash
+export GSTACK_PR_PREP_REPORT="${GSTACK_PR_PREP_REPORT:-/tmp/ship-pr-prep-$(git rev-parse --show-toplevel | shasum | cut -c1-8).json}"
 if gh repo view --json nameWithOwner -q .nameWithOwner >/dev/null 2>&1; then
   echo "PR_PREP_GATE: run"
 else
   echo "PR_PREP_GATE: skip (no upstream repo detected)"
 fi
-rm -f /tmp/ship-pr-prep.json
+rm -f "$GSTACK_PR_PREP_REPORT"
+echo "PR_PREP_REPORT: $GSTACK_PR_PREP_REPORT"
 ```
+
+The report path is keyed on the repo root, so two ships running in
+different worktrees of the same project never read each other's verdict.
 
 If `PR_PREP_GATE` is `skip`, continue to Step 2.
 
@@ -148,18 +153,18 @@ integration contract (its Step 7):
 - Treat `GSTACK_FROM_SHIP` as set: skip pr-prep's own AskUserQuestion
   confirmations, it is ship that owns the gate decision
 - Use `--base "$BASE_BRANCH"` for the commit walk
-- Write pr-prep's machine-readable report to `/tmp/ship-pr-prep.json`
+- Write pr-prep's machine-readable report to `$GSTACK_PR_PREP_REPORT`
   (`{"summary": "...", "worst": "EXACT_DUP|OVERLAP|SIBLING|CLEAN",
   "commits": [...]}`) before returning here
 
 Then enforce the gate on that report:
 
 ```bash
-if [ ! -f /tmp/ship-pr-prep.json ]; then
+if [ ! -f "$GSTACK_PR_PREP_REPORT" ]; then
   echo "[ship] pr-prep produced no report — continuing (audit not run)" >&2
 else
-  PR_PREP_WORST=$(jq -r '.worst // "CLEAN"' /tmp/ship-pr-prep.json 2>/dev/null || echo CLEAN)
-  jq -r '.summary // empty' /tmp/ship-pr-prep.json 2>/dev/null || true
+  PR_PREP_WORST=$(jq -r '.worst // "CLEAN"' "$GSTACK_PR_PREP_REPORT" 2>/dev/null || echo CLEAN)
+  jq -r '.summary // empty' "$GSTACK_PR_PREP_REPORT" 2>/dev/null || true
   echo "PR_PREP_WORST: $PR_PREP_WORST"
 fi
 ```
@@ -177,9 +182,9 @@ ABORT ship and print:
 
 `OVERLAP` / `SIBLING` / `CLEAN` are informational — continue to Step 2.
 
-Note: the JSON report path (`/tmp/ship-pr-prep.json`) is read again in
-Step 19 (PR body assembly) to surface SIBLING / OVERLAP findings as a
-collapsed "Upstream context" section in the PR body. SIBLING context
+Note: `$GSTACK_PR_PREP_REPORT` is read again in Step 19 (PR body
+assembly) to surface SIBLING / OVERLAP findings as a collapsed
+"Upstream context" section in the PR body. SIBLING context
 helps reviewers triage faster; it does NOT block ship.
 
 If the pr-prep skill is not installed (older gstack install), fall

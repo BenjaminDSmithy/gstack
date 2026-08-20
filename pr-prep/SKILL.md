@@ -1230,6 +1230,34 @@ Print summary at end:
 Summary: 1 EXACT_DUP, 1 CLEAN. 1 commit blocked.
 ```
 
+## Step 5b: Write the machine report
+
+Always write the machine-readable report, on every run, before Step 6 can
+abort. `/ship`'s Step 1.5 gate branches on this file, so an audit that
+rendered a table but wrote nothing reads to ship as "audit did not run".
+
+```bash
+_PP_REPORT="${GSTACK_PR_PREP_REPORT:-/tmp/ship-pr-prep.json}"
+jq -n \
+  --arg summary "$SUMMARY_LINE" \
+  --arg worst "$WORST_BUCKET" \
+  --argjson commits "$COMMITS_JSON" \
+  '{summary: $summary, worst: $worst, commits: $commits}' > "$_PP_REPORT"
+echo "PR_PREP_REPORT: $_PP_REPORT ($WORST_BUCKET)"
+```
+
+- `worst` is the highest-severity bucket across every commit, in the
+  precedence order `EXACT_DUP > OVERLAP > SIBLING > CLEAN`. It is the only
+  field the ship gate reads, so it must be present even on a fully CLEAN run.
+- `commits` is one object per audited commit:
+  `{"sha", "subject", "bucket", "topScore", "hits": [{"ref", "title",
+  "state", "score"}]}`. `/ship` Step 19 renders the OVERLAP and SIBLING
+  entries as collapsed PR-body context.
+- `GSTACK_PR_PREP_REPORT` lets a caller pick the path. Concurrent ships in
+  different worktrees must set it, or they race on the shared `/tmp` default.
+- Never emit a partial file: build the JSON in one `jq -n` call so a crashed
+  audit leaves no half-written report for the gate to trust.
+
 ## Step 6: Refusal on EXACT_DUP
 
 If ANY commit is EXACT_DUP and `--force` is NOT set, exit non-zero
@@ -1255,12 +1283,10 @@ When invoked by `/ship` (env `GSTACK_FROM_SHIP=1`):
 - Skip the interactive AskUserQuestion confirmations
 - Exit 0 on CLEAN/OVERLAP/SIBLING
 - Exit 1 on EXACT_DUP (blocks /ship)
-- Print machine-readable JSON to `/tmp/ship-pr-prep.json` — the path
-  /ship reads in its Step 1.5 gate and again in Step 19 (PR body
-  assembly). Shape: `{"summary": "<one-line>", "worst":
-  "EXACT_DUP|OVERLAP|SIBLING|CLEAN", "commits": [{"sha", "bucket",
-  "topScore", "hits": [...]}]}`. `worst` is the highest-severity
-  bucket across all commits — it is what the ship gate branches on.
+- Write the Step 5b machine report to `$GSTACK_PR_PREP_REPORT` (ship
+  exports it; default `/tmp/ship-pr-prep.json`). Ship's Step 1.5 gate
+  branches on `worst`; its Step 19 renders `commits[]` as collapsed
+  PR-body context.
 
 ## Flags
 
