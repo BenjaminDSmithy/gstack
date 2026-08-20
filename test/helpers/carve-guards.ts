@@ -126,7 +126,7 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     },
     behavioral: 'external',
     externalTest: 'test/skill-e2e-ship-section-loading.test.ts',
-    maxSkeletonBytes: 91_600, // v1.68 fix wave: unconditional learnings capture (#2402, ~450B/skill); measured 91,061
+    maxSkeletonBytes: 94_400, // + Step 1.5 upstream duplicate audit gate (~2.9KB); measured 93,914
     minUnionBytes: 120_000,
     mustContain: ['VERSION', 'CHANGELOG', 'review', 'merge', 'PR'],
     // v1.58.5.0: pre-push-guard install (#2077) stacks on the shared first-run-guidance preamble.
