@@ -1,6 +1,6 @@
 /**
  * hook-syntax.test.ts — pins the hook parse gate (scripts/hook-syntax.sh) and
- * the sweep it performs over this repository.
+ * its consumer, ./setup.
  *
  * WHY. On 2026-08-27 `~/.claude/hooks/secret-guard.sh` sat on disk mid-merge
  * with unresolved conflict markers. It is a PreToolUse hook, so every Bash call
@@ -19,6 +19,7 @@
  *      and skipped is reported as skipped, never counted as checked
  *   4. every WIRED hook is inside what it parses, payload included, so a green
  *      sweep is not vacuous
+ *   5. `./setup` refuses BEFORE it creates, links, copies or registers anything
  */
 import { describe, test, expect, beforeAll } from 'bun:test';
 import { spawnSync } from 'child_process';
@@ -427,5 +428,105 @@ describe('hook-syntax: house rules', () => {
     expect(body).toContain('[>]{7}');
     expect(body).toContain('[|]{7}');
     expect(body).not.toContain('[=]{7}');
+  });
+});
+
+// ── ./setup, the consumer ──────────────────────────────────────────────────
+
+// A minimal install tree: `setup` and the gate, plus whatever hook fixture the
+// test wants. The gate sits above every path that reads more than this, so a
+// refusal never gets far enough to need the rest of the repo.
+function mkSetupTree(): { dir: string; home: string } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-setup-gate-'));
+  const home = path.join(dir, 'home');
+  fs.mkdirSync(home, { recursive: true });
+  fs.mkdirSync(path.join(dir, 'tree', 'scripts'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'tree', 'hosts', 'claude', 'hooks'), { recursive: true });
+  fs.copyFileSync(SETUP_SCRIPT, path.join(dir, 'tree', 'setup'));
+  fs.chmodSync(path.join(dir, 'tree', 'setup'), 0o755);
+  fs.copyFileSync(GATE, path.join(dir, 'tree', 'scripts', 'hook-syntax.sh'));
+  return { dir, home };
+}
+
+function runSetup(tree: string, home: string): Run {
+  const r = spawnSync('/bin/bash', [path.join(tree, 'tree', 'setup'), '--no-prefix', '--no-team'], {
+    env: { ...process.env, HOME: home },
+    cwd: path.join(tree, 'tree'),
+    encoding: 'utf-8',
+    timeout: 120_000,
+  });
+  return { code: r.status ?? 1, output: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+}
+
+describe('setup: the gate refuses before anything is installed', () => {
+  test('setup refuses a tree whose hook does not parse', () => {
+    const { dir, home } = mkSetupTree();
+    fs.writeFileSync(
+      path.join(dir, 'tree', 'hosts', 'claude', 'hooks', 'question-preference-hook'),
+      '#!/usr/bin/env bash\nif true; then\n',
+    );
+    const r = runSetup(dir, home);
+    expect(r.code).not.toBe(0);
+    expect(r.output).toContain('REFUSING TO REGISTER');
+    expect(r.output).toContain('question-preference-hook');
+  }, FULL_SWEEP_TIMEOUT_MS);
+
+  test('setup refuses a half-merged hook that still parses', () => {
+    const { dir, home } = mkSetupTree();
+    fs.writeFileSync(
+      path.join(dir, 'tree', 'hosts', 'claude', 'hooks', 'timeline-stop-hook'),
+      `#!/usr/bin/env bash\ncat <<'HOOKEOF'\n${LT} HEAD\na\n${EQ}\nb\n${GT} other\nHOOKEOF\n`,
+    );
+    const r = runSetup(dir, home);
+    expect(r.code).not.toBe(0);
+    expect(r.output).toContain('UNRESOLVED CONFLICT MARKERS');
+  }, FULL_SWEEP_TIMEOUT_MS);
+
+  test('setup creates nothing at all when it refuses', () => {
+    // Registering an unparseable hook is what makes one file everyone's
+    // problem. The gate has to sit above the install, not merely report after
+    // it — checked functionally, not by reading the order of lines in setup.
+    const { dir, home } = mkSetupTree();
+    fs.writeFileSync(
+      path.join(dir, 'tree', 'hosts', 'claude', 'hooks', 'question-log-hook'),
+      '#!/usr/bin/env bash\ncase x in\n',
+    );
+    const r = runSetup(dir, home);
+    expect(r.code).not.toBe(0);
+    expect(fs.existsSync(path.join(home, '.claude'))).toBe(false);
+    expect(fs.existsSync(path.join(home, '.gstack'))).toBe(false);
+    expect(fs.existsSync(path.join(home, '.codex'))).toBe(false);
+  }, FULL_SWEEP_TIMEOUT_MS);
+
+  test('setup invokes the gate with /bin/bash, never a bare bash', () => {
+    expect(SETUP_SRC).toContain('/bin/bash "$HOOK_SYNTAX_GATE"');
+  });
+
+  test('the gate is invoked above the first mkdir, ln or copy in setup', () => {
+    // Kills the "gate moved below the deploy step" regression directly, in
+    // case a future refactor makes a refusal reach a write before exiting.
+    const gateAt = SETUP_SRC.indexOf('HOOK_SYNTAX_GATE="$SOURCE_GSTACK_DIR/scripts/hook-syntax.sh"');
+    expect(gateAt).toBeGreaterThan(-1);
+
+    const lines = SETUP_SRC.split('\n');
+    let offset = 0;
+    let inFunction = false;
+    let firstWrite = -1;
+    for (const line of lines) {
+      // A helper definition writes nothing until it is called, so the `rm -rf`
+      // inside _link_or_copy is not the first write — the first CALL is, and
+      // every call site sits far below the gate.
+      if (/^[A-Za-z_][A-Za-z0-9_]*\(\)\s*\{\s*$/.test(line)) inFunction = true;
+      else if (inFunction && line === '}') inFunction = false;
+      else if (!inFunction && firstWrite < 0) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('#') && /^(mkdir|ln|cp|rm|_link_or_copy)\s/.test(trimmed)) {
+          firstWrite = offset;
+        }
+      }
+      offset += line.length + 1;
+    }
+    expect(firstWrite).toBeGreaterThan(-1);
+    expect(gateAt).toBeLessThan(firstWrite);
   });
 });

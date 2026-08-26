@@ -253,6 +253,39 @@ case "$HOST" in
   *) echo "Unknown --host value: $HOST (expected claude, codex, kiro, factory, opencode, cursor, slate, openclaw, hermes, gbrain, or auto)" >&2; exit 1 ;;
 esac
 
+# ─── Hook parse gate ─────────────────────────────────────────
+# REFUSE before anything is written, linked, copied or registered. `setup` wires
+# gstack hooks into ~/.claude/settings.json — question-preference-hook is
+# PreToolUse — and a hook that does not parse fails EVERY tool call in EVERY
+# session on the machine, not just gstack's. That happened on 2026-08-27 to a
+# hook in another repo; see docs/hook-syntax-gate.md.
+#
+# Position is load-bearing: this must sit ABOVE the first mkdir/ln/cp, so a
+# broken tree cannot be half-installed. test/hook-syntax.test.ts pins the
+# ordering functionally (nothing is created when setup refuses) rather than by
+# reading line numbers.
+#
+# Silent on a healthy tree. `/bin/bash`, never a bare `bash`: a PATH-resolved
+# bash on macOS is Homebrew bash 5.3, which reopens the heredoc deadlock the
+# BASH_COMPAT guard at the top of this file exists to close.
+HOOK_SYNTAX_GATE="$SOURCE_GSTACK_DIR/scripts/hook-syntax.sh"
+if [ -r "$HOOK_SYNTAX_GATE" ]; then
+  if ! /bin/bash "$HOOK_SYNTAX_GATE" "$SOURCE_GSTACK_DIR"; then
+    echo "" >&2
+    echo "REFUSING TO REGISTER: the checks above found a file that does not parse," >&2
+    echo "or one that is still half-merged. Nothing has been installed." >&2
+    echo "" >&2
+    echo "gstack registers hooks into ~/.claude/settings.json, one of them PreToolUse." >&2
+    echo "An unparseable hook fails every tool call in every session on this machine." >&2
+    echo "Fix the file named above, then re-run ./setup." >&2
+    exit 1
+  fi
+else
+  # Absent gate: say so rather than installing silently unchecked. A partial
+  # checkout is exactly the state this gate exists to catch.
+  echo "Warning: $HOOK_SYNTAX_GATE is missing — installing WITHOUT the hook parse gate." >&2
+fi
+
 # ─── Resolve skill prefix preference ─────────────────────────
 # Priority: CLI flag > saved config > interactive prompt (or flat default for non-TTY)
 GSTACK_CONFIG="$SOURCE_GSTACK_DIR/bin/gstack-config"
