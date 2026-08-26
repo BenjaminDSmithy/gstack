@@ -502,6 +502,20 @@ describe('setup: the gate refuses before anything is installed', () => {
     expect(SETUP_SRC).toContain('/bin/bash "$HOOK_SYNTAX_GATE"');
   });
 
+  test('setup refuses when the gate ITSELF is missing', () => {
+    // Deleting the checker must not be a way past the checker. There is no
+    // legitimate shape where setup carries the gate block and the checker is
+    // absent — they ship in the same commit — so this is a partial checkout,
+    // which is the state the gate exists to catch.
+    const { dir, home } = mkSetupTree();
+    fs.rmSync(path.join(dir, 'tree', 'scripts', 'hook-syntax.sh'));
+    const r = runSetup(dir, home);
+    expect(r.code).not.toBe(0);
+    expect(r.output).toContain('REFUSING TO REGISTER');
+    expect(r.output).toContain('hook parse gate is missing');
+    expect(fs.existsSync(path.join(home, '.claude'))).toBe(false);
+  });
+
   test('the gate is invoked above the first mkdir, ln or copy in setup', () => {
     // Kills the "gate moved below the deploy step" regression directly, in
     // case a future refactor makes a refusal reach a write before exiting.

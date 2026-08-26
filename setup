@@ -281,9 +281,20 @@ if [ -r "$HOOK_SYNTAX_GATE" ]; then
     exit 1
   fi
 else
-  # Absent gate: say so rather than installing silently unchecked. A partial
-  # checkout is exactly the state this gate exists to catch.
-  echo "Warning: $HOOK_SYNTAX_GATE is missing — installing WITHOUT the hook parse gate." >&2
+  # Deleting the checker must not be a way past the checker. There is no
+  # legitimate shape where this file exists and the gate does not: the block and
+  # scripts/hook-syntax.sh ship in the same commit, so an older tag has neither.
+  # A missing checker therefore means a partial or half-merged checkout — the
+  # exact state the gate exists to catch — and installing hooks out of one is
+  # how a single broken file becomes every session's problem.
+  echo "REFUSING TO REGISTER: the hook parse gate is missing." >&2
+  echo "  expected: $HOOK_SYNTAX_GATE" >&2
+  echo "" >&2
+  echo "This checkout is incomplete. gstack registers hooks into" >&2
+  echo "~/.claude/settings.json, one of them PreToolUse, and will not do that" >&2
+  echo "unchecked. Restore the file (git checkout -- scripts/hook-syntax.sh, or" >&2
+  echo "re-clone) and re-run ./setup." >&2
+  exit 1
 fi
 
 # ─── Resolve skill prefix preference ─────────────────────────

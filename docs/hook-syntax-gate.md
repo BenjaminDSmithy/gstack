@@ -89,7 +89,16 @@ Three design points worth stating:
   `.ts` nothing wired reaches is honestly reported as skipped rather than
   silently included. Comment lines are stripped first — this gate's own header
   quotes the shim shape, and matching that made it report a missing payload
-  against itself.
+  against itself. **If you are porting this arm to another repo, do not
+  "simplify" it into a `*.ts` sweep.** The sibling arms have no bun arm at all
+  because in those repos the wired hook IS the logic; gstack's wired hooks are
+  shims, and keying on what each shim hands to bun is the whole distinction.
+* **A missing checker is a refusal, not a warning.** Deleting
+  `scripts/hook-syntax.sh` must not be a way past it. There is no legitimate
+  shape where `setup` carries the gate block and the checker is absent — they
+  ship in the same commit, so an older tag has neither — which makes a missing
+  checker a partial or half-merged checkout, exactly the state the gate exists
+  to catch.
 * **The gate runs above every `mkdir`, `ln` and `cp` in `setup`.**
   `test/hook-syntax.test.ts` asserts that on refusal no `~/.claude`,
   `~/.gstack` or `~/.codex` exists — checked functionally, in an isolated
@@ -167,7 +176,9 @@ by itself. On the machine this was found on:
   by the dotfiles repo as a gitlink at `skills/gstack` (mode `160000`) with no
   `.gitmodules` entry — so `git submodule update` does not drive it. It is
   refreshed by pulling in that clone and re-running `./setup` there, which is
-  what `/gstack-upgrade` does.
+  what `/gstack-upgrade` does. The gitlink is pinned at a specific SHA and has
+  to be re-pinned in the dotfiles repo afterwards, or the next dotfiles
+  checkout drags the clone back to the old commit.
 * `settings.json` names that clone's path, so the gate protects the live hook
   only once the clone is refreshed. Until then the gate protects the next
   install, not the running one — which is the same hole the finding above
@@ -201,3 +212,18 @@ Eight named regressions were injected and every one was killed by a named test:
 | unlabelled `=` added to the marker scan | `the trailing label is what separates a conflict from a rule` |
 | gate moved below the deploy step | `setup refuses a tree whose hook does not parse` (+2 more) |
 | gate warns instead of refusing | `setup refuses a tree whose hook does not parse` |
+| checker deleted so the gate cannot run | `setup refuses when the gate ITSELF is missing` |
+
+Every mutation asserts that its own edit actually applied before the suite runs.
+A mutant whose replace target never matched reads as "survived" and is a false
+green about a false green.
+
+## The other arms
+
+Four repos own hooks wired in `~/.claude/settings.json`, and none can gate
+another's files. As of 2026-08-27 all four have a `feature/hook-parse-gate`
+branch: dotfiles-claude (`hooks/lib/hook-syntax.sh`), synapse
+(`skills/lib/hook-syntax.sh`), claude-skills (`scripts/lib/hook-syntax.sh`) and
+this one. The marker-scan pattern and the labelled-marker rationale are
+deliberately identical across all four; the bun payload arm is unique to gstack
+for the reason given above.
