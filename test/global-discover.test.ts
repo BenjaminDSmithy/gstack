@@ -8,6 +8,70 @@ import { spawnSync } from "child_process";
 // We test the script end-to-end via CLI and normalizeRemoteUrl via import
 const scriptPath = join(import.meta.dir, "..", "bin", "gstack-global-discover.ts");
 
+/**
+ * A throwaway $HOME the discovery CLI can scan in full.
+ *
+ * These tests used to run the CLI against the developer's real home: every
+ * assertion depended on whatever repos happened to sit under ~/src, and the
+ * scan regularly blew past bun's 5s per-test timeout on a loaded machine
+ * (the spawnSync `timeout: 30000` never applied — bun kills the test first).
+ * The script reads ~/.claude/projects, ~/.codex/sessions and ~/.gemini via
+ * os.homedir(), which honours $HOME, so a fixture home makes the whole scan
+ * deterministic, fast, and independent of the host.
+ *
+ * Layout: one repo checked out twice (a Conductor-style worktree) with one
+ * Claude Code session each — enough to exercise grouping, dedup by remote,
+ * and the session counters.
+ */
+const FIXTURE_REMOTE = "https://github.com/example/fixture-repo.git";
+
+function makeFixtureHome(): { root: string; home: string; checkouts: string[] } {
+  const root = mkdtempSync(join(tmpdir(), "gstack-discover-home-"));
+  const home = join(root, "home");
+  mkdirSync(home, { recursive: true });
+  // Empty codex tree: the scanner must see "no sessions", not the host's.
+  mkdirSync(join(home, ".codex", "sessions"), { recursive: true });
+
+  const checkouts: string[] = [];
+  for (const [i, dirName] of ["checkout-main", "checkout-worktree"].entries()) {
+    const repoDir = join(root, dirName);
+    mkdirSync(repoDir, { recursive: true });
+    spawnSync("git", ["init", "-q"], { cwd: repoDir, stdio: "pipe" });
+    spawnSync("git", ["remote", "add", "origin", FIXTURE_REMOTE], {
+      cwd: repoDir,
+      stdio: "pipe",
+    });
+    checkouts.push(repoDir);
+
+    // A project dir whose name does NOT decode to a real path, so the
+    // scanner falls through to the cwd recorded in the JSONL.
+    const projectDir = join(home, ".claude", "projects", `-gstack-fixture-${i}`);
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(
+      join(projectDir, "session.jsonl"),
+      JSON.stringify({ cwd: repoDir, type: "user" }) + "\n"
+    );
+  }
+
+  return { root, home, checkouts };
+}
+
+function runDiscover(
+  home: string,
+  args: string[]
+): { status: number | null; stdout: string; stderr: string } {
+  const result = spawnSync("bun", ["run", scriptPath, ...args], {
+    encoding: "utf-8",
+    timeout: 30000,
+    env: {
+      ...process.env,
+      HOME: home,
+      CODEX_SESSIONS_DIR: join(home, ".codex", "sessions"),
+    },
+  });
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
 describe("gstack-global-discover", () => {
   describe("normalizeRemoteUrl", () => {
     // Dynamically import to test the exported function
@@ -91,43 +155,108 @@ describe("gstack-global-discover", () => {
       expect(result.stderr).toContain("Invalid window format");
     });
 
-    test("--since 7d produces valid JSON", () => {
-      const result = spawnSync(
-        "bun",
-        ["run", scriptPath, "--since", "7d", "--format", "json"],
-        { encoding: "utf-8", timeout: 30000 }
-      );
-      expect(result.status).toBe(0);
-      const json = JSON.parse(result.stdout);
-      expect(json).toHaveProperty("window", "7d");
-      expect(json).toHaveProperty("repos");
-      expect(json).toHaveProperty("total_sessions");
-      expect(json).toHaveProperty("total_repos");
-      expect(json).toHaveProperty("tools");
-      expect(Array.isArray(json.repos)).toBe(true);
-    });
+    describe("against a fixture home", () => {
+      let fixture: { root: string; home: string; checkouts: string[] };
 
-    test("--since 7d --format summary produces readable output", () => {
-      const result = spawnSync(
-        "bun",
-        ["run", scriptPath, "--since", "7d", "--format", "summary"],
-        { encoding: "utf-8", timeout: 30000 }
-      );
-      expect(result.status).toBe(0);
-      expect(result.stdout).toContain("Window: 7d");
-      expect(result.stdout).toContain("Sessions:");
-      expect(result.stdout).toContain("Repos:");
-    });
+      beforeEach(() => {
+        fixture = makeFixtureHome();
+      });
 
-    test("--since 1h returns results (may be empty)", () => {
-      const result = spawnSync(
-        "bun",
-        ["run", scriptPath, "--since", "1h", "--format", "json"],
-        { encoding: "utf-8", timeout: 30000 }
-      );
-      expect(result.status).toBe(0);
-      const json = JSON.parse(result.stdout);
-      expect(json.total_sessions).toBeGreaterThanOrEqual(0);
+      afterEach(() => {
+        rmSync(fixture.root, { recursive: true, force: true });
+      });
+
+      test("--since 7d produces valid JSON", () => {
+        const result = runDiscover(fixture.home, [
+          "--since", "7d", "--format", "json",
+        ]);
+        expect(result.status).toBe(0);
+        const json = JSON.parse(result.stdout);
+        expect(json).toHaveProperty("window", "7d");
+        expect(Array.isArray(json.repos)).toBe(true);
+        expect(json.total_repos).toBe(1);
+        expect(json.total_sessions).toBe(2);
+      });
+
+      test("--since 7d --format summary produces readable output", () => {
+        const result = runDiscover(fixture.home, [
+          "--since", "7d", "--format", "summary",
+        ]);
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain("Window: 7d");
+        expect(result.stdout).toContain("Sessions:");
+        expect(result.stdout).toContain("Repos:");
+        expect(result.stdout).toContain("fixture-repo");
+      });
+
+      test("--since 1h picks up sessions written just now", () => {
+        const result = runDiscover(fixture.home, [
+          "--since", "1h", "--format", "json",
+        ]);
+        expect(result.status).toBe(0);
+        const json = JSON.parse(result.stdout);
+        expect(json.total_sessions).toBe(2);
+      });
+
+      test("repos have required fields", () => {
+        const result = runDiscover(fixture.home, [
+          "--since", "30d", "--format", "json",
+        ]);
+        expect(result.status).toBe(0);
+        const json = JSON.parse(result.stdout);
+        expect(json.repos.length).toBe(1);
+
+        const repo = json.repos[0];
+        expect(repo.name).toBe("fixture-repo");
+        // .git suffix stripped, host lowercased
+        expect(repo.remote).toBe("https://github.com/example/fixture-repo");
+        expect(Array.isArray(repo.paths)).toBe(true);
+        expect(repo.paths.length).toBe(2);
+        expect(repo.sessions).toEqual({ claude_code: 2, codex: 0, gemini: 0 });
+      });
+
+      test("tools summary matches repo data", () => {
+        const result = runDiscover(fixture.home, [
+          "--since", "30d", "--format", "json",
+        ]);
+        const json = JSON.parse(result.stdout);
+        const toolTotal =
+          json.tools.claude_code.total_sessions +
+          json.tools.codex.total_sessions +
+          json.tools.gemini.total_sessions;
+        expect(json.total_sessions).toBe(toolTotal);
+        expect(json.tools.claude_code.total_sessions).toBe(2);
+      });
+
+      test("deduplicates Conductor workspaces by remote", () => {
+        const result = runDiscover(fixture.home, [
+          "--since", "30d", "--format", "json",
+        ]);
+        const json = JSON.parse(result.stdout);
+
+        // Two checkouts, one remote → one repo carrying both paths.
+        const remotes = json.repos.map((r: any) => r.remote);
+        expect(remotes.length).toBe(new Set(remotes).size);
+        expect(json.repos.length).toBe(1);
+        expect([...json.repos[0].paths].sort()).toEqual(
+          [...fixture.checkouts].sort()
+        );
+      });
+
+      test("an empty home reports no repos and no sessions", () => {
+        const emptyHome = mkdtempSync(join(tmpdir(), "gstack-discover-empty-"));
+        try {
+          const result = runDiscover(emptyHome, [
+            "--since", "30d", "--format", "json",
+          ]);
+          expect(result.status).toBe(0);
+          const json = JSON.parse(result.stdout);
+          expect(json.total_repos).toBe(0);
+          expect(json.total_sessions).toBe(0);
+        } finally {
+          rmSync(emptyHome, { recursive: true, force: true });
+        }
+      });
     });
   });
 
@@ -288,60 +417,6 @@ describe("gstack-global-discover", () => {
       ).toThrow();
       // When this test starts passing (e.g., after implementing streaming parse),
       // update it to verify correct parsing instead of documenting the limitation.
-    });
-  });
-
-  describe("discovery output structure", () => {
-    test("repos have required fields", () => {
-      const result = spawnSync(
-        "bun",
-        ["run", scriptPath, "--since", "30d", "--format", "json"],
-        { encoding: "utf-8", timeout: 30000 }
-      );
-      expect(result.status).toBe(0);
-      const json = JSON.parse(result.stdout);
-
-      for (const repo of json.repos) {
-        expect(repo).toHaveProperty("name");
-        expect(repo).toHaveProperty("remote");
-        expect(repo).toHaveProperty("paths");
-        expect(repo).toHaveProperty("sessions");
-        expect(Array.isArray(repo.paths)).toBe(true);
-        expect(repo.paths.length).toBeGreaterThan(0);
-        expect(repo.sessions).toHaveProperty("claude_code");
-        expect(repo.sessions).toHaveProperty("codex");
-        expect(repo.sessions).toHaveProperty("gemini");
-      }
-    });
-
-    test("tools summary matches repo data", () => {
-      const result = spawnSync(
-        "bun",
-        ["run", scriptPath, "--since", "30d", "--format", "json"],
-        { encoding: "utf-8", timeout: 30000 }
-      );
-      const json = JSON.parse(result.stdout);
-
-      // Total sessions should equal sum across tools
-      const toolTotal =
-        json.tools.claude_code.total_sessions +
-        json.tools.codex.total_sessions +
-        json.tools.gemini.total_sessions;
-      expect(json.total_sessions).toBe(toolTotal);
-    });
-
-    test("deduplicates Conductor workspaces by remote", () => {
-      const result = spawnSync(
-        "bun",
-        ["run", scriptPath, "--since", "30d", "--format", "json"],
-        { encoding: "utf-8", timeout: 30000 }
-      );
-      const json = JSON.parse(result.stdout);
-
-      // Check that no two repos share the same normalized remote
-      const remotes = json.repos.map((r: any) => r.remote);
-      const uniqueRemotes = new Set(remotes);
-      expect(remotes.length).toBe(uniqueRemotes.size);
     });
   });
 
