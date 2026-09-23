@@ -318,7 +318,10 @@ describe("gstack-global-discover", () => {
       // Write a session with a 20KB first line (simulates Codex v0.117+)
       writeCodexSession(codexDir, repoDir, 20000);
 
-      // Run discovery with CODEX_SESSIONS_DIR override
+      // CODEX_SESSIONS_DIR overrides the codex root, but HOME still drove
+      // the Claude Code and Gemini scans — so this walked the developer's
+      // whole session history to assert one codex session, which is what
+      // pushed it past bun's 5s timeout in a full run.
       const result = spawnSync(
         "bun",
         ["run", scriptPath, "--since", "1h", "--format", "json"],
@@ -327,6 +330,7 @@ describe("gstack-global-discover", () => {
           timeout: 30000,
           env: {
             ...process.env,
+            HOME: join(tmpDir, "codex-home"),
             CODEX_SESSIONS_DIR: join(tmpDir, "codex-home", "sessions"),
           },
         }
@@ -334,7 +338,9 @@ describe("gstack-global-discover", () => {
 
       expect(result.status).toBe(0);
       const json = JSON.parse(result.stdout);
-      expect(json.tools.codex.total_sessions).toBeGreaterThanOrEqual(1);
+      expect(json.tools.codex.total_sessions).toBe(1);
+      // The fixture repo has no remote, so it groups under local:<path>
+      expect(json.repos.map((r: any) => r.name)).toEqual(["fake-repo"]);
     });
 
     test("4KB buffer truncates session_meta, 128KB buffer parses it", () => {
