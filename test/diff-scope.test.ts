@@ -4,7 +4,7 @@
  * Creates temp git repos with specific file patterns and verifies
  * the correct SCOPE_* variables are output.
  */
-import { describe, test, expect, afterAll } from 'bun:test';
+import { describe, test, expect, afterAll, setDefaultTimeout } from 'bun:test';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -62,6 +62,13 @@ afterAll(() => {
     try { rmSync(d, { recursive: true, force: true }); } catch {}
   }
 });
+
+// Every test here builds a throwaway git repo: init, two configs, a write, an
+// add, a commit, a branch, another add, another commit — eight processes before
+// the script under test even runs, about 0.9s per test on an idle machine. bun's
+// 5s default left almost no headroom, so under a full-suite load these went red
+// as timeouts rather than as anything about diff-scope. 30s still catches a hang.
+setDefaultTimeout(30_000);
 
 describe('gstack-diff-scope', () => {
   // --- Existing scope signals ---
