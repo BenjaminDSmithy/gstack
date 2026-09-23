@@ -1659,6 +1659,76 @@ made opt-in. Lower priority than the gbrain-side perf issue above.
 
 ---
 
+## /sync-gbrain code stage: `--full` cannot finish under the deadline it inherits
+
+### P1: `--full` spawns a non-TTY `gbrain sync`, which arms a 1h hard deadline it cannot meet
+
+**What:** `gbrain sync` arms a hard-deadline watchdog that SIGKILLs the process,
+and the default is chosen by TTY: `resolveSyncHardDeadline` in
+`src/core/sync-reconcile.ts` ends with
+`if (!opts.isTty) return mk(opts.defaultNonTtySec ?? 3600, 'default:non-tty')`,
+returning `null` (unbounded) otherwise. `cli.ts` calls it without
+`defaultNonTtySec`, so non-TTY means exactly one hour. `gstack-gbrain-sync.ts`
+spawns `gbrain` as a child with piped stdio, so `--full` always takes the
+bounded branch — while the identical command run by hand at a terminal is
+unbounded. The skill offers no passthrough for `--hard-deadline`,
+`--no-hard-deadline`, or `GBRAIN_SYNC_MAX_RUNTIME_SECONDS`, and mentions none of
+them: a grep for all three over `*.ts`, `*.md` and `*.sh` in the gstack tree
+returns one unrelated hit (`test/gstack-next-version.test.ts:394`, a shard
+deadline).
+
+**Why:** On a repo large enough to need `--full`, the run is killed before it
+ends, every time, with no supported override. Worse, it is killed PART WAY
+THROUGH a full import, so the code source is left holding a fraction of its
+pages rather than either the old index or a complete new one. The user sees a
+stage that fails identically on every retry and no error that names the cause —
+the SIGKILL leaves only the watchdog's own heartbeat line in the log.
+
+**Fix:** Pass the budget through explicitly rather than inheriting a default
+meant for cron. Either (a) have `--full` set
+`GBRAIN_SYNC_MAX_RUNTIME_SECONDS` in the child's env from a gstack-side option
+(`--hard-deadline <sec>`, defaulting to something that matches the real
+`--full` cost), or (b) forward unrecognised `--hard-deadline` /
+`--no-hard-deadline` args straight to `gbrain sync`. Whichever, the usage text
+should say a deadline exists and how to move it, and the stage summary should
+name the deadline when a run dies on it. `resolveSyncHardDeadline` already reads
+the env var BEFORE the non-TTY default, so (a) needs no gbrain change.
+
+**Pros:** Small and gstack-local; gbrain needs no change, and its author already
+documents the env var as the supported lever for exactly this case. Makes
+`--full` finishable on a large repo for the first time.
+
+**Cons:** A deadline that is raised too far re-opens the zombie class the
+watchdog exists to stop (gbrain #1633). Prefer a large explicit ceiling over
+`--no-hard-deadline`.
+
+**Context:** MEASURED 2026-09-23 on `~/worktrees/synapse/*` (3414 code files) at
+gbrain 0.50.5.0. The run reached 859/3414 files in 1800s — 0.48 files/s, so
+about 2 hours of work against a 1 hour cap; extrapolated, the watchdog would
+have killed it near 51%. `[sync-watchdog] hard deadline armed: 3600s + 30s grace
+(default:non-tty)` appears in the child's output on every `--full`. The same
+command run from an interactive shell armed no watchdog at all until
+`--hard-deadline` was passed by hand. The resolver is byte-identical at
+`v0.50.5.0` and `v0.51.8.0`, and `cli.ts` still passes no `defaultNonTtySec` at
+the newer tag, so this is current rather than already fixed upstream. gbrain's
+own CHANGELOG (the watchdog release notes) states the intended remedy: "If you
+run a legitimately long sync from cron (e.g. a first import of a very large
+brain), raise it: `GBRAIN_SYNC_MAX_RUNTIME_SECONDS=14400 gbrain sync ...`" — so
+the gap is gstack not exposing it, not gbrain behaving wrongly.
+
+**Related:** `gstack-gbrain-sync.ts:241` advertises `--full` as "Honest ~25-35
+min for big Macs (ED2)". The measured rate above puts a 3414-file repo at ~2h,
+so the budget in the usage text and the deadline the child inherits disagree
+with each other AND with the observed cost. Re-measure and restate it in the
+same change.
+
+**Workaround until fixed:** `GBRAIN_SYNC_MAX_RUNTIME_SECONDS=21600 bun run
+~/.claude/skills/gstack/bin/gstack-gbrain-sync.ts --full` — the child inherits
+the variable and the resolver prefers it over the non-TTY default. Untested to
+completion here: the run it was needed for was abandoned before it finished.
+
+---
+
 ## Browser-skills follow-on (Phases 2-4)
 
 ### P1: Browser-skills Phase 2 — `/scrape` and `/skillify` skill templates
