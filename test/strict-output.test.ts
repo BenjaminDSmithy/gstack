@@ -47,8 +47,8 @@ describe('strictTestExitCode', () => {
 describe('BunTestOutputClassifier', () => {
   it('counts a (fail) line split across write chunks', () => {
     const c = new BunTestOutputClassifier();
-    c.write('[31m(fail) my te');
-    c.write('st [3.42ms][0m\nRan 4 tests across 1 files. [2.10s]\n');
+    c.write('\u001B[31m(fail) my te');
+    c.write('st [3.42ms]\u001B[0m\nRan 4 tests across 1 files. [2.10s]\n');
     const summary = c.end();
     expect(summary.failedTests).toBe(1);
     expect(summary.terminalFileCounts).toEqual([1]);
@@ -74,7 +74,7 @@ describe('BunTestOutputClassifier', () => {
   it('a stderr chunk arriving mid-stdout-line does not shear either line', () => {
     const c = new BunTestOutputClassifier();
     c.write('some stdout noise without a newline yet', 'stdout');
-    c.write('[31m(fail) planted [0.10ms][0m\n', 'stderr');
+    c.write('\u001B[31m(fail) planted [0.10ms]\u001B[0m\n', 'stderr');
     c.write(' ...rest of the stdout line\n', 'stdout');
     const summary = c.end();
     expect(summary.failedTests).toBe(1);
@@ -107,8 +107,8 @@ describe('BunTestOutputClassifier', () => {
 
   it('skip/pass counts survive ANSI color and chunk shears', () => {
     const c = new BunTestOutputClassifier();
-    c.write('[32m 4 pa');
-    c.write('ss[0m\n[33m 9 skip[0m\n');
+    c.write('\u001B[32m 4 pa');
+    c.write('ss\u001B[0m\n\u001B[33m 9 skip\u001B[0m\n');
     const summary = c.end();
     expect(summary.passedTests).toBe(4);
     expect(summary.skippedTests).toBe(9);
