@@ -16,6 +16,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { spawnSync } from 'child_process';
+import { hermeticPath } from './helpers/hermetic-path';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const DETECT_BIN = path.join(ROOT, 'bin', 'gstack-gbrain-detect');
@@ -55,12 +56,14 @@ exit 1
 }
 
 function runDetect(extraEnv: Record<string, string> = {}): { code: number; json: any; stderr: string } {
-  const realPath = process.env.PATH ?? '';
   const r = spawnSync(DETECT_BIN, [], {
     env: {
-      // Put fakeBinDir first so our claude shim wins; include the project bin
-      // for any sibling scripts and standard paths for jq/etc.
-      PATH: `${fakeBinDir}:${path.join(ROOT, 'bin')}:${realPath}`,
+      // fakeBinDir first so our claude shim wins, then the project bin for
+      // sibling scripts, then a hermetic tail (bun + system tools, no
+      // gbrain). Inheriting the developer's real PATH used to expose the
+      // real gbrain here, so detect ran doctor against a live brain —
+      // seconds per call, and an intermittent 5s timeout in the full suite.
+      PATH: hermeticPath(fakeBinDir, path.join(ROOT, 'bin')),
       HOME: tmpHome,
       GSTACK_HOME: path.join(tmpHome, '.gstack'),
       ...extraEnv,
