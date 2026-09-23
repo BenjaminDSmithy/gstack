@@ -22,9 +22,11 @@ import { mkdtempSync, existsSync, writeFileSync, readFileSync, rmSync, mkdirSync
 import { delimiter, join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
+import { hermeticPath } from './helpers/hermetic-path';
 
 let TMP_HOME: string;
 let GBRAIN_STUB: string;
+let TMP_USER_HOME: string;
 const ORIGINAL_HOME = process.env.GSTACK_HOME;
 
 beforeEach(() => {
@@ -34,7 +36,18 @@ beforeEach(() => {
   writeFileSync(join(GBRAIN_STUB, 'gbrain.cmd'), '@echo gbrain unreachable (test stub) 1>&2\r\n@exit /b 1\r\n');
   const pathKey = Object.keys(process.env).find(name => name.toLowerCase() === 'path') ?? 'PATH';
   process.env[pathKey] = `${GBRAIN_STUB}${delimiter}${process.env[pathKey] ?? ''}`;
+  TMP_USER_HOME = mkdtempSync(join(tmpdir(), 'gstack-cache-home-'));
   process.env.GSTACK_HOME = TMP_HOME;
+  // "Brain unreachable" has to be enforced, not assumed. Two leaks made
+  // these tests talk to the developer's live brain — 19s for a test the
+  // header calls ~50ms, which bun then killed at its 5s timeout:
+  //   - PATH: spawnGbrain() resolves the bare name `gbrain` through PATH.
+  //   - HOME: buildGbrainEnv() reads ~/.gbrain/config.json and seeds
+  //     DATABASE_URL from it, pointing the spawned gbrain at a real DB.
+  // bunfig.toml's preload restores process.env after every test.
+  // Upstream's failing stub stays first so the shadow test still sees it.
+  process.env.PATH = `${GBRAIN_STUB}${delimiter}${hermeticPath()}`;
+  process.env.HOME = TMP_USER_HOME;
   // Reload the cache module fresh per test so it picks up the new HOME.
   delete require.cache[require.resolve('../bin/gstack-brain-cache')];
 });
@@ -44,6 +57,7 @@ afterEach(() => {
   else delete process.env.GSTACK_HOME;
   try { rmSync(TMP_HOME, { recursive: true, force: true }); } catch { /* best effort */ }
   rmSync(GBRAIN_STUB, { recursive: true, force: true });
+  try { rmSync(TMP_USER_HOME, { recursive: true, force: true }); } catch { /* best effort */ }
 });
 
 async function importCache(): Promise<typeof import('../bin/gstack-brain-cache')> {
@@ -223,7 +237,8 @@ describe('brain-cache schema mismatch behavior', () => {
     }));
 
     const result = mod.cmdGet('product', 'helsinki');
-    // Brain is unreachable in this test (no gbrain mock), so refresh fails and
+    // Brain is unreachable here by construction (hermetic PATH + HOME in
+    // beforeEach), so refresh fails and
     // the file gets deleted by the rebuild step. State should be 'missing' or
     // 'stale-fallback' depending on whether the rebuild left a file behind.
     expect(['missing', 'cold-refreshed', 'stale-fallback']).toContain(result.state);

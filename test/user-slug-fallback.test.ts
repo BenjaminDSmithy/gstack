@@ -9,7 +9,8 @@
  *   4. anonymous-<sha8(hostname)>
  *
  * Result is persisted under user_slug_at_<endpoint-id> for stability.
- * Test isolation via GSTACK_HOME and HOME env overrides.
+ * Test isolation via GSTACK_HOME, a throwaway HOME, and a hermetic PATH —
+ * layer 1 and the endpoint hash both read host state otherwise.
  *
  * Gate-tier, free, ~50ms.
  */
@@ -20,6 +21,7 @@ import { createHash } from 'crypto';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
+import { hermeticPath } from './helpers/hermetic-path';
 
 const REPO_ROOT = process.cwd();
 const CONFIG_BIN = join(REPO_ROOT, 'bin', 'gstack-config');
@@ -42,6 +44,13 @@ function runConfig(args: string[], extraEnv: Record<string, string> = {}): { std
       // ~/.claude.json (which would otherwise change the persisted key
       // namespace to user_slug_at_<sha8-of-url>).
       HOME: TMP_HOME,
+      // Layer 1 of the chain is `gbrain whoami --json`. The file header
+      // says it is "skipped when gbrain not on PATH", but the harness
+      // inherited the developer's PATH, so on a machine with gbrain
+      // installed every call waited ~2s on a live brain — and would have
+      // resolved a client_name ahead of $USER, quietly testing a different
+      // layer than the one named in each test.
+      PATH: hermeticPath(),
       ...extraEnv,
     },
     timeout: 5000,
