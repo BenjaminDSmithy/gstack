@@ -17,12 +17,13 @@ import { describe, test, expect, afterEach } from 'bun:test';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { hermeticPath } from './helpers/hermetic-path';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const BIN = path.join(ROOT, 'bin', 'gstack-gbrain-supabase-provision');
 
 // Minimal PATH that finds jq/curl but excludes user bins.
-const SAFE_PATH = '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin';
+const SAFE_PATH = hermeticPath();
 
 type Handler = (req: Request) => Response | Promise<Response>;
 

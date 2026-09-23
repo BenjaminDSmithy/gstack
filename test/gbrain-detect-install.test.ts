@@ -16,16 +16,19 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { spawnSync } from 'child_process';
+import { hermeticPath } from './helpers/hermetic-path';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const DETECT = path.join(ROOT, 'bin', 'gstack-gbrain-detect');
 const INSTALL = path.join(ROOT, 'bin', 'gstack-gbrain-install');
 
-// Minimal PATH with POSIX tools + homebrew (for jq/git/curl) but no user-bin
-// dirs — this keeps `gbrain` out of PATH deterministically across dev machines
-// while still finding jq, git, curl, sed, cat, etc. Each test can prepend a
-// fake-gbrain dir when it wants to simulate presence.
-const SAFE_PATH = '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin';
+// Minimal PATH with POSIX tools + homebrew (for jq/git/curl) plus a `bun`
+// shim, but no user-bin dirs — this keeps `gbrain` out of PATH
+// deterministically across dev machines while still finding bun, jq, git,
+// curl, sed, cat, etc. Each test can prepend a fake-gbrain dir when it wants
+// to simulate presence. The bun shim matters: these bin scripts start with
+// `#!/usr/bin/env -S bun run`, and a PATH without bun exits them 127.
+const SAFE_PATH = hermeticPath();
 
 let tmpHome: string;
 let tmpHomeReal: string;

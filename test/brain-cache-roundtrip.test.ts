@@ -21,13 +21,25 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, existsSync, writeFileSync, readFileSync, rmSync, mkdirSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { hermeticPath } from './helpers/hermetic-path';
 
 let TMP_HOME: string;
+let TMP_USER_HOME: string;
 const ORIGINAL_HOME = process.env.GSTACK_HOME;
 
 beforeEach(() => {
   TMP_HOME = mkdtempSync(join(tmpdir(), 'gstack-cache-test-'));
+  TMP_USER_HOME = mkdtempSync(join(tmpdir(), 'gstack-cache-home-'));
   process.env.GSTACK_HOME = TMP_HOME;
+  // "Brain unreachable" has to be enforced, not assumed. Two leaks made
+  // these tests talk to the developer's live brain — 19s for a test the
+  // header calls ~50ms, which bun then killed at its 5s timeout:
+  //   - PATH: spawnGbrain() resolves the bare name `gbrain` through PATH.
+  //   - HOME: buildGbrainEnv() reads ~/.gbrain/config.json and seeds
+  //     DATABASE_URL from it, pointing the spawned gbrain at a real DB.
+  // bunfig.toml's preload restores process.env after every test.
+  process.env.PATH = hermeticPath();
+  process.env.HOME = TMP_USER_HOME;
   // Reload the cache module fresh per test so it picks up the new HOME.
   delete require.cache[require.resolve('../bin/gstack-brain-cache')];
 });
@@ -36,6 +48,7 @@ afterEach(() => {
   if (ORIGINAL_HOME) process.env.GSTACK_HOME = ORIGINAL_HOME;
   else delete process.env.GSTACK_HOME;
   try { rmSync(TMP_HOME, { recursive: true, force: true }); } catch { /* best effort */ }
+  try { rmSync(TMP_USER_HOME, { recursive: true, force: true }); } catch { /* best effort */ }
 });
 
 async function importCache(): Promise<typeof import('../bin/gstack-brain-cache')> {
@@ -149,7 +162,8 @@ describe('brain-cache schema mismatch behavior', () => {
     }));
 
     const result = mod.cmdGet('product', 'helsinki');
-    // Brain is unreachable in this test (no gbrain mock), so refresh fails and
+    // Brain is unreachable here by construction (hermetic PATH + HOME in
+    // beforeEach), so refresh fails and
     // the file gets deleted by the rebuild step. State should be 'missing' or
     // 'stale-fallback' depending on whether the rebuild left a file behind.
     expect(['missing', 'cold-refreshed', 'stale-fallback']).toContain(result.state);

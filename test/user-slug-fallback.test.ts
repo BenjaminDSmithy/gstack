@@ -9,7 +9,8 @@
  *   4. anonymous-<sha8(hostname)>
  *
  * Result is persisted under user_slug_at_<endpoint-hash> for stability.
- * Test isolation via GSTACK_HOME and HOME env overrides.
+ * Test isolation via GSTACK_HOME, a throwaway HOME, and a hermetic PATH —
+ * layer 1 and the endpoint hash both read host state otherwise.
  *
  * Gate-tier, free, ~50ms.
  */
@@ -19,11 +20,13 @@ import { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync, mkdirSync
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
+import { hermeticPath } from './helpers/hermetic-path';
 
 const REPO_ROOT = process.cwd();
 const CONFIG_BIN = join(REPO_ROOT, 'bin', 'gstack-config');
 
 let TMP_HOME: string;
+let TMP_USER_HOME: string;
 const ORIGINAL = {
   HOME: process.env.HOME,
   GSTACK_HOME: process.env.GSTACK_HOME,
@@ -35,6 +38,16 @@ function runConfig(args: string[], extraEnv: Record<string, string> = {}): { std
     encoding: 'utf-8',
     env: {
       ...process.env,
+      // Layer 1 of the chain is `gbrain whoami --json`. The file header
+      // says it is "skipped when gbrain not on PATH", but the harness
+      // inherited the developer's PATH, so on a machine with gbrain
+      // installed every call waited ~2s on a live brain — and would have
+      // resolved a client_name ahead of $USER, quietly testing a different
+      // layer than the one named in each test.
+      PATH: hermeticPath(),
+      // Same for HOME: endpoint_hash() reads $HOME/.claude.json, so the
+      // persisted key depended on the developer's MCP config.
+      HOME: TMP_USER_HOME,
       ...extraEnv,
     },
     timeout: 5000,
@@ -44,6 +57,7 @@ function runConfig(args: string[], extraEnv: Record<string, string> = {}): { std
 
 beforeEach(() => {
   TMP_HOME = mkdtempSync(join(tmpdir(), 'gstack-user-slug-test-'));
+  TMP_USER_HOME = mkdtempSync(join(tmpdir(), 'gstack-user-slug-home-'));
   process.env.GSTACK_HOME = TMP_HOME;
 });
 
@@ -53,6 +67,7 @@ afterEach(() => {
     else delete (process.env as Record<string, unknown>)[k];
   }
   try { rmSync(TMP_HOME, { recursive: true, force: true }); } catch { /* best effort */ }
+  try { rmSync(TMP_USER_HOME, { recursive: true, force: true }); } catch { /* best effort */ }
 });
 
 describe('endpoint-hash subcommand', () => {
@@ -87,12 +102,22 @@ describe('resolve-user-slug fallback chain', () => {
     expect(slug).toMatch(/^(email-|anonymous-)[a-f0-9]+$|^[a-zA-Z0-9-]+$/);
   });
 
-  test('persists resolution to user_slug_at_<hash> on first call', () => {
+  test('persists resolution to user_slug_at_<endpoint> on first call', () => {
+    // The key suffix is whatever `endpoint-hash` resolves to for this
+    // machine. With no brain endpoint configured that is the literal
+    // "local", not a hex digest — hardcoding /[a-f0-9]+/ made this test
+    // pass or fail on the developer's gbrain config rather than on the
+    // behaviour under test.
+    const endpoint = runConfig(['endpoint-hash'], { GSTACK_HOME: TMP_HOME }).stdout.trim();
+    expect(endpoint.length).toBeGreaterThan(0);
+
     runConfig(['resolve-user-slug'], { GSTACK_HOME: TMP_HOME, USER: 'persisttest' });
     const configFile = join(TMP_HOME, 'config.yaml');
     expect(existsSync(configFile)).toBe(true);
     const content = readFileSync(configFile, 'utf-8');
-    expect(content).toMatch(/^user_slug_at_[a-f0-9]+:\s+persisttest/m);
+    expect(content).toMatch(
+      new RegExp(`^user_slug_at_${endpoint}:\\s+persisttest`, 'm'),
+    );
   });
 
   test('subsequent calls return same slug (stable across sessions)', () => {
