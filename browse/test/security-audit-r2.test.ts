@@ -15,13 +15,6 @@ import * as os from 'os';
 const META_SRC = fs.readFileSync(path.join(import.meta.dir, '../src/meta-commands.ts'), 'utf-8');
 const WRITE_SRC = fs.readFileSync(path.join(import.meta.dir, '../src/write-commands.ts'), 'utf-8');
 const SERVER_SRC = fs.readFileSync(path.join(import.meta.dir, '../src/server.ts'), 'utf-8');
-// sidebar-agent.ts was ripped (chat queue replaced by interactive PTY).
-// AGENT_SRC kept as empty string so the legacy describe block below skips
-// without crashing module load on a missing file.
-const AGENT_SRC = (() => {
-  try { return fs.readFileSync(path.join(import.meta.dir, '../src/sidebar-agent.ts'), 'utf-8'); }
-  catch { return ''; }
-})();
 const SNAPSHOT_SRC = fs.readFileSync(path.join(import.meta.dir, '../src/snapshot.ts'), 'utf-8');
 const PATH_SECURITY_SRC = fs.readFileSync(path.join(import.meta.dir, '../src/path-security.ts'), 'utf-8');
 
