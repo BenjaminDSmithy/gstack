@@ -19,8 +19,13 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
+import { hermeticPath } from "./helpers/hermetic-path";
 
 const SCRIPT = join(import.meta.dir, "..", "bin", "gstack-memory-ingest.ts");
+
+// A home with nothing in it, so a run that does not care about the home
+// still cannot reach the developer's sessions.
+const EMPTY_HOME = mkdtempSync(join(tmpdir(), "gstack-memory-ingest-empty-"));
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -32,7 +37,16 @@ function runScript(args: string[], env: Record<string, string> = {}): { stdout: 
   const result = spawnSync("bun", [SCRIPT, ...args], {
     encoding: "utf-8",
     timeout: 30000,
-    env: { ...process.env, ...env },
+    // Hermetic PATH and HOME by default:
+    //   PATH — gbrainAvailable() shells out to `gbrain --help`, and the real
+    //     gbrain is a bun-run TS CLI that takes ~4.5s to answer. That alone
+    //     pushed even "--probe on an empty home" past bun's 5s per-test
+    //     timeout. Tests that need a gbrain stand up their own shim and pass
+    //     PATH explicitly.
+    //   HOME — a call that forgets to override it scans the developer's real
+    //     ~/.claude/projects. The --limit parse test did exactly that and took
+    //     22s to assert an exit code.
+    env: { ...process.env, PATH: hermeticPath(), HOME: EMPTY_HOME, ...env },
   });
   return {
     stdout: result.stdout || "",
@@ -447,7 +461,7 @@ describe("gstack-memory-ingest writer (gbrain v0.20+ batch `import` interface)",
     const r = runScript(["--bulk", "--include-unattributed", "--quiet"], {
       HOME: home,
       GSTACK_HOME: gstackHome,
-      PATH: `${binDir}:${process.env.PATH || ""}`,
+      PATH: hermeticPath(binDir),
     });
 
     expect(r.exitCode).toBe(0);
@@ -518,7 +532,7 @@ esac
     const r = runScript(["--bulk", "--include-unattributed", "--quiet"], {
       HOME: home,
       GSTACK_HOME: gstackHome,
-      PATH: `${binDir}:${process.env.PATH || ""}`,
+      PATH: hermeticPath(binDir),
     });
 
     expect(r.exitCode).toBe(0);
@@ -578,7 +592,7 @@ esac
     const r = runScript(["--bulk", "--include-unattributed", "--quiet"], {
       HOME: home,
       GSTACK_HOME: gstackHome,
-      PATH: `${binDir}:${process.env.PATH || ""}`,
+      PATH: hermeticPath(binDir),
     });
     expect(r.exitCode).toBe(0);
     expect(existsSync(stagingCopy)).toBe(true);
@@ -657,7 +671,7 @@ esac
     const r = runScript(["--bulk", "--include-unattributed", "--quiet"], {
       HOME: home,
       GSTACK_HOME: gstackHome,
-      PATH: `${binDir}:${process.env.PATH || ""}`,
+      PATH: hermeticPath(binDir),
     });
     expect(r.exitCode).toBe(0);
 
@@ -696,7 +710,7 @@ esac
     const r = runScript(["--bulk", "--include-unattributed"], {
       HOME: home,
       GSTACK_HOME: gstackHome,
-      PATH: `${binDir}:${process.env.PATH || ""}`,
+      PATH: hermeticPath(binDir),
     });
 
     // D6: system_error sets non-zero exit; orchestrator marks ERR.

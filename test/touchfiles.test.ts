@@ -196,7 +196,11 @@ describe('detectBaseBranch', () => {
     const run = (cmd: string, args: string[]) =>
       spawnSync(cmd, args, { cwd: dir, stdio: 'pipe', timeout: 5000 });
 
-    run('git', ['init']);
+    // -b main, not a bare `git init`: the branch a bare init creates is
+    // whatever the developer's init.defaultBranch says, and detectBaseBranch
+    // only looks for main/master. On a machine that defaults to anything else
+    // this test failed while the code under test was perfectly correct.
+    run('git', ['init', '-b', 'main']);
     run('git', ['config', 'user.email', 'test@test.com']);
     run('git', ['config', 'user.name', 'Test']);
     fs.writeFileSync(path.join(dir, 'test.txt'), 'hello\n');
@@ -204,8 +208,7 @@ describe('detectBaseBranch', () => {
     run('git', ['commit', '-m', 'init']);
 
     const result = detectBaseBranch(dir);
-    // Should find 'main' (or 'master' depending on git default)
-    expect(result).toMatch(/^(main|master)$/);
+    expect(result).toBe('main');
 
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
   });
