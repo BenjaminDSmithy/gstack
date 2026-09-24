@@ -41,8 +41,18 @@ afterEach(() => {
 
 describe('gstack-config', () => {
   // ─── get ──────────────────────────────────────────────────
-  test('get on missing file returns empty, exit 0', () => {
+  // `get` on an absent key answers from the DEFAULTS table in bin/gstack-config
+  // (added in v1.3.0.0), not with an empty string. These three tests still
+  // asserted the pre-defaults behaviour and had been red ever since — invisible
+  // because the runner used to die before reaching this file.
+  test('get on missing file returns the documented default, exit 0', () => {
     const { exitCode, stdout } = run(['get', 'auto_upgrade']);
+    expect(exitCode).toBe(0);
+    expect(stdout).toBe('false');
+  });
+
+  test('get on a key with no default returns empty, exit 0', () => {
+    const { exitCode, stdout } = run(['get', 'no_such_key_at_all']);
     expect(exitCode).toBe(0);
     expect(stdout).toBe('');
   });
@@ -110,10 +120,11 @@ describe('gstack-config', () => {
     expect(stdout).toContain('update_check: false');
   });
 
-  test('list on missing file returns empty, exit 0', () => {
+  test('list on missing file reports the defaults, exit 0', () => {
     const { exitCode, stdout } = run(['list']);
     expect(exitCode).toBe(0);
-    expect(stdout).toBe('');
+    expect(stdout).toContain('Active values');
+    expect(stdout).toMatch(/auto_upgrade:\s+false \(default\)/);
   });
 
   // ─── usage ────────────────────────────────────────────────
@@ -176,9 +187,9 @@ describe('gstack-config', () => {
   });
 
   // ─── routing_declined ──────────────────────────────────────
-  test('routing_declined defaults to empty (not set)', () => {
+  test('routing_declined defaults to false', () => {
     const { stdout } = run(['get', 'routing_declined']);
-    expect(stdout).toBe('');
+    expect(stdout).toBe('false');
   });
 
   test('routing_declined can be set and read', () => {
