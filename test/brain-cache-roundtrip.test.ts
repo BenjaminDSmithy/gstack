@@ -26,6 +26,7 @@ import { hermeticPath } from './helpers/hermetic-path';
 let TMP_HOME: string;
 let TMP_USER_HOME: string;
 const ORIGINAL_HOME = process.env.GSTACK_HOME;
+const ORIGINAL_USER_HOME = process.env.HOME;
 
 beforeEach(() => {
   TMP_HOME = mkdtempSync(join(tmpdir(), 'gstack-cache-test-'));
@@ -47,6 +48,12 @@ beforeEach(() => {
 afterEach(() => {
   if (ORIGINAL_HOME) process.env.GSTACK_HOME = ORIGINAL_HOME;
   else delete process.env.GSTACK_HOME;
+  // HOME has to go back too. test-setup.ts's preload restores PATH after
+  // every test but not HOME, and afterEach deletes TMP_USER_HOME — so
+  // leaving it set points every later test file in this process at a
+  // directory that no longer exists.
+  if (ORIGINAL_USER_HOME !== undefined) process.env.HOME = ORIGINAL_USER_HOME;
+  else delete process.env.HOME;
   try { rmSync(TMP_HOME, { recursive: true, force: true }); } catch { /* best effort */ }
   try { rmSync(TMP_USER_HOME, { recursive: true, force: true }); } catch { /* best effort */ }
 });
