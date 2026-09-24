@@ -90,8 +90,25 @@ const SCAN_PATHS = [
   'test/',
 ];
 
+// This grep walks bin/, scripts/ and test/, and on a machine that has run
+// `bun run build` those hold ~111MB of build output: bin/gstack-global-discover
+// is a 60MB compiled Mach-O binary and test/fixtures carries ~50MB of SwiftPM
+// output. Reading all of it took 3.4s per pattern, two patterns, which is how a
+// pure source-text assertion ended up timing out at bun's 5s ceiling.
+//
+// -I skips binary files outright: 3.36s -> 0.027s for the same walk, measured.
+// The exclude-dirs cover the directory-shaped build output; the post-filter
+// below still drops node_modules/ and .git/ matches, but grep should not have
+// to read them to find that out.
+const EXCLUDED_DIRS = ['node_modules', '.git', '.build', 'dist'];
+
 function grepRefs(pattern: string): string[] {
-  const args = ['-rn', '--', pattern, ...SCAN_PATHS.map((p) => path.join(ROOT, p))];
+  const args = [
+    '-rnI',
+    ...EXCLUDED_DIRS.map((d) => `--exclude-dir=${d}`),
+    '--', pattern,
+    ...SCAN_PATHS.map((p) => path.join(ROOT, p)),
+  ];
   const r = spawnSync('grep', args, { encoding: 'utf-8' });
   // grep exits 1 when no matches — that's fine for our purposes.
   const lines = (r.stdout || '').split('\n').filter((l) => l.trim().length > 0);
