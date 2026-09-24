@@ -15,7 +15,7 @@
  * means new tests don't have to remember the dance, and the bug class
  * stays dead.
  */
-import { afterEach, beforeAll, setDefaultTimeout } from 'bun:test';
+import { afterEach, beforeAll } from 'bun:test';
 
 // Narrowly restore PATH after every test. Defends against the recurring
 // pollution class where one test sets `process.env.PATH = '/test/bin:/usr/bin'`
@@ -36,18 +36,19 @@ import { afterEach, beforeAll, setDefaultTimeout } from 'bun:test';
 // add it to RESTORE_KEYS rather than widening the snapshot scope.
 // ─── Per-test timeout ──────────────────────────────────────────────────
 //
-// bun's default is 5s. The unit of work in large parts of this suite is
-// "launch Chromium" (~0.9s idle) or "spin a git repo" (~0.9s idle, eight
-// processes), and the free gate runs hundreds of files while the machine may
-// also be running a second gate in a sibling worktree. Measured examples that
-// went red purely on the clock: a persistent-context launch at 888ms idle
-// timing out at 5s under load, and diff-scope's fixture repos doing the same.
+// Set with `--timeout` on the command line (see the `test` script in
+// package.json), NOT here. Calling setDefaultTimeout() from a preload looks
+// like it works and does not: bun resets the default for each test FILE, so a
+// preload call only ever governs the first file in the run. Measured on bun
+// 1.3.13 — one file with a 6s test passes, the same test behind any other
+// file times out at 5000ms.
 //
-// 20s is still a real ceiling — a hung test fails rather than hanging the run
-// — but it stops CPU contention from reading as a test failure. Files that
-// need longer (swift builds, E2E) keep their own explicit per-test timeouts,
-// which take precedence over this default.
-setDefaultTimeout(20_000);
+// Why 20s rather than bun's 5s: the unit of work in large parts of this suite
+// is "launch Chromium" or "spin a git repo", each about 0.9s on an idle
+// machine, and the gate runs hundreds of files while this box may also be
+// running a second gate in a sibling worktree. Cases that went red purely on
+// the clock: stealth-webdriver's persistent-context launch (888ms idle) and
+// diff-scope's fixture repos. A file that needs longer still sets its own.
 
 // ─── process.exit guard ────────────────────────────────────────────────
 //
