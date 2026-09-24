@@ -817,15 +817,20 @@ export class BrowserManager {
     this.tabSessions.delete(tabId);
     this.tabOwnership.delete(tabId);
 
-    // Switch to another tab if we closed the active one
-    if (tabId === this.activeTabId) {
+    // Replenish on "no tabs left", not on "we closed the active tab".
+    //
+    // `await page.close()` above fires page.on('close'), and that handler
+    // already removed the entry and — when the closed tab was the active one —
+    // reset activeTabId (to the last remaining id, or 0 when none are left).
+    // So by the time control returns here, `tabId === this.activeTabId` is
+    // false precisely in the case that needed the replenish, and the browser
+    // was left with zero tabs. The invariant this method owes its callers is
+    // that a tab always exists, so key the branch on that.
+    if (this.pages.size === 0) {
+      await this.newTab();
+    } else if (tabId === this.activeTabId) {
       const remaining = [...this.pages.keys()];
-      if (remaining.length > 0) {
-        this.activeTabId = remaining[remaining.length - 1];
-      } else {
-        // No tabs left — create a new blank one
-        await this.newTab();
-      }
+      this.activeTabId = remaining[remaining.length - 1];
     }
   }
 
