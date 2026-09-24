@@ -21,6 +21,14 @@ function run(extraEnv: Record<string, string> = {}, args: string[] = []) {
     env: {
       ...process.env,
       GSTACK_DIR: gstackDir,
+      // gstack-update-check reads its own state through GSTACK_STATE_DIR, but
+      // delegates `update_check` and `telemetry` to bin/gstack-config, which
+      // resolves GSTACK_STATE_ROOT > GSTACK_HOME > GSTACK_STATE_DIR. Any test
+      // file that has already put GSTACK_HOME into process.env (module-scope
+      // assignments do persist for the whole bun process) therefore sent the
+      // config read somewhere else than writeConfig() wrote. Pin all three.
+      GSTACK_STATE_ROOT: stateDir,
+      GSTACK_HOME: stateDir,
       GSTACK_STATE_DIR: stateDir,
       GSTACK_REMOTE_URL: `file://${join(gstackDir, 'REMOTE_VERSION')}`,
       ...extraEnv,

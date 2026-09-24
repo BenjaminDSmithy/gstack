@@ -1,8 +1,10 @@
 /**
  * Tests for bin/gstack-config bash script.
  *
- * Uses Bun.spawnSync to invoke the script with temp dirs and
- * GSTACK_STATE_DIR env override for full isolation.
+ * Uses Bun.spawnSync to invoke the script with temp dirs. Isolation pins all
+ * three state-dir variables the script reads, in its own precedence order
+ * (GSTACK_STATE_ROOT > GSTACK_HOME > GSTACK_STATE_DIR); pinning only the last
+ * one let a leaked GSTACK_HOME from another test file redirect the writes.
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
@@ -14,11 +16,20 @@ const SCRIPT = join(import.meta.dir, '..', '..', 'bin', 'gstack-config');
 
 let stateDir: string;
 
-function run(args: string[] = [], extraEnv: Record<string, string> = {}) {
+function run(args: string[] = [], extraEnv: Record<string, string> = {}, dir: string = stateDir) {
   const result = Bun.spawnSync(['bash', SCRIPT, ...args], {
     env: {
       ...process.env,
-      GSTACK_STATE_DIR: stateDir,
+      // The script resolves its state dir as
+      // GSTACK_STATE_ROOT > GSTACK_HOME > GSTACK_STATE_DIR > $HOME/.gstack.
+      // Setting only the lowest-precedence alias meant any test file that had
+      // already put GSTACK_HOME into process.env (domain-skills-storage does
+      // it at module scope, by design) silently redirected these writes out of
+      // the temp dir — green in isolation, red in a full run, and pointing at
+      // the developer's real config either way. Pin all three.
+      GSTACK_STATE_ROOT: dir,
+      GSTACK_HOME: dir,
+      GSTACK_STATE_DIR: dir,
       ...extraEnv,
     },
     stdout: 'pipe',
@@ -106,7 +117,10 @@ describe('gstack-config', () => {
 
   test('set creates state dir if missing', () => {
     const nestedDir = join(stateDir, 'nested', 'dir');
-    const { exitCode } = run(['set', 'foo', 'bar'], { GSTACK_STATE_DIR: nestedDir });
+    // Point every state-dir variable at the nested path, not just the
+    // lowest-precedence alias — the script would otherwise keep using the
+    // pinned default from run()'s env.
+    const { exitCode } = run(['set', 'foo', 'bar'], {}, nestedDir);
     expect(exitCode).toBe(0);
     expect(existsSync(join(nestedDir, 'config.yaml'))).toBe(true);
   });
