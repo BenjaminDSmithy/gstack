@@ -1003,17 +1003,16 @@ export class BrowserManager {
     this.tabSessions.delete(tabId);
     this.tabOwnership.delete(tabId);
 
-    // Switch to another tab if we closed the active one
-    if (wasActive) {
+    // Replenish on "no tabs left", not on "we closed the active tab". The
+    // invariant this method owes its callers is that a tab always exists,
+    // whichever tab was closed, so key the replenish on that alone.
+    if (this.pages.size === 0) {
+      await this.newTab();
+    } else if (wasActive && !this.pages.has(this.activeTabId)) {
+      // The 'close' handler may have already switched to a valid tab;
+      // only reassign when activeTabId no longer points at a live tab.
       const remaining = [...this.pages.keys()];
-      if (remaining.length === 0) {
-        // No tabs left — create a new blank one
-        await this.newTab();
-      } else if (!this.pages.has(this.activeTabId)) {
-        // The 'close' handler may have already switched to a valid tab;
-        // only reassign when activeTabId no longer points at a live tab.
-        this.activeTabId = remaining[remaining.length - 1];
-      }
+      this.activeTabId = remaining[remaining.length - 1];
     }
   }
 
