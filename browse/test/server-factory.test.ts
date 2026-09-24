@@ -434,6 +434,11 @@ describe('idle timer + onDisconnect dual-instance fix', () => {
   afterEach(() => {
     __testInternals__.setLastActivity(Date.now());
     __testInternals__.resetShutdownState();
+    // Every handle built above is still the target of activeShutdown, which
+    // the idle tick, the parent watchdog and browserManager.onDisconnect all
+    // fire through. Drop the pointer so none of them can reach a handle whose
+    // test has finished.
+    __testInternals__.clearActiveShutdown();
   });
 
   test('CRITICAL — REGRESSION: headed embedder does not auto-shutdown at idle', () => {

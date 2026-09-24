@@ -1,12 +1,8 @@
-import { describe, test, expect, beforeEach, beforeAll, afterAll } from 'bun:test';
+import { describe, test, expect, beforeEach, beforeAll, afterAll, afterEach } from 'bun:test';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import {
-  buildFetchHandler,
-  __resetShuttingDown,
-  type ServerConfig,
-} from '../src/server';
+import { buildFetchHandler, __resetShuttingDown, type ServerConfig, __testInternals__ } from '../src/server';
 import { __resetRegistry } from '../src/token-registry';
 import { BrowserManager } from '../src/browser-manager';
 import { resolveConfig } from '../src/config';
@@ -229,4 +225,12 @@ describe('buildFetchHandler ownsTerminalAgent gate', () => {
     // match cannot be satisfied by the JSDoc reference earlier in the file.
     expect(source).toMatch(/ownsTerminalAgent:\s*true,\s*\/\/\s*CLI spawns terminal-agent\.ts/);
   });
+});
+
+// A handle built in this file stays the target of activeShutdown for the rest
+// of the bun process — the idle tick, the parent watchdog and
+// browserManager.onDisconnect all fire through that pointer, and the shutdown
+// they reach ends in process.exit(). Drop it once this file is done.
+afterEach(() => {
+  __testInternals__.clearActiveShutdown();
 });
