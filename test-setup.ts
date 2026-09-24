@@ -15,7 +15,7 @@
  * means new tests don't have to remember the dance, and the bug class
  * stays dead.
  */
-import { afterEach, beforeAll } from 'bun:test';
+import { afterEach, beforeAll, setDefaultTimeout } from 'bun:test';
 
 // Narrowly restore PATH after every test. Defends against the recurring
 // pollution class where one test sets `process.env.PATH = '/test/bin:/usr/bin'`
@@ -34,6 +34,21 @@ import { afterEach, beforeAll } from 'bun:test';
 //
 // If a future test pollutes a different variable in the same broken way,
 // add it to RESTORE_KEYS rather than widening the snapshot scope.
+// ─── Per-test timeout ──────────────────────────────────────────────────
+//
+// bun's default is 5s. The unit of work in large parts of this suite is
+// "launch Chromium" (~0.9s idle) or "spin a git repo" (~0.9s idle, eight
+// processes), and the free gate runs hundreds of files while the machine may
+// also be running a second gate in a sibling worktree. Measured examples that
+// went red purely on the clock: a persistent-context launch at 888ms idle
+// timing out at 5s under load, and diff-scope's fixture repos doing the same.
+//
+// 20s is still a real ceiling — a hung test fails rather than hanging the run
+// — but it stops CPU contention from reading as a test failure. Files that
+// need longer (swift builds, E2E) keep their own explicit per-test timeouts,
+// which take precedence over this default.
+setDefaultTimeout(20_000);
+
 // ─── process.exit guard ────────────────────────────────────────────────
 //
 // A single stray `process.exit()` anywhere in the test process kills bun's
@@ -59,6 +74,13 @@ const realExit = process.exit.bind(process);
     `process.exit(${code ?? 0}) was called during a test run. Nothing in a test ` +
     `may exit the runner — stub it (see browse/test/server-embedder-terminal-port.test.ts) ` +
     `or stop the timer that reached it.`,
+  );
+  // bun reports the throw site, which is this file and therefore useless for
+  // finding the caller. A shutdown that escapes its stub usually fires between
+  // files, from a timer whose test has already finished, so print the stack
+  // that reached us — that is the only way to name the leak.
+  process.stderr.write(
+    `\n[exit-guard] blocked process.exit(${code ?? 0})\n${new Error('exit-guard trace').stack}\n`,
   );
   // Keep the real exit reachable for anything that genuinely needs it.
   (err as any).realExit = realExit;
