@@ -743,7 +743,16 @@ function idleCheckTick() {
     activeShutdown?.();
   }
 }
-const idleCheckInterval = setInterval(idleCheckTick, 60_000);
+// Under `bun test` the module-scope background timers are a liability, not a
+// feature: importing this file from any test arms an idle poll that fires for
+// the rest of the process and shuts down through `activeShutdown` — which ends
+// in process.exit() and kills the test runner mid-run, at exit code 0. The
+// tests that care about idle behaviour drive `__testInternals__.idleCheckTick()`
+// directly, so nothing is lost by not arming the wall-clock poll there.
+const IS_TEST_RUN = process.env.NODE_ENV === 'test';
+const idleCheckInterval = IS_TEST_RUN
+  ? (undefined as unknown as ReturnType<typeof setInterval>)
+  : setInterval(idleCheckTick, 60_000);
 
 // Test-only surface for server-factory.test.ts. Lets the dual-instance
 // idle-timer behavior be exercised deterministically without mutating
@@ -768,6 +777,14 @@ export const __testInternals__ = {
   // need shutdown to fire. Without this, the second test's shutdown
   // returns early at the `if (isShuttingDown) return;` guard.
   resetShutdownState: () => { isShuttingDown = false; },
+  // Disarm the module-level pointer every background path shuts down through
+  // (the idle tick, the parent watchdog, browserManager.onDisconnect, the
+  // signal handlers). A test that builds a handle leaves activeShutdown
+  // pointing at it for the rest of the bun process, so a browser closing or a
+  // timer firing minutes later runs a real shutdown() — which ends in
+  // process.exit() and takes the test runner with it. Tests that call
+  // buildFetchHandler clear it when they are done.
+  clearActiveShutdown: () => { activeShutdown = null; },
 };
 
 // ─── Parent-Process Watchdog ────────────────────────────────────────
@@ -838,7 +855,10 @@ const PARENT_WATCHDOG_INTERVAL_MS =
   Number.isFinite(rawWatchdogIntervalMs) && rawWatchdogIntervalMs > 0
     ? rawWatchdogIntervalMs
     : 15_000;
-if (BROWSE_PARENT_PID > 0 && !IS_HEADED_WATCHDOG) {
+// !IS_TEST_RUN for the same reason as idleCheckInterval: this poll reaches
+// activeShutdown, and a shutdown under the test runner exits the process.
+// watchdog.test.ts drives parentWatchdogTick through __testInternals__.
+if (BROWSE_PARENT_PID > 0 && !IS_HEADED_WATCHDOG && !IS_TEST_RUN) {
   setInterval(parentWatchdogTick, PARENT_WATCHDOG_INTERVAL_MS);
 } else if (IS_HEADED_WATCHDOG) {
   console.log('[browse] Parent-process watchdog disabled (headed mode)');
