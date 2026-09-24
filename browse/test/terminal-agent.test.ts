@@ -151,10 +151,24 @@ describe('Source-level guard: terminal-agent', () => {
       AGENT_SRC.indexOf("websocket: {"),
     );
     expect(upgradeBlock).not.toContain('spawnClaude(');
-    // Spawn must be invoked from the message handler (lazy on first byte).
+    expect(upgradeBlock).not.toContain('maybeSpawnPty(');
+
+    // v1.44 routed both spawn triggers (the binary first-byte path and the
+    // explicit {type:"start"} frame) through the maybeSpawnPty helper, which
+    // is declared above the server literal. Asserting on a literal
+    // `spawnClaude(` inside the message handler stopped matching then — the
+    // laziness was intact, the grep was not.
     const messageHandler = AGENT_SRC.slice(AGENT_SRC.indexOf('message(ws, raw)'));
-    expect(messageHandler).toContain('spawnClaude(');
+    expect(messageHandler).toContain('maybeSpawnPty(');
     expect(messageHandler).toContain('!session.spawned');
+
+    // And the helper itself is what owns the spawn, idempotently.
+    const helper = AGENT_SRC.slice(
+      AGENT_SRC.indexOf('function maybeSpawnPty('),
+      AGENT_SRC.indexOf('function maybeSpawnPty(') + 400,
+    );
+    expect(helper).toContain('if (session.spawned) return true;');
+    expect(helper).toContain('spawnClaude(');
   });
 
   test('process.on uncaughtException + unhandledRejection handlers exist', () => {

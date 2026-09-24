@@ -220,7 +220,12 @@ describe('/command tunnel command allowlist', () => {
       'return handleCommand(body, tokenInfo)'
     );
     expect(commandBlock).toContain("surface === 'tunnel'");
-    expect(commandBlock).toContain('canDispatchOverTunnel(body?.command)');
+    // v1.57.8.0 gave canDispatchOverTunnel a second parameter so it can see
+    // the args and refuse `--out` (a disk write) over the tunnel. The args
+    // must actually be forwarded — a call that passes only the command name
+    // would silently re-open that write path — so assert the two-argument
+    // form rather than the old single-argument literal.
+    expect(commandBlock).toContain('canDispatchOverTunnel(body?.command, body?.args)');
     expect(commandBlock).toContain('disallowed_command');
     expect(commandBlock).toContain('is not allowed over the tunnel surface');
     expect(commandBlock).toContain('status: 403');
