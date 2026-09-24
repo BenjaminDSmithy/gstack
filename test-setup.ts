@@ -34,6 +34,37 @@ import { afterEach, beforeAll } from 'bun:test';
 //
 // If a future test pollutes a different variable in the same broken way,
 // add it to RESTORE_KEYS rather than widening the snapshot scope.
+// ─── process.exit guard ────────────────────────────────────────────────
+//
+// A single stray `process.exit()` anywhere in the test process kills bun's
+// runner instantly: no summary line, every remaining test file silently
+// skipped, and — because the code under test exits 0 on a clean shutdown —
+// the whole `bun run test` command reports SUCCESS while failures are
+// already on the board. A gate that exits 0 mid-run is worse than a red
+// one; it cannot fail a build at all.
+//
+// browse/src/server.ts's factory shutdown() ends in `process.exit(exitCode)`.
+// Tests that drive shutdown on purpose stub process.exit themselves, but a
+// shutdown reached from a leaked idle timer or agent watchdog fires outside
+// any stub, and `bun test browse/test/` truncated at
+// server-embedder-terminal-port.test.ts with rc=0 as a result.
+//
+// So: no test run may exit the process. The guard throws instead, which
+// surfaces as a normal test failure attributed to whatever triggered it.
+// Verified that bun's own runner still terminates and reports normally with
+// this installed — bun does not route its own teardown through JS exit.
+const realExit = process.exit.bind(process);
+(process as any).exit = ((code?: number) => {
+  const err = new Error(
+    `process.exit(${code ?? 0}) was called during a test run. Nothing in a test ` +
+    `may exit the runner — stub it (see browse/test/server-embedder-terminal-port.test.ts) ` +
+    `or stop the timer that reached it.`,
+  );
+  // Keep the real exit reachable for anything that genuinely needs it.
+  (err as any).realExit = realExit;
+  throw err;
+}) as any;
+
 const RESTORE_KEYS = ['PATH', 'Path'] as const;
 const baseline: Record<string, string | undefined> = {};
 
