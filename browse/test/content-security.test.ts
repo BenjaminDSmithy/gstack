@@ -124,6 +124,17 @@ describe('Content filter hooks', () => {
     clearContentFilters();
   });
 
+  // content-security.ts registers urlBlocklistFilter at import time, and the
+  // registry is module state shared by every test file in the bun process.
+  // Clearing it here left it cleared for the rest of the run, which is why
+  // security-integration.test.ts's "filter runs through the registered
+  // pipeline" failed in a full run and passed on its own. Put the built-in
+  // back when this block is done.
+  afterAll(() => {
+    clearContentFilters();
+    registerContentFilter(urlBlocklistFilter);
+  });
+
   test('URL blocklist detects requestbin', () => {
     const result = urlBlocklistFilter('', 'https://requestbin.com/r/abc', 'text');
     expect(result.safe).toBe(false);
