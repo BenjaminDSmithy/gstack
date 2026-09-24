@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, mock } from 'bun:test';
+import { describe, test, expect, beforeEach, mock, afterEach } from 'bun:test';
 import {
   resolveConfigFromEnv,
   buildFetchHandler,
@@ -419,6 +419,19 @@ describe('idle timer + onDisconnect dual-instance fix', () => {
     // between tests. We reset what we touch here; the rest is fresh
     // because each test calls buildFetchHandler with a new mock instance.
     __testInternals__.setTunnelActive(false);
+    __testInternals__.setLastActivity(Date.now());
+    __testInternals__.resetShutdownState();
+  });
+
+  // Rewinding lastActivity is how the idle tests reach the shutdown branch,
+  // but `lastActivity` is module scope while the idle interval is per-handle,
+  // and buildFetchHandler arms one on every call. A rewound clock therefore
+  // stays rewound for the rest of the bun process, and the first tick from ANY
+  // leaked interval — in this file or a later one — runs a real shutdown()
+  // outside any process.exit stub. That is what used to kill the runner
+  // mid-run at exit code 0. Put the clock back after every test so the trigger
+  // cannot outlive the test that set it.
+  afterEach(() => {
     __testInternals__.setLastActivity(Date.now());
     __testInternals__.resetShutdownState();
   });
