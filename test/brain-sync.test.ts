@@ -317,6 +317,45 @@ describe('init + sync + restore round-trip', () => {
     expect(cfg.stdout).toContain('gstack-jsonl-merge');
     fs.rmSync(machineB, { recursive: true, force: true });
   });
+
+  test('restore into a non-default GSTACK_HOME never registers a gbrain source', () => {
+    // Before HOME was pinned above, this exact restore ran against the
+    // operator's real HOME: it built ~/.gstack-brain-worktree from the temp
+    // clone and registered it in the real brain as brain-sync-remote-XXXXXX,
+    // a source that outlived the directory. A fake gbrain records whether the
+    // wireup still reaches a brain from a GSTACK_HOME that is not $HOME/.gstack.
+    const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), 'brain-sync-fakebin-'));
+    const callLog = path.join(fakeBin, 'calls.log');
+    fs.writeFileSync(path.join(fakeBin, 'gbrain'), `#!/bin/bash
+echo "gbrain $*" >> "${callLog}"
+case "$1" in
+  --version) echo "gbrain 0.99.0" ;;
+  sources) [ "$2" = "list" ] && echo '{"sources":[]}' ;;
+esac
+exit 0
+`, { mode: 0o755 });
+    run(['gstack-artifacts-init', '--remote', bareRemote]);
+    run(['gstack-config', 'set', 'artifacts_sync_mode', 'full']);
+    fs.mkdirSync(path.join(tmpHome, 'projects', 'p'), { recursive: true });
+    fs.writeFileSync(path.join(tmpHome, 'projects/p/learnings.jsonl'),
+      '{"skill":"x","insight":"y","ts":"2026-04-22T10:00:00Z"}\n');
+    run(['gstack-brain-enqueue', 'projects/p/learnings.jsonl']);
+    run(['gstack-brain-sync', '--once']);
+
+    const machineB = fs.mkdtempSync(path.join(os.tmpdir(), 'brain-machineB-'));
+    try {
+      const r = run(['gstack-brain-restore', bareRemote], {
+        env: { GSTACK_HOME: machineB, PATH: `${fakeBin}:${process.env.PATH}` },
+      });
+      expect(r.status).toBe(0);
+      const calls = fs.existsSync(callLog) ? fs.readFileSync(callLog, 'utf-8') : '';
+      expect(calls).not.toContain('sources add');
+      expect(fs.existsSync(path.join(tmpHome, '.gstack-brain-worktree'))).toBe(false);
+    } finally {
+      fs.rmSync(machineB, { recursive: true, force: true });
+      fs.rmSync(fakeBin, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------
