@@ -43,11 +43,15 @@ function makeFakeGbrain(opts: {
   version?: string | null; // null = "binary missing" (don't write the file)
   syncFails?: boolean;
   syncHelpNoSource?: boolean; // simulate an older gbrain whose sync lacks --source
+  // 'confirm': gbrain v0.26.5+ on a source holding pages — `--yes` alone is
+  // refused, `--confirm-destructive` is required. 'refuse': every remove fails.
+  removeGuard?: 'confirm' | 'refuse';
 }) {
   const version = opts.version ?? '0.18.2';
   if (version === null) return; // simulate missing binary by NOT writing one
   const syncFails = opts.syncFails ?? false;
   const syncHelpNoSource = opts.syncHelpNoSource ?? false;
+  const removeGuard = opts.removeGuard ?? '';
 
   // Stub gbrain reads/writes state from a JSON file. Fields:
   //   sources: [{id, local_path, federated}]
@@ -101,6 +105,10 @@ fi
 if [ "$1" = "sources" ] && [ "$2" = "remove" ]; then
   shift 2
   ID="$1"
+  case "${removeGuard}" in
+    refuse) echo "Source \\"$ID\\" is referenced; refusing." >&2; exit 5 ;;
+    confirm) case " $* " in *" --confirm-destructive "*) : ;; *) echo "To proceed, pass --confirm-destructive" >&2; exit 5 ;; esac ;;
+  esac
   python3 -c "
 import json
 state = json.load(open('$STATE'))
@@ -579,6 +587,14 @@ describe('gstack-gbrain-source-wireup — defensive paths', () => {
 // autopilot to skip a dead local_path every cycle.
 describe('gstack-gbrain-source-wireup — worktree ownership (no dangling sources)', () => {
   const addCalls = () => gbrainCalls().filter((c) => c.startsWith('gbrain sources add'));
+  // Setup wireup, asserted: an uninstall case that starts from nothing
+  // registered passes vacuously.
+  const wireUp = () => {
+    const r = run([], { env: { GSTACK_BRAIN_NO_SYNC: '1' } });
+    expect(r.status).toBe(0);
+    expect(readState().sources.map((s) => s.local_path)).toEqual([worktreeDir]);
+    expect(fs.existsSync(path.join(worktreeDir, '.git'))).toBe(true);
+  };
 
   test('overridden GSTACK_HOME + default worktree path: refuses without touching the worktree or gbrain', () => {
     const otherHome = path.join(tmpHome, 'elsewhere', 'gstack');
@@ -603,7 +619,7 @@ describe('gstack-gbrain-source-wireup — worktree ownership (no dangling source
   test('--uninstall from another repo leaves this repo\'s worktree and source alone', () => {
     setupGstackRepo('git@github.com:user/gstack-brain-user.git');
     makeFakeGbrain({});
-    run([], { env: { GSTACK_BRAIN_NO_SYNC: '1' } });
+    wireUp();
     const otherHome = path.join(tmpHome, 'other-gstack');
     setupRepoAt(otherHome, 'git@github.com:user/gstack-brain-other.git');
     const r = run(['--uninstall'], { env: { GSTACK_HOME: otherHome } });
@@ -615,7 +631,7 @@ describe('gstack-gbrain-source-wireup — worktree ownership (no dangling source
   test('--uninstall after the parent .git is already gone (gstack-brain-uninstall order) still removes its own worktree + source', () => {
     setupGstackRepo('git@github.com:user/gstack-brain-user.git');
     makeFakeGbrain({});
-    run([], { env: { GSTACK_BRAIN_NO_SYNC: '1' } });
+    wireUp();
     fs.rmSync(path.join(gstackHome, '.git'), { recursive: true, force: true });
     fs.writeFileSync(path.join(tmpHome, '.gstack-brain-remote.txt'), 'git@github.com:user/gstack-brain-user.git\n');
     const r = run(['--uninstall']);
@@ -627,7 +643,7 @@ describe('gstack-gbrain-source-wireup — worktree ownership (no dangling source
   test('--uninstall unregisters every source still pointing at the worktree it deletes', () => {
     setupGstackRepo('git@github.com:user/gstack-brain-user.git');
     makeFakeGbrain({});
-    run([], { env: { GSTACK_BRAIN_NO_SYNC: '1' } });
+    wireUp();
     // A second registration of the same path under an id the current origin
     // no longer derives (source-id drift, a migration rename).
     const state = readState();
@@ -637,6 +653,27 @@ describe('gstack-gbrain-source-wireup — worktree ownership (no dangling source
     expect(r.status).toBe(0);
     expect(fs.existsSync(worktreeDir)).toBe(false);
     expect(readState().sources.filter((s) => s.local_path === worktreeDir)).toEqual([]);
+  });
+
+  test('--uninstall passes --confirm-destructive, so a source holding pages is really removed (gbrain v0.26.5+)', () => {
+    setupGstackRepo('git@github.com:user/gstack-brain-user.git');
+    makeFakeGbrain({ removeGuard: 'confirm' });
+    wireUp();
+    const r = run(['--uninstall']);
+    expect(r.status).toBe(0);
+    expect(readState().sources).toHaveLength(0);
+    expect(fs.existsSync(worktreeDir)).toBe(false);
+  });
+
+  test('--uninstall keeps the worktree when gbrain will not unregister it', () => {
+    setupGstackRepo('git@github.com:user/gstack-brain-user.git');
+    makeFakeGbrain({ removeGuard: 'refuse' });
+    wireUp();
+    const r = run(['--uninstall']);
+    expect(r.status).toBe(0); // best-effort, like the rest of uninstall
+    expect(readState().sources.map((s) => s.local_path)).toEqual([worktreeDir]);
+    expect(fs.existsSync(path.join(worktreeDir, '.git'))).toBe(true); // never a registration without its directory
+    expect(r.stderr).toContain('keeping');
   });
 
   test('wireup never replaces a worktree that belongs to another repo', () => {
