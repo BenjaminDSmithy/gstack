@@ -50,6 +50,17 @@ import { afterEach, beforeAll } from 'bun:test';
 // stealth-webdriver's persistent-context launch (888ms idle) and diff-scope's
 // fixture repos. A file that needs longer still sets its own.
 
+// ─── Test-runner marker ────────────────────────────────────────────────
+//
+// browse/src/server.ts reads this to skip arming its module-scope background
+// polls (idle check, parent watchdog) when it is imported INTO the test
+// runner — those polls shut down through process.exit() and would end the run.
+//
+// Deliberately a global rather than an env var: tests that spawn the server as
+// a subprocess must get a fully armed daemon, and a child inherits the
+// environment but not globals.
+(globalThis as Record<string, unknown>).__GSTACK_TEST_RUNNER__ = true;
+
 // ─── process.exit guard ────────────────────────────────────────────────
 //
 // A single stray `process.exit()` anywhere in the test process kills bun's
