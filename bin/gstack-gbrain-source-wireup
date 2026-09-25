@@ -281,25 +281,41 @@ check_source_state() {
   return 1
 }
 
-# Unregister every source whose local_path is the worktree about to be deleted,
-# not just the id the current origin derives: a registration left under an
-# older id (a renamed origin, the v1.27 source-id migration) would otherwise
-# outlive the directory. Best-effort, like the rest of uninstall.
-unregister_sources_at_worktree() {
-  if ! command -v jq >/dev/null 2>&1; then
-    warn "jq missing; cannot check for other sources registered at $WORKTREE"
-    return 0
-  fi
-  local sid wt_phys
+# gbrain >= 0.42 refuses `--yes` alone for a source holding pages or facts
+# ("To proceed, pass --confirm-destructive"), so a populated source survived
+# uninstall while its worktree was deleted. Uninstall is the user's explicit
+# teardown: pass both. Older gbrain matches flags with args.includes() and
+# ignores the extra one.
+remove_source() {
+  gbrain sources remove "$1" --yes --confirm-destructive 2>&1 | prefix
+  return "${PIPESTATUS[0]}"
+}
+
+# Ids registered at the worktree path, one per line. Non-zero when that cannot
+# be determined (no jq, gbrain unreachable, unparseable list).
+sources_at_worktree() {
+  command -v jq >/dev/null 2>&1 || return 2
+  local raw wt_phys
+  raw=$(gbrain sources list --json 2>/dev/null) || return 1
   wt_phys=$(_phys "$WORKTREE")
-  { gbrain sources list --json 2>/dev/null \
-      | jq -r --arg p "$WORKTREE" --arg q "$wt_phys" \
-          '.sources[]? | select(.local_path == $p or .local_path == $q) | .id' 2>/dev/null \
-      || true; } | while IFS= read -r sid; do
-    [ -n "$sid" ] || continue
-    gbrain sources remove "$sid" --yes 2>&1 | prefix || warn "gbrain sources remove $sid failed (continuing)"
+  printf '%s\n' "$raw" | jq -r --arg p "$WORKTREE" --arg q "$wt_phys" \
+    '.sources[]? | select(.local_path == $p or .local_path == $q) | .id' 2>/dev/null
+}
+
+# Unregister every source at the worktree about to be deleted, not only the
+# derived id: a registration left under an older id (a renamed origin, the
+# v1.27 source-id migration) would otherwise outlive the directory. Succeeds
+# only when gbrain then confirms nothing is registered there.
+unregister_sources_at_worktree() {
+  local ids sid
+  ids=$(sources_at_worktree) || return 1
+  printf '%s\n' "$ids" | while IFS= read -r sid; do
+    if [ -n "$sid" ]; then
+      remove_source "$sid" || warn "gbrain sources remove $sid failed"
+    fi
   done
-  return 0
+  ids=$(sources_at_worktree) || return 1
+  [ -z "$ids" ]
 }
 
 # ---- modes ----
@@ -499,9 +515,11 @@ do_uninstall() {
   owner=$(worktree_owner)
 
   if command -v gbrain >/dev/null 2>&1; then
-    gbrain sources remove "$id" --yes 2>&1 | prefix || warn "gbrain sources remove failed (continuing)"
-    if [ "$owner" = "ours" ]; then
-      unregister_sources_at_worktree
+    remove_source "$id" || warn "gbrain sources remove $id failed (continuing)"
+    # Never delete the directory while gbrain may still point at it.
+    if [ "$owner" = "ours" ] && ! unregister_sources_at_worktree; then
+      warn "keeping $WORKTREE: gbrain still has a source registered there, or could not be asked. Remove it with 'gbrain sources remove <id> --confirm-destructive' (ids: gbrain sources list), then re-run --uninstall."
+      owner="kept"
     fi
   fi
 
