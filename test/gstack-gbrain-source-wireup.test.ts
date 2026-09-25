@@ -569,3 +569,96 @@ describe('gstack-gbrain-source-wireup — defensive paths', () => {
     expect(fs.existsSync(path.join(worktreeDir, 'unrelated.txt'))).toBe(false); // stray gone
   });
 });
+
+// A registered source must never outlive its directory. The failure these
+// pin: a run against a temp GSTACK_HOME (a test harness clone of a
+// `brain-sync-remote-XXXXXX` bare repo) built its worktree at the user's
+// default ~/.gstack-brain-worktree and registered it in the user's brain under
+// the temp remote's name; a later --uninstall from a DIFFERENT temp home then
+// rm -rf'd that directory without unregistering the source, leaving gbrain's
+// autopilot to skip a dead local_path every cycle.
+describe('gstack-gbrain-source-wireup — worktree ownership (no dangling sources)', () => {
+  const addCalls = () => gbrainCalls().filter((c) => c.startsWith('gbrain sources add'));
+
+  test('overridden GSTACK_HOME + default worktree path: refuses without touching the worktree or gbrain', () => {
+    const otherHome = path.join(tmpHome, 'elsewhere', 'gstack');
+    setupRepoAt(otherHome, '/var/folders/xx/T/brain-sync-remote-abc123');
+    makeFakeGbrain({});
+    const r = run([], { env: { GSTACK_HOME: otherHome, GSTACK_BRAIN_WORKTREE: '', GSTACK_BRAIN_NO_SYNC: '1' } });
+    expect(r.status).toBe(0); // benign skip, like every other non-strict prereq miss
+    expect(r.stderr).toContain('refusing');
+    expect(fs.existsSync(path.join(tmpHome, '.gstack-brain-worktree'))).toBe(false);
+    expect(addCalls()).toEqual([]);
+  });
+
+  test('same mismatch under --strict: exits 2', () => {
+    const otherHome = path.join(tmpHome, 'elsewhere', 'gstack');
+    setupRepoAt(otherHome, '/var/folders/xx/T/brain-sync-remote-abc123');
+    makeFakeGbrain({});
+    const r = run(['--strict'], { env: { GSTACK_HOME: otherHome, GSTACK_BRAIN_WORKTREE: '', GSTACK_BRAIN_NO_SYNC: '1' } });
+    expect(r.status).toBe(2);
+    expect(addCalls()).toEqual([]);
+  });
+
+  test('--uninstall from another repo leaves this repo\'s worktree and source alone', () => {
+    setupGstackRepo('git@github.com:user/gstack-brain-user.git');
+    makeFakeGbrain({});
+    run([], { env: { GSTACK_BRAIN_NO_SYNC: '1' } });
+    const otherHome = path.join(tmpHome, 'other-gstack');
+    setupRepoAt(otherHome, 'git@github.com:user/gstack-brain-other.git');
+    const r = run(['--uninstall'], { env: { GSTACK_HOME: otherHome } });
+    expect(r.status).toBe(0);
+    expect(fs.existsSync(path.join(worktreeDir, '.git'))).toBe(true);
+    expect(readState().sources.map((s) => s.id)).toEqual(['gstack-brain-user']);
+  });
+
+  test('--uninstall after the parent .git is already gone (gstack-brain-uninstall order) still removes its own worktree + source', () => {
+    setupGstackRepo('git@github.com:user/gstack-brain-user.git');
+    makeFakeGbrain({});
+    run([], { env: { GSTACK_BRAIN_NO_SYNC: '1' } });
+    fs.rmSync(path.join(gstackHome, '.git'), { recursive: true, force: true });
+    fs.writeFileSync(path.join(tmpHome, '.gstack-brain-remote.txt'), 'git@github.com:user/gstack-brain-user.git\n');
+    const r = run(['--uninstall']);
+    expect(r.status).toBe(0);
+    expect(fs.existsSync(worktreeDir)).toBe(false);
+    expect(readState().sources).toHaveLength(0);
+  });
+
+  test('--uninstall unregisters every source still pointing at the worktree it deletes', () => {
+    setupGstackRepo('git@github.com:user/gstack-brain-user.git');
+    makeFakeGbrain({});
+    run([], { env: { GSTACK_BRAIN_NO_SYNC: '1' } });
+    // A second registration of the same path under an id the current origin
+    // no longer derives (source-id drift, a migration rename).
+    const state = readState();
+    state.sources.push({ id: 'brain-sync-remote-mvzlmw', local_path: worktreeDir, federated: true });
+    fs.writeFileSync(gbrainStateFile, JSON.stringify(state, null, 2));
+    const r = run(['--uninstall']);
+    expect(r.status).toBe(0);
+    expect(fs.existsSync(worktreeDir)).toBe(false);
+    expect(readState().sources.filter((s) => s.local_path === worktreeDir)).toEqual([]);
+  });
+
+  test('wireup never replaces a worktree that belongs to another repo', () => {
+    setupGstackRepo('git@github.com:user/gstack-brain-user.git');
+    const otherHome = path.join(tmpHome, 'other-gstack');
+    setupRepoAt(otherHome, 'git@github.com:user/gstack-brain-other.git');
+    spawnSync('git', ['-C', otherHome, 'worktree', 'add', '-q', '--detach', worktreeDir], { stdio: 'pipe', timeout: 30_000 });
+    makeFakeGbrain({});
+    const r = run([], { env: { GSTACK_BRAIN_NO_SYNC: '1' } });
+    expect(r.status).not.toBe(0);
+    expect(fs.readFileSync(path.join(worktreeDir, '.git'), 'utf-8')).toContain(path.join('other-gstack', '.git', 'worktrees'));
+    expect(addCalls()).toEqual([]);
+  });
+
+  test('wireup never deletes a full repository sitting at the worktree path', () => {
+    setupGstackRepo('git@github.com:user/gstack-brain-user.git');
+    setupRepoAt(worktreeDir, 'git@github.com:user/some-project.git');
+    makeFakeGbrain({});
+    const r = run([], { env: { GSTACK_BRAIN_NO_SYNC: '1' } });
+    expect(r.status).not.toBe(0);
+    expect(fs.statSync(path.join(worktreeDir, '.git')).isDirectory()).toBe(true);
+    expect(fs.existsSync(path.join(worktreeDir, '.brain-allowlist'))).toBe(true);
+    expect(addCalls()).toEqual([]);
+  });
+});
