@@ -163,7 +163,7 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // wave's headline capability) grows the union to 1.195x. Deliberate:
     // the section is on-demand (loads only for Apple store targets), so
     // per-invocation cost for non-iOS ships is one manifest line.
-    maxSizeRatio: 1.322, // Shared advisory identity/dedup + critical-severity validation: 248,065 union bytes / 187,706 baseline = 1.3216 (2026-09-17).
+    maxSizeRatio: 1.335, // fork: Step 1.5 pr-prep gate (+2,647B) + single-select AskUserQuestion doctrine (+774B) over upstream's 246,324 union; measured 249,745 / 187,706 = 1.3305 (2026-09-25).
   },
   'plan-ceo-review': {
     skill: 'plan-ceo-review',
@@ -218,7 +218,7 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // 1.08 → 1.10: the scope-gate exceptions block (+ its adversarial-review
     // hardening: host-anchored mode signal, precedence, passing-mention
     // guards) and the plan-mode preamble reword land the union at 1.092.
-    maxSizeRatio: 1.15, // + clarity rules for saved decisions/setup gates; measured 1.146
+    maxSizeRatio: 1.156, // fork: +single-select AskUserQuestion doctrine (+650B) over upstream's 142,976; measured 143,626 / 124,597 = 1.1527 (2026-09-25)
   },
   'plan-design-review': {
     skill: 'plan-design-review',
@@ -404,7 +404,7 @@ do not launch the downstream skill or open a browser.`,
     // the cross-session decision-memory nudge) lands this carved skeleton just over
     // the strict 1.05; headroom for the shared preamble additions.
     // v1.64+v1.65 merge sums both waves' preamble growth; measured 1.073.
-    maxSizeRatio: 1.08,
+    maxSizeRatio: 1.092, // fork: +single-select AskUserQuestion doctrine (+774B) over upstream's 97,529; measured 98,303 / 90,375 = 1.0877 (2026-09-25)
   },
   cso: {
     skill: 'cso',
@@ -440,7 +440,7 @@ do not launch the downstream skill or open a browser.`,
     // The full-audit E2E asserts actual section loading alongside report/proof behavior.
     behavioral: 'external',
     externalTest: 'test/skill-e2e-cso.test.ts',
-    maxSkeletonBytes: 18_000,
+    maxSkeletonBytes: 18_100, // fork: +disable-model-invocation frontmatter (+31B) over upstream's 17,986; measured 18,017 (2026-09-25)
     minUnionBytes: 30_000, // v3 deliberately removes the shared export/startup preamble.
     mustContain: ['OWASP', 'STRIDE', 'daily', 'comprehensive', 'verif'],
     // Existing baseline comparison remains an upper bound; absolute limits above
