@@ -1669,20 +1669,36 @@ and the default is chosen by TTY: `resolveSyncHardDeadline` in
 `if (!opts.isTty) return mk(opts.defaultNonTtySec ?? 3600, 'default:non-tty')`,
 returning `null` (unbounded) otherwise. `cli.ts` calls it without
 `defaultNonTtySec`, so non-TTY means exactly one hour. `gstack-gbrain-sync.ts`
-spawns `gbrain` as a child with piped stdio, so `--full` always takes the
-bounded branch — while the identical command run by hand at a terminal is
-unbounded. The skill offers no passthrough for `--hard-deadline`,
+spawns the walk with stdout inherited (`["ignore", "inherit", "inherit"]`, or
+all `"ignore"` under `--quiet`; `bin/gstack-gbrain-sync.ts:1064`), so the child
+is non-TTY whenever its caller's stdout is not a terminal: always under an
+agent's Bash tool, which is how `/sync-gbrain` runs it, and always with
+`--quiet`. Run by hand at a terminal without `--quiet`, the same walk arms no
+watchdog. The skill offers no passthrough for `--hard-deadline`,
 `--no-hard-deadline`, or `GBRAIN_SYNC_MAX_RUNTIME_SECONDS`, and mentions none of
 them: a grep for all three over `*.ts`, `*.md` and `*.sh` in the gstack tree
 returns one unrelated hit (`test/gstack-next-version.test.ts:394`, a shard
 deadline).
 
+**gstack's own stage timeout fires first.** The walk is
+`spawnGbrain(walkArgs, { timeout: codeTimeoutMs })`, and `codeTimeoutMs`
+defaults to 35 minutes (`DEFAULT_STAGE_TIMEOUT_MS`,
+`bin/gstack-gbrain-sync.ts:128`). Its only override is
+`GSTACK_SYNC_CODE_TIMEOUT_MS` (clamped to 1 min–24 h), which appears in a code
+comment but not in the usage text or the skill. With defaults, gstack ends the
+walk at 2,100 s, before gbrain's 3,600 s watchdog; at the rate measured below
+that is about 1,000 of 3,414 files. The same timeout bounds the `reindex-code`
+pass that follows. A signal-killed `spawnSync` child has `status: null`, so the
+stage summary reads `gbrain sync ... exited null` and names neither the
+timeout nor the signal.
+
 **Why:** On a repo large enough to need `--full`, the run is killed before it
-ends, every time, with no supported override. Worse, it is killed PART WAY
-THROUGH a full import, so the code source is left holding a fraction of its
-pages rather than either the old index or a complete new one. The user sees a
+ends, every time, with no documented override for either budget. Worse, it is
+killed PART WAY THROUGH a full import, so the code source is left holding a
+fraction of its pages rather than either the old index or a complete new one. The user sees a
 stage that fails identically on every retry and no error that names the cause —
-the SIGKILL leaves only the watchdog's own heartbeat line in the log.
+when gbrain's watchdog is the one that fires, the SIGKILL leaves only its own
+heartbeat line in the log.
 
 **Fix:** Pass the budget through explicitly rather than inheriting a default
 meant for cron. Either (a) have `--full` set
@@ -1693,6 +1709,11 @@ meant for cron. Either (a) have `--full` set
 should say a deadline exists and how to move it, and the stage summary should
 name the deadline when a run dies on it. `resolveSyncHardDeadline` already reads
 the env var BEFORE the non-TTY default, so (a) needs no gbrain change.
+gstack's own `codeTimeoutMs` has to move in the same change, because raising
+either budget alone leaves the other one binding. The smallest version of (a)
+derives the child's `GBRAIN_SYNC_MAX_RUNTIME_SECONDS` from `codeTimeoutMs`, so
+one knob moves both, and documents `GSTACK_SYNC_CODE_TIMEOUT_MS` in the usage
+text.
 
 **Pros:** Small and gstack-local; gbrain needs no change, and its author already
 documents the env var as the supported lever for exactly this case. Makes
@@ -1710,8 +1731,16 @@ have killed it near 51%. `[sync-watchdog] hard deadline armed: 3600s + 30s grace
 command run from an interactive shell armed no watchdog at all until
 `--hard-deadline` was passed by hand. The resolver is byte-identical at
 `v0.50.5.0` and `v0.51.8.0`, and `cli.ts` still passes no `defaultNonTtySec` at
-the newer tag, so this is current rather than already fixed upstream. gbrain's
-own CHANGELOG (the watchdog release notes) states the intended remedy: "If you
+the newer tag, so this is current rather than already fixed upstream.
+Re-checked 2026-09-25 at `v0.57.0.0`: the `resolveSyncHardDeadline` body
+hashes identically at all three tags, and no caller under `src/` passes
+`defaultNonTtySec`. One caveat to "arms no watchdog at a terminal": on a
+PGLite brain with a live `gbrain serve`, sync is delegated to the serve
+(`src/commands/sync-delegate.ts`, since `v0.46.24.0`) and
+`deriveDelegatedTimeoutSeconds` maps a TTY's `null` to 3,600 s, so in that
+configuration a terminal run is bounded too. The env var still wins there,
+because the same resolver reads it first. gbrain's own CHANGELOG (the
+watchdog release notes) states the intended remedy: "If you
 run a legitimately long sync from cron (e.g. a first import of a very large
 brain), raise it: `GBRAIN_SYNC_MAX_RUNTIME_SECONDS=14400 gbrain sync ...`" — so
 the gap is gstack not exposing it, not gbrain behaving wrongly.
@@ -1719,13 +1748,17 @@ the gap is gstack not exposing it, not gbrain behaving wrongly.
 **Related:** `gstack-gbrain-sync.ts:241` advertises `--full` as "Honest ~25-35
 min for big Macs (ED2)". The measured rate above puts a 3414-file repo at ~2h,
 so the budget in the usage text and the deadline the child inherits disagree
-with each other AND with the observed cost. Re-measure and restate it in the
-same change.
+with each other AND with the observed cost. The 35-minute stage-timeout
+default matches the advertised figure, not the measured one. Re-measure and
+restate both in the same change.
 
-**Workaround until fixed:** `GBRAIN_SYNC_MAX_RUNTIME_SECONDS=21600 bun run
-~/.claude/skills/gstack/bin/gstack-gbrain-sync.ts --full` — the child inherits
-the variable and the resolver prefers it over the non-TTY default. Untested to
-completion here: the run it was needed for was abandoned before it finished.
+**Workaround until fixed:** raise both budgets:
+`GSTACK_SYNC_CODE_TIMEOUT_MS=21600000 GBRAIN_SYNC_MAX_RUNTIME_SECONDS=21600 bun
+run ~/.claude/skills/gstack/bin/gstack-gbrain-sync.ts --full`. The first lifts
+gstack's 35-minute stage timeout to 6 h; the child inherits the second, and the
+resolver prefers it over the non-TTY default. Setting only the gbrain variable
+still ends the walk at 35 minutes. Untested to completion here: the run it was
+needed for was abandoned before it finished.
 
 ---
 
