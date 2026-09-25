@@ -18,6 +18,7 @@ import { ARCHIVE_CHECK, FRESH_WORK_PREFIX, PRIVATE_RECEIPT_READ, classifyParentD
   inspectParentDomain, inspectUidProcesses, inspectUserDomain,
   ownedUserDomainTarget, ownsFreshAccount, ownsLaunchService, parseDirectoryIds, parseDirectoryRecord, passiveUserDomainState,
   runFreshAccountQualification, uidProcessFacts } from '../../.github/scripts/run-dia-native-qualification';
+import { liveProcessArgv, MOCK_KEYCHAIN_SWITCHES, mockKeychainChromium } from './fixtures/mock-keychain-chromium';
 
 const require = createRequire(import.meta.url);
 const root = mkdtempSync(path.join(tmpdir(), 'dia-qualification-test-'));
@@ -1625,7 +1626,9 @@ with tarfile.open(file, 'w') as out:
   test('the pinned Playwright launch is captured with the observer installed after importing Playwright', async () => {
     const { chromium } = await import('playwright');
     expect(require('playwright/package.json').version).toBe('1.62.1');
-    const executable = realpathSync(chromium.executablePath());
+    // Chromium stands in for Dia, and nativeDiaLaunchOptions strips the keychain
+    // mocks; the shim puts them back behind the spawn policy (see the fixture).
+    const executable = mockKeychainChromium(mkdtempSync(path.join(root, 'stand-in-')), realpathSync(chromium.executablePath()));
     const profile = path.join(root, 'playwright-profile');
     const observer = observeBrowserLaunches(new Map([[executable, profile]]));
     let context: Awaited<ReturnType<typeof chromium.launchPersistentContext>> | undefined;
@@ -1648,6 +1651,10 @@ with tarfile.open(file, 'w') as out:
         expectedProfile: true, detached: true, shellDisabled: true, stdioCount: 5, extraPipeDescriptors: true,
         headlessFlag: true, blankStartupArgument: true, tcpDebuggingFlag: false, mockKeychainFlag: false,
         passwordStoreFlag: false, firstRunSuppressed: false, sandboxRequired: process.platform === 'darwin', sandboxDisablingFlag: false });
+      // The policy saw the production argv above; the browser itself must still
+      // run keychain-mocked, or a scratch HOME raises "Keychain Not Found".
+      const live = liveProcessArgv(observer.children[0].pid);
+      for (const flag of MOCK_KEYCHAIN_SWITCHES) expect(live).toContain(flag);
       expect(JSON.stringify(observer.attempts)).not.toContain(executable);
       expect(JSON.stringify(observer.attempts)).not.toContain(profile);
       const page = context.pages()[0] ?? await context.newPage();
