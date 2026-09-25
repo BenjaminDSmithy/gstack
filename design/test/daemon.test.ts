@@ -362,24 +362,23 @@ describe("daemon /shutdown", () => {
       req("POST", `/boards/${board.id}/api/feedback`, { regenerated: false }),
     );
     // The handler arms setTimeout(gracefulShutdown, 50), and gracefulShutdown
-    // arms setTimeout(process.exit, 50). bun test runs ALL files in one
-    // process, so letting that exit fire would kill the whole suite ~100ms
-    // later (exit 0, no summary — see test/no-suicide-exit.test.ts). Stub
-    // process.exit, wait past both timers so they fire harmlessly while
-    // stubbed, then restore. (resetForTest does NOT defuse the timers: the
-    // exit callback is unconditional.)
-    const origExit = process.exit;
-    (process as any).exit = (() => undefined) as any;
+    // arms a 50ms exit timer. bun test runs ALL files in one process, so a
+    // real process.exit would kill the whole suite (exit 0, no summary — see
+    // test/no-suicide-exit.test.ts). Inject the exit and wait for the call
+    // itself. A fixed sleep raced the chain: under load both timers came due
+    // together, the sleep resolved first, and the real exit fired afterwards.
+    let restoreExit = (): void => {};
+    const exited = new Promise<number>((resolve) => {
+      restoreExit = __testInternals__.setExitForTest(resolve);
+    });
     try {
       const r = await fetchHandler(req("POST", "/shutdown"));
       expect(r.status).toBe(200);
       const body = (await r.json()) as any;
       expect(body.shuttingDown).toBe(true);
-      // Let both 50ms timers (gracefulShutdown, then its process.exit) fire
-      // against the stub before restoring the real process.exit.
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(await exited).toBe(0);
     } finally {
-      (process as any).exit = origExit;
+      restoreExit();
     }
     // Reset state for subsequent tests (gracefulShutdown set shuttingDown).
     resetDaemon();

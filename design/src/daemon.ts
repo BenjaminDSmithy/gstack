@@ -86,6 +86,9 @@ let idleExtensions = 0;
 let shuttingDown = false;
 let serverRef: ReturnType<typeof Bun.serve> | null = null;
 let idleInterval: ReturnType<typeof setInterval> | null = null;
+// Injectable so in-process tests can drive the real shutdown path without
+// terminating the shared `bun test` process. Production never replaces it.
+let exitProcess: (code: number) => void = (code) => process.exit(code);
 const startTime = Date.now();
 const daemonLog = openDaemonLog();
 
@@ -203,7 +206,10 @@ async function gracefulShutdown(exitCode = 0): Promise<void> {
   }
   removeStateFile();
   if (daemonLog) daemonLog.end();
-  setTimeout(() => process.exit(exitCode), 50);
+  // Capture at arm time: a test that restores the real exit before this timer
+  // fires must not have it called on the shared test process.
+  const exit = exitProcess;
+  setTimeout(() => exit(exitCode), 50);
 }
 
 export function idleCheckTick(): void {
@@ -578,5 +584,13 @@ export const __testInternals__ = {
     lastMeaningfulActivity = Date.now();
     idleExtensions = 0;
     shuttingDown = false;
+  },
+  /** Replace the shutdown exit; returns a restore function. */
+  setExitForTest: (fn: (code: number) => void): (() => void) => {
+    const previous = exitProcess;
+    exitProcess = fn;
+    return () => {
+      exitProcess = previous;
+    };
   },
 };
