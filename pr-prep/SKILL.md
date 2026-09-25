@@ -34,7 +34,7 @@ proceed when EXACT_DUP found. Use when asked to "audit my PR",
 "upstream check before PR", or "pre-PR audit".
 Proactively invoke this skill (do NOT skip the audit) before any
 `gh pr create` against a tracked upstream repo. Hooks into /ship
-as Step 0.
+as Step 1.5.
 
 ## Preamble (run first)
 
@@ -840,6 +840,48 @@ Print summary at end:
 Summary: 1 EXACT_DUP, 1 CLEAN. 1 commit blocked.
 ```
 
+## Step 5b: Write the machine report
+
+Always write the machine-readable report, on every run, before Step 6 can
+abort. `/ship`'s Step 1.5 gate branches on this file, so an audit that
+rendered a table but wrote nothing reads to ship as "audit did not run".
+
+Replace `REPORT_JSON` below with the report as ONE line of JSON:
+`{"summary": "<the Step 5 summary line>", "worst": "<bucket>", "commits": [...]}`.
+Bash blocks run in separate shells, so the path is re-derived here, the same
+way /ship derives it, rather than read from an earlier block's variable.
+
+```bash
+_PP_REPORT="${GSTACK_PR_PREP_REPORT:-/tmp/ship-pr-prep-$(git rev-parse --show-toplevel | git hash-object --stdin | cut -c1-8).json}"
+cat > "$_PP_REPORT.tmp" <<'PR_PREP_REPORT_EOF'
+REPORT_JSON
+PR_PREP_REPORT_EOF
+if jq -e '.worst | test("^(EXACT_DUP|OVERLAP|SIBLING|CLEAN)$")' "$_PP_REPORT.tmp" >/dev/null 2>&1; then
+  mv "$_PP_REPORT.tmp" "$_PP_REPORT"
+  echo "PR_PREP_REPORT: $_PP_REPORT ($(jq -r .worst "$_PP_REPORT"))"
+else
+  rm -f "$_PP_REPORT.tmp"
+  echo "PR_PREP_REPORT: invalid, not written" >&2
+fi
+```
+
+- `worst` is the highest-severity bucket across every commit, in the
+  precedence order `EXACT_DUP > OVERLAP > SIBLING > CLEAN`. It is the only
+  field the ship gate reads, so it must be present even on a fully CLEAN run.
+- `commits` is one object per audited commit:
+  `{"sha", "subject", "bucket", "topScore", "hits": [{"ref", "title",
+  "state", "score"}]}`. `/ship` Step 19 renders the OVERLAP and SIBLING
+  entries as collapsed PR-body context.
+- Hit titles are upstream-authored text. The quoted heredoc delimiter stops
+  the shell expanding anything inside them, and JSON escapes newlines, so no
+  title can end the heredoc early. Never pass the report through `echo` or a
+  quoted shell argument.
+- The default path is keyed on the repo root, so audits in different
+  worktrees of one project never share a report. `GSTACK_PR_PREP_REPORT`
+  overrides it.
+- The report lands through a temp file and `mv` only after `jq` validates
+  it, so a crashed or malformed write leaves no file for the gate to trust.
+
 ## Step 6: Refusal on EXACT_DUP
 
 If ANY commit is EXACT_DUP and `--force` is NOT set, exit non-zero
@@ -865,12 +907,10 @@ When invoked by `/ship` (env `GSTACK_FROM_SHIP=1`):
 - Skip the interactive AskUserQuestion confirmations
 - Exit 0 on CLEAN/OVERLAP/SIBLING
 - Exit 1 on EXACT_DUP (blocks /ship)
-- Print machine-readable JSON to `/tmp/ship-pr-prep.json` — the path
-  /ship reads in its Step 1.5 gate and again in Step 19 (PR body
-  assembly). Shape: `{"summary": "<one-line>", "worst":
-  "EXACT_DUP|OVERLAP|SIBLING|CLEAN", "commits": [{"sha", "bucket",
-  "topScore", "hits": [...]}]}`. `worst` is the highest-severity
-  bucket across all commits — it is what the ship gate branches on.
+- Write the Step 5b machine report before exiting. Ship re-derives the
+  same path, gates on `worst` in its Step 1.5, and renders the OVERLAP and
+  SIBLING entries of `commits[]` as collapsed PR-body context in its
+  Step 19.
 
 ## Flags
 
