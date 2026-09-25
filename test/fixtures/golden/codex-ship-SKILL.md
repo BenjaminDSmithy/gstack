@@ -657,13 +657,20 @@ Skip on:
 Otherwise run the gate. First the precondition probe:
 
 ```bash
+_PP_REPORT="${GSTACK_PR_PREP_REPORT:-/tmp/ship-pr-prep-$(git rev-parse --show-toplevel | git hash-object --stdin | cut -c1-8).json}"
 if gh repo view --json nameWithOwner -q .nameWithOwner >/dev/null 2>&1; then
   echo "PR_PREP_GATE: run"
 else
   echo "PR_PREP_GATE: skip (no upstream repo detected)"
 fi
-rm -f /tmp/ship-pr-prep.json
+rm -f "$_PP_REPORT"
+echo "PR_PREP_REPORT: $_PP_REPORT"
 ```
+
+The report path is keyed on the repo root, so two ships running in
+different worktrees of the same project never read each other's verdict.
+Bash blocks run in separate shells: every block that touches the report
+re-derives the path with the same line, and pr-prep's Step 5b does too.
 
 If `PR_PREP_GATE` is `skip`, continue to Step 2.
 
@@ -675,21 +682,26 @@ integration contract (its Step 7):
 - Treat `GSTACK_FROM_SHIP` as set: skip pr-prep's own AskUserQuestion
   confirmations, it is ship that owns the gate decision
 - Use `--base "$BASE_BRANCH"` for the commit walk
-- Write pr-prep's machine-readable report to `/tmp/ship-pr-prep.json`
+- Write pr-prep's machine-readable report through its Step 5b
   (`{"summary": "...", "worst": "EXACT_DUP|OVERLAP|SIBLING|CLEAN",
-  "commits": [...]}`) before returning here
+  "commits": [...]}`) before returning here, including on EXACT_DUP
 
 Then enforce the gate on that report:
 
 ```bash
-if [ ! -f /tmp/ship-pr-prep.json ]; then
+_PP_REPORT="${GSTACK_PR_PREP_REPORT:-/tmp/ship-pr-prep-$(git rev-parse --show-toplevel | git hash-object --stdin | cut -c1-8).json}"
+if [ ! -f "$_PP_REPORT" ]; then
   echo "[ship] pr-prep produced no report — continuing (audit not run)" >&2
 else
-  PR_PREP_WORST=$(jq -r '.worst // "CLEAN"' /tmp/ship-pr-prep.json 2>/dev/null || echo CLEAN)
-  jq -r '.summary // empty' /tmp/ship-pr-prep.json 2>/dev/null || true
+  PR_PREP_WORST=$(jq -r '.worst // "CLEAN"' "$_PP_REPORT" 2>/dev/null || echo CLEAN)
+  jq -r '.summary // empty' "$_PP_REPORT" 2>/dev/null || true
   echo "PR_PREP_WORST: $PR_PREP_WORST"
 fi
 ```
+
+If the report is missing but the inline audit you just ran bucketed any
+commit EXACT_DUP, treat `PR_PREP_WORST` as `EXACT_DUP`. A lost report
+must never un-block a duplicate.
 
 If `PR_PREP_WORST` is `EXACT_DUP` and `--skip-pr-prep` was not passed,
 ABORT ship and print:
@@ -704,10 +716,10 @@ ABORT ship and print:
 
 `OVERLAP` / `SIBLING` / `CLEAN` are informational — continue to Step 2.
 
-Note: the JSON report path (`/tmp/ship-pr-prep.json`) is read again in
-Step 19 (PR body assembly) to surface SIBLING / OVERLAP findings as a
-collapsed "Upstream context" section in the PR body. SIBLING context
-helps reviewers triage faster; it does NOT block ship.
+Note: the report is read again in Step 19 (PR body assembly) to
+surface SIBLING / OVERLAP findings as a collapsed "Upstream context"
+section in the PR body. SIBLING context helps reviewers triage faster;
+it does NOT block ship.
 
 If the pr-prep skill is not installed (older gstack install), fall
 through with a stderr warn and continue. Don't hard-fail ship on a
