@@ -99,6 +99,19 @@ describe('small helpers', () => {
   });
 });
 
+describe('gstack-upgrade defers to fork-sync on fork installs', () => {
+  test('Step 0 runs before the upgrade question and before any pull or discard', () => {
+    for (const file of ['gstack-upgrade/SKILL.md.tmpl', 'gstack-upgrade/SKILL.md']) {
+      const text = fs.readFileSync(path.join(ROOT, file), 'utf8');
+      const step0 = text.indexOf('### Step 0: Fork installs');
+      expect(step0).toBeGreaterThan(-1);
+      expect(text).toContain('contrib/fork-sync/fork-sync.ts');
+      expect(step0).toBeLessThan(text.indexOf('### Step 1:'));
+      expect(step0).toBeLessThan(text.indexOf("git checkout -- 'SKILL.md'"));
+    }
+  });
+});
+
 // ─── End to end, against sandbox repos ──────────────────────────────────────
 
 interface Sandbox {
