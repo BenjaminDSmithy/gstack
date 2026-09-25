@@ -7,6 +7,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { compareDiaLaunchReceipts, normalizedLaunchHashes } from '../../.github/scripts/dia-launch-driver.mjs';
 import { runDiaLaunchComparison, safeDiaComparisonResponse } from '../../.github/scripts/qualify-dia-macos';
+import { mockKeychainChromium } from './fixtures/mock-keychain-chromium';
 
 const root = realpathSync(mkdtempSync(path.join(tmpdir(), 'dc-')));
 const driverFile = path.resolve(import.meta.dir, '../../.github/scripts/dia-launch-driver.mjs');
@@ -61,7 +62,9 @@ describe('diagnostic-only Dia runtime comparison', () => {
     const node = Bun.which('node');
     if (!node) throw new Error('Node 24.18 is required for the comparison regression');
     const entry = path.join(root, 'probe.mjs');
-    const executablePath = realpathSync((await import('playwright')).chromium.executablePath());
+    // Chromium stands in for Dia, and runProtectedLaunch strips the keychain
+    // mocks; the shim puts them back behind the spawn policy (see the fixture).
+    const executablePath = mockKeychainChromium(root, realpathSync((await import('playwright')).chromium.executablePath()));
     writeFileSync(entry, `import { runProtectedLaunch } from ${JSON.stringify(pathToFileURL(driverFile).href)};
       const home = process.env.HOME;
       const result = await runProtectedLaunch(${JSON.stringify(executablePath)}, home + '/profile',
