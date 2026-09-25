@@ -157,7 +157,10 @@ describe('sidepanel-terminal.js: eager auto-connect + injection API', () => {
   test('forceRestart helper closes ws, disposes xterm, returns to IDLE', () => {
     expect(TERM_JS).toContain('function forceRestart');
     const fn = TERM_JS.slice(TERM_JS.indexOf('function forceRestart'));
-    expect(fn).toContain('ws && ws.close()');
+    // v1.44 gave the intentional close an explicit code/reason so the
+    // re-attach loop can tell it apart from a transient drop (1006). The
+    // close still happens; the bare `ws.close()` literal does not.
+    expect(fn).toContain("ws && ws.close(4001, 'intentional-restart')");
     expect(fn).toContain('term.dispose()');
     expect(fn).toContain('STATE.IDLE');
     expect(fn).toContain('tryAutoConnect()');
@@ -222,8 +225,20 @@ describe('cli.ts: sidebar-agent is no longer spawned', () => {
   });
 
   test('Terminal-agent spawn survives', () => {
-    expect(CLI_SRC).toContain('terminal-agent.ts');
-    expect(CLI_SRC).toMatch(/Bun\.spawn\(\['bun',\s*'run',\s*termAgentScript\]/);
+    // The path literal moved into terminal-agent-control.ts when the spawn
+    // was extracted into spawnTerminalAgent() — cli.ts calls the helper and
+    // no longer names the file. Assert the call, and that the helper it calls
+    // is the one that resolves terminal-agent.ts.
+    expect(CLI_SRC).toContain("from './terminal-agent-control'");
+    expect(CLI_SRC).toContain('spawnTerminalAgent({');
+    const controlSrc = fs.readFileSync(
+      path.join(import.meta.dir, '..', 'src', 'terminal-agent-control.ts'),
+      'utf-8',
+    );
+    expect(controlSrc).toContain('terminal-agent.ts');
+    // The `bun run <script>` spawn moved into the helper along with the path
+    // resolution, so it is the helper that has to show it.
+    expect(controlSrc).toMatch(/spawn\(\['bun',\s*'run',\s*script\]/);
   });
 });
 
