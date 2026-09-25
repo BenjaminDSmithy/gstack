@@ -131,6 +131,8 @@ Completeness: use `Completeness: N/10` only when options differ in coverage. 10 
 
 Accepted shortcuts leave a trail: when the user selects an option that is BOTH Completeness ≤ 7 AND a durable-scope call (architecture or scope-cut — never a turn-level choice), log it via `gstack-decision-log` with the ceiling and the upgrade trigger in the rationale, and — as part of implementing that option, same edit, no follow-up question — mark each cut corner in code with `gstack-shortcut(dec-<id>): <ceiling>, upgrade when <trigger>` in the language's comment syntax. Never agent-initiated: the marker exists only downstream of the user's explicit choice. /retro harvests these into a debt ledger, joined on the decision id.
 
+Single-select is the DEFAULT — options are mutually exclusive. Set `multiSelect: true` only when every option is an independently-selectable atom whose pro/con/effort stands alone; then score `Completeness: <atom>=X/10` per atom. Bundles or combinations of the same underlying items (`E1+E3`, `All three`, `E1 only`, `Defer all`) are mutually exclusive by construction — `multiSelect: false`, score per option LETTER, and never write "Multi-select" into the question text. Tell: a defer/none option or a do-everything option in the list proves the question is single-select. With 5+ independent atoms use the split chain below, not multiSelect.
+
 `Pros / cons:` in question text; descriptions use literal ✅/❌ bullets, not Pro:/Con:. Each real option: ≥2 pros and ≥1 con, ≥40 chars each. One-way/destructive escape: `✅ No cons — this is a hard-stop choice`.
 
 Neutral posture: `Recommendation: <default> — this is a taste call, no strong preference either way`; `(recommended)` STAYS on the default option for AUTO_DECIDE.
@@ -169,6 +171,7 @@ Before calling AskUserQuestion, verify:
 - [ ] ELI10 paragraph present (stakes line too)
 - [ ] Recommendation line present with concrete reason
 - [ ] Completeness scored (coverage) OR kind-note present (kind)
+- [ ] `multiSelect: false` unless every option is an independently-selectable atom (bundles/combinations ⇒ single-select)
 - [ ] `Pros / cons:` in question; options: ≥2 ✅, ≥1 ❌, ≥40 chars/bullet (or escape)
 - [ ] (recommended) label on one option (even for neutral-posture)
 - [ ] Dual-scale effort labels on effort-bearing options (human / CC)
@@ -658,7 +661,92 @@ For diffs >200 lines (`git diff origin/<base> --stat | tail -1`), recommend
 
 For Design Review: run `source <(~/.claude/skills/gstack/bin/gstack-diff-scope <base> 2>/dev/null)`. If `SCOPE_FRONTEND=true` and no design review exists, mention: "Design Review not run — Step 9 includes the lite check; consider /design-review for a full visual audit."
 
-Continue to Step 2 without asking; Step 9 applies the review gates.
+Continue to Step 1.5 without asking; Step 9 applies the review gates.
+
+---
+
+## Step 1.5: Upstream duplicate audit (pr-prep gate)
+
+Catches the case where a contributor's branch would file a PR that
+duplicates an already-open upstream PR or issue. Without this gate
+the duplicate gets filed and is closed days later, costing reviewer
+time + contributor goodwill.
+
+Skip on:
+- Forks that don't have a tracked upstream remote
+- Branches where the base is the user's own fork (no upstream to dup)
+- Explicit `--skip-pr-prep` flag
+
+Otherwise run the gate. First the precondition probe:
+
+```bash
+_PP_REPORT="${GSTACK_PR_PREP_REPORT:-/tmp/ship-pr-prep-$(git rev-parse --show-toplevel | git hash-object --stdin | cut -c1-8).json}"
+if gh repo view --json nameWithOwner -q .nameWithOwner >/dev/null 2>&1; then
+  echo "PR_PREP_GATE: run"
+else
+  echo "PR_PREP_GATE: skip (no upstream repo detected)"
+fi
+rm -f "$_PP_REPORT"
+echo "PR_PREP_REPORT: $_PP_REPORT"
+```
+
+The report path is keyed on the repo root, so two ships running in
+different worktrees of the same project never read each other's verdict.
+Bash blocks run in separate shells: every block that touches the report
+re-derives the path with the same line, and pr-prep's Step 5b does too.
+
+If `PR_PREP_GATE` is `skip`, continue to Step 2.
+
+If it is `run`, execute the pr-prep skill INLINE — there is no CLI
+runner for skills, so read `~/.claude/skills/gstack/pr-prep/SKILL.md`
+and follow it step by step in this session, under its `/ship`
+integration contract (its Step 7):
+
+- Treat `GSTACK_FROM_SHIP` as set: skip pr-prep's own AskUserQuestion
+  confirmations, it is ship that owns the gate decision
+- Use `--base "$BASE_BRANCH"` for the commit walk
+- Write pr-prep's machine-readable report through its Step 5b
+  (`{"summary": "...", "worst": "EXACT_DUP|OVERLAP|SIBLING|CLEAN",
+  "commits": [...]}`) before returning here, including on EXACT_DUP
+
+Then enforce the gate on that report:
+
+```bash
+_PP_REPORT="${GSTACK_PR_PREP_REPORT:-/tmp/ship-pr-prep-$(git rev-parse --show-toplevel | git hash-object --stdin | cut -c1-8).json}"
+if [ ! -f "$_PP_REPORT" ]; then
+  echo "[ship] pr-prep produced no report — continuing (audit not run)" >&2
+else
+  PR_PREP_WORST=$(jq -r '.worst // "CLEAN"' "$_PP_REPORT" 2>/dev/null || echo CLEAN)
+  jq -r '.summary // empty' "$_PP_REPORT" 2>/dev/null || true
+  echo "PR_PREP_WORST: $PR_PREP_WORST"
+fi
+```
+
+If the report is missing but the inline audit you just ran bucketed any
+commit EXACT_DUP, treat `PR_PREP_WORST` as `EXACT_DUP`. A lost report
+must never un-block a duplicate.
+
+If `PR_PREP_WORST` is `EXACT_DUP` and `--skip-pr-prep` was not passed,
+ABORT ship and print:
+
+```
+✗ Ship aborted: pr-prep found exact duplicate upstream work.
+  Resolution paths:
+    1. Close your version, comment on the upstream PR with your angle
+    2. Cherry-pick unique parts to a new branch + file separately
+    3. Override with /ship --skip-pr-prep if coordinated with the upstream PR author
+```
+
+`OVERLAP` / `SIBLING` / `CLEAN` are informational — continue to Step 2.
+
+Note: the report is read again in Step 19 (PR body assembly) to
+surface SIBLING / OVERLAP findings as a collapsed "Upstream context"
+section in the PR body. SIBLING context helps reviewers triage faster;
+it does NOT block ship.
+
+If the pr-prep skill is not installed (older gstack install), fall
+through with a stderr warn and continue. Don't hard-fail ship on a
+missing skill.
 
 ---
 
