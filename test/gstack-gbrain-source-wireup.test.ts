@@ -161,16 +161,20 @@ function gbrainCalls(): string[] {
     .filter((l) => l.trim());
 }
 
+function setupRepoAt(dir: string, remoteUrl: string) {
+  // Real git repo at dir with at least one commit + an origin remote.
+  fs.mkdirSync(dir, { recursive: true });
+  spawnSync('git', ['-C', dir, 'init', '-q', '-b', 'main'], { stdio: 'pipe', timeout: 30_000 });
+  spawnSync('git', ['-C', dir, 'config', 'user.email', 'test@example.com'], { stdio: 'pipe', timeout: 30_000 });
+  spawnSync('git', ['-C', dir, 'config', 'user.name', 'test'], { stdio: 'pipe', timeout: 30_000 });
+  fs.writeFileSync(path.join(dir, '.brain-allowlist'), '# allowlist\n');
+  spawnSync('git', ['-C', dir, 'add', '.'], { stdio: 'pipe', timeout: 30_000 });
+  spawnSync('git', ['-C', dir, 'commit', '-q', '-m', 'init'], { stdio: 'pipe', timeout: 30_000 });
+  spawnSync('git', ['-C', dir, 'remote', 'add', 'origin', remoteUrl], { stdio: 'pipe', timeout: 30_000 });
+}
+
 function setupGstackRepo(remoteUrl: string) {
-  // Real git repo at gstackHome with at least one commit + an origin remote.
-  fs.mkdirSync(gstackHome, { recursive: true });
-  spawnSync('git', ['-C', gstackHome, 'init', '-q', '-b', 'main'], { stdio: 'pipe', timeout: 30_000 });
-  spawnSync('git', ['-C', gstackHome, 'config', 'user.email', 'test@example.com'], { stdio: 'pipe', timeout: 30_000 });
-  spawnSync('git', ['-C', gstackHome, 'config', 'user.name', 'test'], { stdio: 'pipe', timeout: 30_000 });
-  fs.writeFileSync(path.join(gstackHome, '.brain-allowlist'), '# allowlist\n');
-  spawnSync('git', ['-C', gstackHome, 'add', '.'], { stdio: 'pipe', timeout: 30_000 });
-  spawnSync('git', ['-C', gstackHome, 'commit', '-q', '-m', 'init'], { stdio: 'pipe', timeout: 30_000 });
-  spawnSync('git', ['-C', gstackHome, 'remote', 'add', 'origin', remoteUrl], { stdio: 'pipe', timeout: 30_000 });
+  setupRepoAt(gstackHome, remoteUrl);
 }
 
 beforeEach(() => {
