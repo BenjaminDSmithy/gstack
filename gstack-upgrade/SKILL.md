@@ -33,6 +33,35 @@ Upgrade gstack to the latest version and show what's new.
 
 This section is referenced by all skill preambles when they detect `UPGRADE_AVAILABLE`.
 
+### Step 0: Fork installs
+
+A fork install carries its own commits on top of upstream, with an `upstream`
+remote beside `origin`. Steps 1-4 cannot upgrade it. They pull `origin main`,
+which on a fork is not upstream. Step 4 also discards uncommitted SKILL.md
+edits first. A fork that ships `contrib/fork-sync/` is upgraded by that job
+instead: it rebases onto upstream in a throwaway worktree, gates the result,
+and lands it. Check first:
+
+```bash
+_GD=$(cd "$HOME/.claude/skills/gstack" 2>/dev/null && pwd -P)
+if [ -n "$_GD" ] && [ -f "$_GD/contrib/fork-sync/fork-sync.ts" ] && git -C "$_GD" remote get-url upstream >/dev/null 2>&1; then
+  echo "FORK_INSTALL=$_GD"
+  bun "$_GD/contrib/fork-sync/fork-sync.ts" status --brief 2>/dev/null || true
+else
+  echo "FORK_INSTALL="
+fi
+```
+
+**If `FORK_INSTALL` is non-empty:** skip Steps 1-4 and do not ask about
+upgrading, whatever `auto_upgrade` says. Tell the user in one line that
+upstream v{new} is available and that fork-sync upgrades this install, and
+quote the status line printed above. If the user invoked /gstack-upgrade
+directly, also give them the command that runs the job now:
+`bun <FORK_INSTALL>/contrib/fork-sync/fork-sync.ts run`. Then continue with the
+current skill.
+
+**Otherwise:** continue to Step 1.
+
 ### Step 1: Ask the user (or auto-upgrade)
 
 First, check if auto-upgrade is enabled:
