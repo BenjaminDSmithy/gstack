@@ -23,7 +23,9 @@
 #
 # Env:
 #   GSTACK_HOME — override ~/.gstack (test harness)
-#   GSTACK_BRAIN_WORKTREE — override worktree path (default ~/.gstack-brain-worktree)
+#   GSTACK_BRAIN_WORKTREE — override worktree path (default ~/.gstack-brain-worktree,
+#                           which only pairs with the default GSTACK_HOME; an
+#                           overridden GSTACK_HOME without this set is refused)
 #   GSTACK_BRAIN_SOURCE_ID — id override; --source-id flag takes precedence
 #   GSTACK_BRAIN_NO_SYNC — skip the gbrain sync step (tests; helper still
 #                          ensures source registration)
@@ -129,6 +131,53 @@ safe_rm_worktree() {
   esac
 }
 
+# Physical path of an existing directory; the plain path (trailing slash
+# dropped) when it does not exist. macOS reaches /private/var/folders through
+# the /var symlink, and git records the resolved form.
+_phys() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s\n' "${1%/}"; }
+
+# ---- worktree ownership ----
+# A registered source must never outlive its directory. Two rules keep the
+# worktree and its registration paired:
+#
+# 1. The DEFAULT worktree path belongs to the DEFAULT artifacts repo. Pairing
+#    $HOME/.gstack-brain-worktree with any other GSTACK_HOME (a test harness's
+#    temp clone, a second artifacts repo) builds that repo's worktree in the
+#    user's path and registers it in the user's brain under the other repo's
+#    name. That is how `brain-sync-remote-XXXXXX` sources appeared: a test ran
+#    brain-restore from a temp home with the real HOME. An explicit
+#    GSTACK_BRAIN_WORKTREE opts out, because the caller chose the pairing.
+worktree_scope_ok() {
+  [ -n "${GSTACK_BRAIN_WORKTREE:-}" ] && return 0
+  [ "$(_phys "$GSTACK_HOME")" = "$(_phys "$HOME/.gstack")" ]
+}
+
+# 2. Only a worktree OF $GSTACK_HOME is ours to replace or delete. Deleting
+#    another repo's worktree strands whatever is registered at that path.
+#    Prints: absent | stray (dir, no .git) | ours | foreign (another repo's
+#    worktree, or a repository of its own). Judged from the text of
+#    $WORKTREE/.git, not `git rev-parse`: gstack-brain-uninstall deletes
+#    $GSTACK_HOME/.git before calling --uninstall, and from then on git cannot
+#    resolve the worktree at all. A relative gitdir (worktree.useRelativePaths)
+#    that no longer resolves reads as foreign: never delete what cannot be
+#    proven ours.
+worktree_owner() {
+  if [ ! -e "$WORKTREE" ]; then echo absent; return 0; fi
+  if [ -d "$WORKTREE/.git" ]; then echo foreign; return 0; fi
+  if [ ! -f "$WORKTREE/.git" ]; then echo stray; return 0; fi
+  local gitdir home_phys
+  gitdir=$(sed -n 's/^gitdir: //p' "$WORKTREE/.git" 2>/dev/null | head -1)
+  case "$gitdir" in
+    /*) : ;;
+    ?*) gitdir="$(cd "$WORKTREE" 2>/dev/null && cd "$(dirname "$gitdir")" 2>/dev/null && pwd -P)/$(basename "$gitdir")" ;;
+  esac
+  home_phys=$(_phys "$GSTACK_HOME")
+  case "$gitdir" in
+    "${GSTACK_HOME%/}/.git/worktrees/"?* | "$home_phys/.git/worktrees/"?*) echo ours ;;
+    *) echo foreign ;;
+  esac
+}
+
 # ---- source-id derivation (D6 multi-fallback) ----
 derive_source_id() {
   if [ -n "$SOURCE_ID" ]; then
@@ -181,7 +230,13 @@ ensure_worktree() {
   if [ ! -d "$GSTACK_HOME/.git" ]; then
     return 2
   fi
-  if [ -d "$WORKTREE/.git" ] || [ -f "$WORKTREE/.git" ]; then
+  local owner
+  owner=$(worktree_owner)
+  if [ "$owner" = "foreign" ]; then
+    warn "$WORKTREE is not a worktree of $GSTACK_HOME (another repo's worktree, or a repository of its own); refusing to replace it. Move it aside or set GSTACK_BRAIN_WORKTREE to another path."
+    return 3
+  fi
+  if [ "$owner" = "ours" ]; then
     # already exists; advance the detached HEAD to parent's current HEAD
     if [ "$NO_PULL" = "0" ]; then
       local sha
@@ -226,6 +281,27 @@ check_source_state() {
   return 1
 }
 
+# Unregister every source whose local_path is the worktree about to be deleted,
+# not just the id the current origin derives: a registration left under an
+# older id (a renamed origin, the v1.27 source-id migration) would otherwise
+# outlive the directory. Best-effort, like the rest of uninstall.
+unregister_sources_at_worktree() {
+  if ! command -v jq >/dev/null 2>&1; then
+    warn "jq missing; cannot check for other sources registered at $WORKTREE"
+    return 0
+  fi
+  local sid wt_phys
+  wt_phys=$(_phys "$WORKTREE")
+  { gbrain sources list --json 2>/dev/null \
+      | jq -r --arg p "$WORKTREE" --arg q "$wt_phys" \
+          '.sources[]? | select(.local_path == $p or .local_path == $q) | .id' 2>/dev/null \
+      || true; } | while IFS= read -r sid; do
+    [ -n "$sid" ] || continue
+    gbrain sources remove "$sid" --yes 2>&1 | prefix || warn "gbrain sources remove $sid failed (continuing)"
+  done
+  return 0
+}
+
 # ---- modes ----
 do_probe() {
   local id worktree_status="absent" gbrain_status="missing" source_status="absent"
@@ -256,6 +332,13 @@ do_probe() {
 }
 
 do_wireup() {
+  if ! worktree_scope_ok; then
+    local scope_msg="GSTACK_HOME is $GSTACK_HOME, but the default worktree $WORKTREE belongs to $HOME/.gstack; refusing to wire another repo into it or register it in this user's brain. Set GSTACK_BRAIN_WORKTREE to pair them explicitly."
+    [ "$STRICT" = "1" ] && die "$scope_msg" 2
+    warn "$scope_msg (benign skip)"
+    exit 0
+  fi
+
   local id
   id=$(derive_source_id) || die "cannot derive source id (no .git, no remote-file, no --source-id)" 2
 
@@ -281,6 +364,7 @@ do_wireup() {
       warn "no $GSTACK_HOME/.git; skipping (benign skip)"
       exit 0
       ;;
+    3) die "not wiring $WORKTREE: it belongs to another repo" 1 ;;
     *) die "git worktree creation failed at $WORKTREE" 1 ;;
   esac
 
@@ -405,17 +489,31 @@ do_advance_only() {
 }
 
 do_uninstall() {
-  local id
+  if ! worktree_scope_ok; then
+    warn "GSTACK_HOME is $GSTACK_HOME, but the default worktree $WORKTREE belongs to $HOME/.gstack; leaving it and its gbrain registration alone. Set GSTACK_BRAIN_WORKTREE to pair them explicitly."
+    exit 0
+  fi
+
+  local id owner
   id=$(derive_source_id) || die "cannot derive source id; pass --source-id <id> explicitly" 3
+  owner=$(worktree_owner)
 
   if command -v gbrain >/dev/null 2>&1; then
     gbrain sources remove "$id" --yes 2>&1 | prefix || warn "gbrain sources remove failed (continuing)"
+    if [ "$owner" = "ours" ]; then
+      unregister_sources_at_worktree
+    fi
   fi
 
-  if [ -d "$WORKTREE/.git" ] || [ -f "$WORKTREE/.git" ]; then
-    git -C "$GSTACK_HOME" worktree remove --force "$WORKTREE" 2>/dev/null \
-      || safe_rm_worktree "$WORKTREE"
-  fi
+  case "$owner" in
+    ours)
+      git -C "$GSTACK_HOME" worktree remove --force "$WORKTREE" 2>/dev/null \
+        || safe_rm_worktree "$WORKTREE"
+      ;;
+    foreign)
+      warn "$WORKTREE is not a worktree of $GSTACK_HOME; leaving it and whatever is registered at it alone"
+      ;;
+  esac
 
   # Cron-stub: future launchd plist (not created today; safety net for D9 future).
   rm -f "$PLIST_PATH" 2>/dev/null || true
