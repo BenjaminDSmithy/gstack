@@ -18,6 +18,15 @@
  * symlink to the interpreter running the test, plus the standard system dirs.
  * bun resolves; gbrain (installed via `bun link`, so it lives beside bun in
  * ~/.bun/bin) does not.
+ *
+ * The shim also links `git` to the git the test runner itself resolves. On
+ * macOS the system dirs put /usr/bin/git first, and that is Apple's xcrun
+ * shim, not git: it runs cold for every fresh HOME, and these tests mkdtemp a
+ * fresh HOME per case. Measured at load ~115: /usr/bin/git median 835ms, max
+ * 1914ms; Homebrew git median 53ms, max 154ms. gstack-memory-ingest resolves
+ * a transcript's remote with a 2000ms cap, so the shim intermittently turned
+ * an attributable session into "unattributed". Linking the runner's own git
+ * keeps git resolving exactly as it does outside the hermetic PATH.
  */
 import { mkdtempSync, symlinkSync, existsSync } from 'fs';
 import { join } from 'path';
@@ -28,19 +37,24 @@ export const SYSTEM_PATH = '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr
 
 let cachedShimDir: string | null = null;
 
-/** A directory containing only a `bun` symlink to the running interpreter. */
-export function bunShimDir(): string {
+/**
+ * A directory holding only `bun` (the running interpreter) and `git` (the git
+ * on the runner's own PATH, when there is one).
+ */
+export function toolShimDir(): string {
   if (cachedShimDir && existsSync(join(cachedShimDir, 'bun'))) return cachedShimDir;
   const dir = mkdtempSync(join(tmpdir(), 'gstack-bun-shim-'));
   symlinkSync(process.execPath, join(dir, 'bun'));
+  const git = Bun.which('git');
+  if (git) symlinkSync(git, join(dir, 'git'));
   cachedShimDir = dir;
   return dir;
 }
 
 /**
- * PATH with `bun` available and `gbrain` deliberately absent.
+ * PATH with `bun` and `git` available and `gbrain` deliberately absent.
  * Anything passed in is prepended, so callers can add their own fake bins.
  */
 export function hermeticPath(...prepend: string[]): string {
-  return [...prepend, bunShimDir(), SYSTEM_PATH].join(':');
+  return [...prepend, toolShimDir(), SYSTEM_PATH].join(':');
 }
