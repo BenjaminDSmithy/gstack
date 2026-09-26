@@ -192,6 +192,17 @@ export function droppedSubjects(before: string[], after: string[]): string[] {
 }
 
 const FAIL_LINE = /^ {2}✗ (.+?) — (.+)$/;
+/**
+ * Tests that spawn nested bun test runs report the CHILD file, which lives in
+ * a random temp dir (`private/var/folders/…/tmp/auq-parallel-free-KQFZsC/
+ * registration.test.ts`). The random segment never matches across trees, so
+ * those paths are normalised to `(nested)/<basename>` and never isolated: the
+ * parent test that spawned them fails in its own right.
+ */
+const NESTED_PATH = /(^|\/)(private\/)?(var\/folders|tmp)\//;
+export function normaliseTestPath(file: string): string {
+  return NESTED_PATH.test(file) ? `(nested)/${file.split('/').pop()}` : file;
+}
 const CRASH_LINE = /^ {2}⚠ crashed\+retried: (.+)$/;
 const SHARD_LINE = /^\[test:free\] shard (\d+)\/(\d+): \d+ files, \d+s, (pass|fail|timed-out)$/;
 
@@ -209,14 +220,18 @@ export function parseSuiteLog(text: string): SuiteResult {
     const line = raw.replace(/\r$/, '');
     const fail = FAIL_LINE.exec(line);
     if (fail) {
-      const file = fail[1].trim();
+      const file = normaliseTestPath(fail[1].trim());
       result.failures.add(`${file} — ${fail[2].trim()}`);
       if (file === '(unattributed)') result.unattributed += 1;
-      else result.failingFiles.add(file);
+      else if (!file.startsWith('(nested)/')) result.failingFiles.add(file);
       continue;
     }
     const crash = CRASH_LINE.exec(line);
-    if (crash) { result.crashed.add(crash[1].trim()); continue; }
+    if (crash) {
+      const file = normaliseTestPath(crash[1].trim());
+      if (!file.startsWith('(nested)/')) result.crashed.add(file);
+      continue;
+    }
     const shard = SHARD_LINE.exec(line);
     if (shard) {
       result.shardsSeen.add(Number(shard[1]));
@@ -243,7 +258,7 @@ export function gateCandidates(ours: SuiteResult, base: SuiteResult, touchedTest
   for (const key of ours.failures) {
     if (base.failures.has(key)) continue;
     const file = key.split(' — ')[0];
-    if (file !== '(unattributed)') files.add(file);
+    if (file !== '(unattributed)' && !file.startsWith('(nested)/')) files.add(file);
   }
   for (const file of ours.crashed) if (!base.crashed.has(file)) files.add(file);
   for (const file of touchedTests) if (ours.failingFiles.has(file) || ours.crashed.has(file)) files.add(file);
@@ -575,11 +590,14 @@ async function isolatedPasses(cfg: Config, root: string, file: string, logFile: 
 }
 
 async function judge(cfg: Config, ours: SuiteResult, base: SuiteResult, touchedTests: string[], oursRoot: string, baseRoot: string, runDir: string): Promise<GateVerdict> {
+  // Isolate first, judge completeness second: a regression confirmed in
+  // isolation is definitive even when a shard wedged, and naming it is what
+  // makes the STOP actionable. An incomplete run with nothing confirmed can
+  // prove nothing either way, so it stays inconclusive.
   const v: GateVerdict = { verdict: 'pass', regressions: [], flaky: [], baseline: [], reasons: [] };
   if (!suiteComplete(ours)) {
     v.verdict = 'inconclusive';
     v.reasons.push(ours.timedOut ? 'a shard of the rebased suite timed out' : 'the rebased suite did not finish every shard');
-    return v;
   }
   const unattributed = oursOnlyUnattributed(ours, base);
   if (unattributed > 0) {
@@ -588,6 +606,11 @@ async function judge(cfg: Config, ours: SuiteResult, base: SuiteResult, touchedT
   }
   for (const file of gateCandidates(ours, base, touchedTests)) {
     const isoLog = path.join(runDir, 'isolate.log');
+    if (!fs.existsSync(path.join(oursRoot, file))) {
+      // Attributed to a path this tree does not have: not a file we can re-run.
+      v.reasons.push(`skipped ${file}: not a file in the rebased tree`);
+      continue;
+    }
     if (await isolatedPasses(cfg, oursRoot, file, isoLog)) { v.flaky.push(file); continue; }
     if (!fs.existsSync(path.join(baseRoot, file))) { v.regressions.push(`${file} (new on our side, fails)`); continue; }
     if (await isolatedPasses(cfg, baseRoot, file, isoLog)) v.regressions.push(file);

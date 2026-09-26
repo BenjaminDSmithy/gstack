@@ -43,7 +43,11 @@ directory). It hands off to this job and skips its own pull and discard.
    - base passes that file in isolation, or doesn't have it.
 
    A test file our commits touch gets re-run in isolation even when both sides
-   fail, so a red baseline cannot hide a regression there.
+   fail, so a red baseline cannot hide a regression there. Failures that nested
+   fixture runs report under a random temp path compare by basename and are
+   never isolated; the parent test that spawned them fails in its own right. A
+   regression confirmed in isolation STOPS the run even when a shard wedged.
+   An incomplete run with nothing confirmed is `INCONCLUSIVE`, and retries.
 6. **Land.** These steps run in order:
    - Re-verify the live checkout: same branch, same tip, clean.
    - Push the old tip to `origin` as a `backup/fork-sync-*` ref, unless origin

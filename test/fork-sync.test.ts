@@ -65,6 +65,15 @@ describe('suite log parsing', () => {
     expect(suiteComplete(parseSuiteLog('no epilogue at all'))).toBe(false);
   });
 
+  test('nested fixture runs report temp paths; those compare by basename and are never isolated', () => {
+    const ours = parseSuiteLog('  ✗ private/var/folders/qh/x/T/gstack-free-shard-AB/tmp/auq-parallel-free-KQ/registration.test.ts — t');
+    const base = parseSuiteLog('  ✗ private/var/folders/qh/x/T/gstack-free-shard-ZZ/tmp/auq-parallel-free-YY/registration.test.ts — t');
+    expect([...ours.failures]).toEqual(['(nested)/registration.test.ts — t']);
+    expect([...ours.failingFiles]).toEqual([]);
+    expect(gateCandidates(ours, base, [])).toEqual([]);
+    expect(gateCandidates(ours, parseSuiteLog(''), [])).toEqual([]);
+  });
+
   test('gate candidates: ours-only failures and crashes, plus touched tests failing anywhere', () => {
     const ours = parseSuiteLog(['  ✗ test/a.test.ts — x', '  ✗ test/b.test.ts — y', '  ✗ test/t.test.ts — z', '  ⚠ crashed+retried: test/c.test.ts'].join('\n'));
     const base = parseSuiteLog(['  ✗ test/b.test.ts — y', '  ✗ test/t.test.ts — z'].join('\n'));
@@ -152,9 +161,10 @@ function makeSandbox(opts: { pushCarried?: boolean } = {}): Sandbox {
   write(path.join(bin, 'suite'), [
     `#!${BASH}`,
     'n=0; [ -f .fake-failures ] && n=$(grep -c . .fake-failures)',
+    'end=fail; [ -f .fake-wedge ] && end=timed-out',
     'echo "[test:free] full suite: 3 files across 1 shard processes"',
     'if [ "$n" -gt 0 ]; then',
-    '  echo "[test:free] shard 1/1: 3 files, 1s, fail"',
+    '  echo "[test:free] shard 1/1: 3 files, 1s, $end"',
     '  echo "[test:free] FAIL — $n failing test(s) in 1 file(s), 0 crashed worker(s). Full log: /dev/null"',
     '  while IFS= read -r l; do [ -n "$l" ] && echo "  ✗ $l"; done < .fake-failures',
     '  exit 1',
@@ -340,15 +350,33 @@ describe('fork-sync run (sandbox repos)', () => {
     expect(notes(sb)[0]).toContain('test/ours.test.ts');
   });
 
+  e2e('a wedged shard is inconclusive, unless isolation confirms a regression, which then STOPS', (sb) => {
+    commit(sb.durable, sb.env, 'feat: ours wedges a shard', { '.fake-wedge': 'x\n', '.fake-failures': 'test/ok.test.ts — flaked\n' });
+    git(sb.durable, sb.env, 'push', '-q', 'origin', 'feat/x-1.0.0');
+    upstreamShips(sb, '1.1.0.0', { 'up.txt': 'up\n' });
+    const flakyOnly = runSync(sb);
+    expect(flakyOnly.code).toBe(2);
+    expect(flakyOnly.out).toContain('INCONCLUSIVE');
+
+    commit(sb.durable, sb.env, 'feat: ours also breaks a test', {
+      '.fake-failures': 'test/ok.test.ts — flaked\ntest/bad.test.ts — breaks\n', '.fake-iso-fail': 'test/bad.test.ts\n', 'test/bad.test.ts': '//\n',
+    });
+    git(sb.durable, sb.env, 'push', '-q', 'origin', 'feat/x-1.0.0');
+    const confirmed = runSync(sb);
+    expect(confirmed.code).toBe(3);
+    expect(confirmed.out).toContain('BLOCKED_REGRESSION');
+    expect(notes(sb).some((l) => l.includes('test/bad.test.ts'))).toBe(true);
+  });
+
   e2e('a red baseline does not block, and an ours-only failure that passes in isolation is flaky', (sb) => {
-    commit(sb.durable, sb.env, 'feat: ours has a flaky test', { 'flaky.txt': 'x\n' });
+    commit(sb.durable, sb.env, 'feat: ours has a flaky test', { 'test/flaky.test.ts': '//\n' });
     git(sb.durable, sb.env, 'push', '-q', 'origin', 'feat/x-1.0.0');
     // Upstream is red on its own test (fails in isolation too) …
     upstreamShips(sb, '1.1.0.0', {
       '.fake-failures': 'test/base.test.ts — red upstream\n', '.fake-iso-fail': 'test/base.test.ts\n', 'test/base.test.ts': '//\n',
     });
     // … and ours adds a failure that isolation clears.
-    const r1 = runSync(sb, ['--suite-cmd', `${path.join(sb.bin, 'suite')}; s=$?; [ -f flaky.txt ] && echo '  ✗ test/flaky.test.ts — once'; exit $s`]);
+    const r1 = runSync(sb, ['--suite-cmd', `${path.join(sb.bin, 'suite')}; s=$?; [ -f test/flaky.test.ts ] && echo '  ✗ test/flaky.test.ts — once'; exit $s`]);
     expect(r1.out).toContain('LANDED');
     const gate = stateJson(sb).lastRun.gate;
     expect(gate.verdict.flaky).toEqual(['test/flaky.test.ts']);
