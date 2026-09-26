@@ -17,23 +17,6 @@
  */
 import { afterEach, beforeAll } from 'bun:test';
 
-// Narrowly restore PATH after every test. Defends against the recurring
-// pollution class where one test sets `process.env.PATH = '/test/bin:/usr/bin'`
-// to exercise a scrubbed-env fixture and either forgets to restore or uses
-// the broken `process.env = origEnv` reassignment, then a downstream test
-// (security.test.ts > resolveBashBinary, pair-agent-tunnel-eval, or
-// server-no-import-side-effects) sees the wrong PATH and either has
-// `Bun.which('bash')` return null or `Bun.spawn(['bun', ...])` ENOENT.
-//
-// Deliberately narrow: snapshotting + restoring all of process.env breaks
-// tests that legitimately set per-file env at module top-level (e.g.,
-// domain-skills-storage.test.ts assigns `process.env.GSTACK_HOME` at
-// import time so the loaded module reads the test sandbox path on first
-// invocation — wiping that on afterEach would route reads at the user's
-// real ~/.gstack and the test would assert on the wrong filesystem).
-//
-// If a future test pollutes a different variable in the same broken way,
-// add it to RESTORE_KEYS rather than widening the snapshot scope.
 // ─── Per-test timeout ──────────────────────────────────────────────────
 //
 // Set with `--timeout` on the command line (scripts/test-free-shards.ts
@@ -99,6 +82,23 @@ const realExit = process.exit.bind(process);
   throw err;
 }) as any;
 
+// Narrowly restore PATH after every test. Defends against the recurring
+// pollution class where one test sets `process.env.PATH = '/test/bin:/usr/bin'`
+// to exercise a scrubbed-env fixture and either forgets to restore or uses
+// the broken `process.env = origEnv` reassignment, then a downstream test
+// (security.test.ts > resolveBashBinary, pair-agent-tunnel-eval, or
+// server-no-import-side-effects) sees the wrong PATH and either has
+// `Bun.which('bash')` return null or `Bun.spawn(['bun', ...])` ENOENT.
+//
+// Deliberately narrow: snapshotting + restoring all of process.env breaks
+// tests that legitimately set per-file env at module top-level (e.g.,
+// domain-skills-storage.test.ts assigns `process.env.GSTACK_HOME` at
+// import time so the loaded module reads the test sandbox path on first
+// invocation — wiping that on afterEach would route reads at the user's
+// real ~/.gstack and the test would assert on the wrong filesystem).
+//
+// If a future test pollutes a different variable in the same broken way,
+// add it to RESTORE_KEYS rather than widening the snapshot scope.
 const RESTORE_KEYS = ['PATH', 'Path'] as const;
 const baseline: Record<string, string | undefined> = {};
 
