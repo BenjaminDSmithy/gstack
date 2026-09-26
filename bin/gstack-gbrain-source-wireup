@@ -282,7 +282,7 @@ check_source_state() {
   return 1
 }
 
-# gbrain >= 0.42 refuses `--yes` alone for a source holding pages or facts
+# gbrain v0.26.5+ refuses `--yes` alone for a source holding pages or facts
 # ("To proceed, pass --confirm-destructive"), so a populated source survived
 # uninstall while its worktree was deleted. Uninstall is the user's explicit
 # teardown: pass both. Older gbrain matches flags with args.includes() and
