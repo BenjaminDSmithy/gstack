@@ -117,6 +117,9 @@ describe('gstack-upgrade defers to fork-sync on fork installs', () => {
       expect(text).toContain('contrib/fork-sync/fork-sync.ts');
       expect(step0).toBeLessThan(text.indexOf('### Step 1:'));
       expect(step0).toBeLessThan(text.indexOf("git checkout -- 'SKILL.md'"));
+      // No `cd`, not even in a subshell: shell guards that keep agents out of
+      // ~/.claude refuse any `cd` into it, and the live link lives there.
+      expect(text.slice(step0, text.indexOf('### Step 1:'))).not.toMatch(/\bcd\s/);
     }
   });
 });
