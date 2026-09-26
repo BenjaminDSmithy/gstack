@@ -484,6 +484,47 @@ describe('test-free-shards: strict shard execution', () => {
     }
   });
 
+  // lib/cso/state.ts refuses private state under a symlink ancestor, by
+  // design. macOS os.tmpdir() is /var/folders/..., and /var is a symlink to
+  // private/var, so an unresolved shard TMPDIR failed 222 CSO tests there.
+  // The parent's temp dir is routed through a symlink so this bites on Linux too.
+  test.skipIf(process.platform === 'win32')('shard TMPDIR has no symlink ancestor, even when the parent reaches its temp dir through one', async () => {
+    const captureDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'free-shard-realtmp-')));
+    const realParent = path.join(captureDir, 'real');
+    const linkedParent = path.join(captureDir, 'linked');
+    fs.mkdirSync(realParent, { mode: 0o700 });
+    fs.symlinkSync(realParent, linkedParent);
+    const dump = path.join(captureDir, 'env.json');
+    const parentTmp = process.env.TMPDIR;
+    try {
+      const script =
+        `const fs = require("fs"), path = require("path");`
+        + `const tmp = process.env.TMPDIR, links = [];`
+        + `for (let p = tmp; ; p = path.dirname(p)) {`
+        + `  if (fs.lstatSync(p).isSymbolicLink()) links.push(p);`
+        + `  if (path.dirname(p) === p) break;`
+        + `}`
+        + `fs.writeFileSync(${JSON.stringify(dump)}, JSON.stringify({ tmp, links }));`
+        + `console.log(${JSON.stringify(SUMMARY_1)});`;
+      process.env.TMPDIR = linkedParent;
+      expect(os.tmpdir()).toBe(linkedParent);
+      const outcome = await runFreeShard(['symlink-ancestors'], 1, 1, {
+        commandFor: () => ({ command: process.execPath, args: ['-e', script] }),
+        logFilePath: path.join(captureDir, 'shard.log'),
+        quiet: true,
+        log: () => {},
+      });
+      expect(outcome.status).toBe('passed');
+      const seen = JSON.parse(fs.readFileSync(dump, 'utf8'));
+      expect(seen.links).toEqual([]);
+      expect(seen.tmp.startsWith(realParent + path.sep)).toBe(true);
+    } finally {
+      if (parentTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = parentTmp;
+      fs.rmSync(captureDir, { recursive: true, force: true });
+    }
+  });
+
   test('concurrent shards isolate browser state and remove it on success or failure', async () => {
     const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'free-shard-browse-'));
     const inheritedState = path.join(captureDir, 'host-browse.json');
