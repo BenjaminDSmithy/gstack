@@ -97,6 +97,8 @@ export interface Config {
   force: boolean;
   branch: string | null;
   onto: string | null;
+  /** Local branch kept fast-forwarded to upstream ('' disables). */
+  mirrorBranch: string;
   scheduled: boolean;
   deferNotifyAfter: number;
 }
@@ -374,6 +376,7 @@ export function defaultConfig(env: NodeJS.ProcessEnv = process.env): Config {
     force: false,
     branch: null,
     onto: null,
+    mirrorBranch: 'main',
     scheduled: false,
     deferNotifyAfter: 6,
   };
@@ -389,7 +392,7 @@ export function parseArgs(argv: string[], base: Config = defaultConfig()): Confi
     '--install-cmd': 'installCmd', '--freshness-cmd': 'freshnessCmd', '--build-cmd': 'buildCmd',
     '--suite-cmd': 'suiteCmd', '--isolate-cmd': 'isolateCmd', '--setup-cmd': 'setupCmd',
     '--proof-cmd': 'proofCmd', '--proof-expect': 'proofExpect', '--notify': 'notifyCmd',
-    '--branch': 'branch', '--onto': 'onto',
+    '--branch': 'branch', '--onto': 'onto', '--mirror-branch': 'mirrorBranch',
   };
   const bool: Record<string, keyof Config> = {
     '--ignore-load': 'ignoreLoad', '--no-land': 'noLand', '--dry-run': 'dryRun',
@@ -531,6 +534,31 @@ function dirtyReasons(repo: string): string[] {
     if (fs.existsSync(path.join(gitDir, marker))) reasons.push(`in progress: ${marker}`);
   }
   return reasons;
+}
+
+/**
+ * Keep the fork's local mirror branch (main) fast-forwarded to upstream.
+ * Claude Desktop cuts new worktrees from local `main`; on this fork it sat at
+ * v1.57.8.0 for months, so every new worktree started on a tree whose
+ * brain-sync test wrote real HOME state. Fast-forward only, never while the
+ * branch is checked out, never pushed (pushing main is the owner's call).
+ */
+function advanceMirror(cfg: Config, repo: string): void {
+  if (!cfg.mirrorBranch || cfg.dryRun || cfg.noLand) return;
+  const ref = `refs/heads/${cfg.mirrorBranch}`;
+  const current = git(repo, 'rev-parse', '--verify', '--quiet', ref).stdout;
+  const tip = git(repo, 'rev-parse', '--verify', '--quiet', `${cfg.upstreamRemote}/${cfg.upstreamBranch}^{commit}`).stdout;
+  if (!current || !tip || current === tip) return;
+  if (git(repo, 'worktree', 'list', '--porcelain').stdout.split('\n').includes(`branch ${ref}`)) {
+    logLine(cfg, `mirror: ${cfg.mirrorBranch} is checked out somewhere; left at ${current.slice(0, 8)}`);
+    return;
+  }
+  if (!isAncestor(repo, current, tip)) {
+    logLine(cfg, `mirror: ${cfg.mirrorBranch} has commits upstream lacks; left at ${current.slice(0, 8)}`);
+    return;
+  }
+  const r = git(repo, 'update-ref', ref, tip, current);
+  logLine(cfg, r.code === 0 ? `mirror: ${cfg.mirrorBranch} ${current.slice(0, 8)} -> ${tip.slice(0, 8)}` : `mirror: update-ref failed: ${r.stderr}`);
 }
 
 /** Remote branches (on `remote`) that contain `sha`, after the fetch. */
@@ -718,6 +746,7 @@ export async function run(cfg: Config): Promise<RunResult> {
       const f = sh('git', ['fetch', '--quiet', remote], { cwd: repo, env: GIT_ENV, timeoutMs: 180_000 });
       if (f.code !== 0) return finish('DEFERRED_FETCH', `git fetch ${remote} failed: ${f.stderr.slice(0, 200)}`);
     }
+    advanceMirror(cfg, repo);
     const ontoRef = cfg.onto ?? `${cfg.upstreamRemote}/${cfg.upstreamBranch}`;
     const U = gitOk(repo, 'rev-parse', '--verify', `${ontoRef}^{commit}`);
     const T = gitOk(repo, 'rev-parse', '--verify', `refs/heads/${branch}^{commit}`);
