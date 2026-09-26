@@ -363,7 +363,12 @@ function kernelContract(mode: string) {
     const boundary = "await import('bun:ffi')";
     if (source.split(boundary).length !== 2) throw new Error('FFI adapter boundary changed');
     const javascript = new Bun.Transpiler({ loader: 'ts' }).transformSync(source.replace(boundary, 'globalThis.__nativeCookieFfi'));
-    const { createNativeCookieJob, joinNativeCookieJob } = await import('data:text/javascript;base64,' + Buffer.from(javascript).toString('base64'));
+    // A file, not a data: URL: Bun 1.3.13 throws NameTooLong on data: specifiers past ~1.5 KB.
+    const moduleDir = require('node:fs').mkdtempSync(require('node:path').join(${JSON.stringify(root)}, 'native-job-module-'));
+    const modulePath = require('node:path').join(moduleDir, 'cookie-import-native-job.mjs');
+    await Bun.write(modulePath, javascript);
+    const { createNativeCookieJob, joinNativeCookieJob } = await import(require('node:url').pathToFileURL(modulePath).href);
+    require('node:fs').rmSync(moduleDir, { recursive: true, force: true });
     Object.defineProperty(process, 'platform', { value: 'win32' });
     if (${JSON.stringify(mode)} === 'create') {
       const job = await createNativeCookieJob();
