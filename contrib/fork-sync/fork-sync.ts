@@ -111,6 +111,8 @@ export interface SuiteResult {
   unattributed: number;
   shardsSeen: Set<number>;
   shardTotal: number;
+  /** Shards that died by signal, exited abnormally, or were truncated: their files did not all run. */
+  abnormal: Set<number>;
   timedOut: boolean;
   passedWhole: boolean;
 }
@@ -207,6 +209,10 @@ export function normaliseTestPath(file: string): string {
 }
 const CRASH_LINE = /^ {2}⚠ crashed\+retried: (.+)$/;
 const SHARD_LINE = /^\[test:free\] shard (\d+)\/(\d+): \d+ files, \d+s, (pass|fail|timed-out)$/;
+// The runner's own verdicts on a shard that did not run all its files:
+// `failed with exit code signal|<n>` (1 is an ordinary test failure) and
+// `exited 0 but … Treating as FAILED.` (a truncated run).
+const SHARD_ABNORMAL = /^\[test:free\] shard (\d+)\/\d+ (?:failed with exit code (signal|\d+)|exited 0 but .*Treating as FAILED\.)/;
 
 /**
  * Parse the free runner's output (scripts/test-free-shards.ts). Each shard
@@ -216,7 +222,7 @@ const SHARD_LINE = /^\[test:free\] shard (\d+)\/(\d+): \d+ files, \d+s, (pass|fa
 export function parseSuiteLog(text: string): SuiteResult {
   const result: SuiteResult = {
     failures: new Set(), failingFiles: new Set(), crashed: new Set(), unattributed: 0,
-    shardsSeen: new Set(), shardTotal: 0, timedOut: false, passedWhole: false,
+    shardsSeen: new Set(), shardTotal: 0, abnormal: new Set(), timedOut: false, passedWhole: false,
   };
   for (const raw of text.split('\n')) {
     const line = raw.replace(/\r$/, '');
@@ -234,6 +240,8 @@ export function parseSuiteLog(text: string): SuiteResult {
       if (!file.startsWith('(nested)/')) result.crashed.add(file);
       continue;
     }
+    const abnormal = SHARD_ABNORMAL.exec(line);
+    if (abnormal && abnormal[2] !== '1') { result.abnormal.add(Number(abnormal[1])); continue; }
     const shard = SHARD_LINE.exec(line);
     if (shard) {
       result.shardsSeen.add(Number(shard[1]));
@@ -246,7 +254,7 @@ export function parseSuiteLog(text: string): SuiteResult {
 
 /** A run is complete when every shard 1..N printed its epilogue line and none timed out. */
 export function suiteComplete(r: SuiteResult): boolean {
-  if (r.timedOut || r.shardTotal === 0) return false;
+  if (r.timedOut || r.shardTotal === 0 || r.abnormal.size > 0) return false;
   for (let i = 1; i <= r.shardTotal; i += 1) if (!r.shardsSeen.has(i)) return false;
   return true;
 }
