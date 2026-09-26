@@ -299,6 +299,9 @@ describe('fork-sync run (sandbox repos)', () => {
     expect(git(sb.durable, sb.env, 'ls-remote', '--heads', 'origin', 'feat/x-1.1.0')).toContain(after.head);
     expect(git(sb.durable, sb.env, 'rev-parse', '--abbrev-ref', '@{u}')).toBe('origin/feat/x-1.1.0');
     expect(fs.readFileSync(path.join(sb.home, '.gstack', 'just-upgraded-from'), 'utf8').trim()).toBe('1.0.0.0');
+    // Local main (where new worktrees are cut) is fast-forwarded to upstream; origin/main is not pushed.
+    expect(git(sb.durable, sb.env, 'rev-parse', 'main')).toBe(up);
+    expect(git(sb.durable, sb.env, 'ls-remote', '--heads', 'origin', 'main')).not.toContain(up);
     const n = notes(sb);
     expect(n).toHaveLength(1);
     expect(n[0]).toContain('landed');
@@ -316,9 +319,13 @@ describe('fork-sync run (sandbox repos)', () => {
     upstreamShips(sb, '1.1.0.0', { 'a.txt': 'UPSTREAM one\nline two\n' });
     const before = liveState(sb);
 
+    // A main with its own commit is never moved.
+    git(sb.durable, sb.env, 'branch', '-f', 'main', 'feat/x-1.0.0');
     const r = runSync(sb);
     expect(r.code).toBe(3);
     expect(r.out).toContain('BLOCKED_CONFLICT');
+    expect(r.out).toContain('main has commits upstream lacks');
+    expect(git(sb.durable, sb.env, 'rev-parse', 'main')).toBe(before.head);
     expect(liveState(sb)).toEqual(before);
     expect(git(sb.durable, sb.env, 'status', '--porcelain', '--untracked-files=no')).toBe('');
     const n = notes(sb);
