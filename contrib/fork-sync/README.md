@@ -24,8 +24,11 @@ directory). It hands off to this job and skips its own pull and discard.
    another free-suite run is in progress. It defers at most 3 runs in a row;
    after that it runs anyway, because a box that is always busy would
    otherwise never land. Isolated re-runs absorb the flakes that load causes.
-2. **Fetch.** If the branch already contains `upstream/main`, the outcome is
-   `UP_TO_DATE`.
+2. **Fetch.** Local `main` is fast-forwarded to `upstream/main`, because
+   Claude Desktop cuts new worktrees from it. That happens only when it can
+   fast-forward, only when `main` isn't checked out anywhere, and it is never
+   pushed; `--mirror-branch ''` turns it off. If the working branch already
+   contains `upstream/main`, the outcome is `UP_TO_DATE`.
 3. **Rebase** the branch tip onto `upstream/main` in a throwaway detached
    worktree under `~/worktrees/<repo>/fork-sync-*`. Rebased commits keep
    their author and name `gstack fork-sync` as committer. Commits upstream
