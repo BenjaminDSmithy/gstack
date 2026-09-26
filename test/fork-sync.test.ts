@@ -63,6 +63,11 @@ describe('suite log parsing', () => {
     expect(suiteComplete(parseSuiteLog(log.replace('20s, pass', '20s, timed-out')))).toBe(false);
     expect(suiteComplete(parseSuiteLog(log.replace('[test:free] shard 2/2: 4 files, 20s, pass', '')))).toBe(false);
     expect(suiteComplete(parseSuiteLog('no epilogue at all'))).toBe(false);
+    // A shard killed by a signal still prints its epilogue line, but did not run every file.
+    expect(suiteComplete(parseSuiteLog(`[test:free] shard 2/2 failed with exit code signal\n${log}`))).toBe(false);
+    expect(suiteComplete(parseSuiteLog(`[test:free] shard 2/2 exited 0 but never printed the summary. Treating as FAILED.\n${log}`))).toBe(false);
+    // An ordinary failing shard (exit 1) is complete.
+    expect(suiteComplete(parseSuiteLog(`[test:free] shard 1/2 failed with exit code 1\n${log}`))).toBe(true);
   });
 
   test('nested fixture runs report temp paths; those compare by basename and are never isolated', () => {
