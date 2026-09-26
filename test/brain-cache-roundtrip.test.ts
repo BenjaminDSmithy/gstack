@@ -38,7 +38,8 @@ beforeEach(() => {
   //   - PATH: spawnGbrain() resolves the bare name `gbrain` through PATH.
   //   - HOME: buildGbrainEnv() reads ~/.gbrain/config.json and seeds
   //     DATABASE_URL from it, pointing the spawned gbrain at a real DB.
-  // bunfig.toml's preload restores process.env after every test.
+  // test-setup.ts (bunfig's preload) restores PATH after every test; HOME
+  // is put back by the afterEach below.
   process.env.PATH = hermeticPath();
   process.env.HOME = TMP_USER_HOME;
   // Reload the cache module fresh per test so it picks up the new HOME.
