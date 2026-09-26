@@ -933,6 +933,13 @@ describe('scan', () => {
 });
 
 describe('design-review REPORT_DIR agrees with the allow-list', () => {
+  // DETECT_REFUSED clips its target to DETECT_LIMITS.field.refusedTarget, and
+  // a macOS shard TMPDIR (/private/var/folders/.../gstack-free-shard-*/tmp)
+  // puts these paths past it. Expect exactly what the contract prints.
+  const refused = (target: string) => {
+    const n = DETECT_LIMITS.field.refusedTarget;
+    return `${SENTINEL.DETECT_REFUSED}: ${target.length > n ? `${target.slice(0, n - 1)}…` : target}`;
+  };
   for (const config of [
     { name: 'GSTACK_HOME', gstack: 'configured state', plugin: undefined, pluginRoot: undefined, expected: 'configured state' },
     { name: 'the gstack plugin', gstack: undefined, plugin: 'plugin state', pluginRoot: '/plugins/GsTaCk', expected: 'plugin state' },
@@ -974,9 +981,11 @@ describe('design-review REPORT_DIR agrees with the allow-list', () => {
     try {
       const s = run(['scan', '--format', 'gstack', dom + '/home.dom.html', outside, link], { env: { ...env, IMPECCABLE_BIN: FAKE, IMPECCABLE_FAKE_LOG: log } });
       expect(s.code).toBe(2);
-      expect(s.err).not.toContain(`${SENTINEL.DETECT_REFUSED}: ${dom}/home.dom.html`);
-      expect(s.err).toContain(`${SENTINEL.DETECT_REFUSED}: ${outside}`);
-      expect(s.err).toContain(`${SENTINEL.DETECT_REFUSED}: ${link}`);
+      // A temp root deep enough to clip both into one prefix would hide the negative check.
+      expect(refused(link)).not.toBe(refused(`${dom}/home.dom.html`));
+      expect(s.err).not.toContain(refused(`${dom}/home.dom.html`));
+      expect(s.err).toContain(refused(outside));
+      expect(s.err).toContain(refused(link));
       const argv = JSON.parse(fs.readFileSync(log, 'utf-8').trim().split('\n')[0]).argv as string[];
       expect(argv.slice(2)).toEqual(['--no-inline-ignores', fs.realpathSync(path.join(dom, 'home.dom.html'))]);
     } finally {
