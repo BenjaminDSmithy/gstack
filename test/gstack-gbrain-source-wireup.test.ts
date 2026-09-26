@@ -470,6 +470,19 @@ describe('gstack-gbrain-source-wireup — --database-url lock (defends against e
     expect(writingCalls[0]).toContain(`[GBRAIN_DATABASE_URL=${FILE_URL}]`);
   });
 
+  test('unparseable config.json: warns that the URL is not locked and carries on', () => {
+    setupGstackRepo('git@github.com:user/gstack-brain-user.git');
+    makeFakeGbrain({});
+    fs.mkdirSync(path.join(tmpHome, '.gbrain'), { recursive: true });
+    fs.writeFileSync(path.join(tmpHome, '.gbrain', 'config.json'), '{ not json');
+    const r = run([], {
+      env: { GSTACK_BRAIN_NO_SYNC: '1', GBRAIN_DATABASE_URL: '', DATABASE_URL: '' },
+    });
+    expect(r.stderr).not.toContain('command not found');
+    expect(r.stderr).toContain('URL not locked');
+    expect(r.status).toBe(0);
+  });
+
   test('--database-url overrides env GBRAIN_DATABASE_URL and config.json', () => {
     setupGstackRepo('git@github.com:user/gstack-brain-user.git');
     makeFakeGbrain({});
