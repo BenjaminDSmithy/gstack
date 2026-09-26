@@ -40,7 +40,7 @@ instead: it rebases onto upstream in a throwaway worktree, gates the result,
 and lands it. Check first:
 
 ```bash
-_GD=$(cd "$HOME/.claude/skills/gstack" 2>/dev/null && pwd -P)
+_GD=$(git -C "$HOME/.claude/skills/gstack" rev-parse --show-toplevel 2>/dev/null)
 if [ -n "$_GD" ] && [ -f "$_GD/contrib/fork-sync/fork-sync.ts" ] && git -C "$_GD" remote get-url upstream >/dev/null 2>&1; then
   echo "FORK_INSTALL=$_GD"
   bun "$_GD/contrib/fork-sync/fork-sync.ts" status --brief 2>/dev/null || true
