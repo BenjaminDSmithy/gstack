@@ -77,6 +77,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Defined before the URL lock below, whose config.json fallback warns.
+prefix() { sed 's/^/gstack-gbrain-source-wireup: /' >&2; }
+warn()   { echo "$*" | prefix; }
+# die <message> [exit_code]: warn with just the message, exit with code (default 1).
+die()    { warn "$1"; exit "${2:-1}"; }
+
 # ---- lock the database URL at startup ----
 # Precedence: --database-url flag > existing GBRAIN_DATABASE_URL/DATABASE_URL
 # env > read once from ~/.gbrain/config.json. Whichever wins gets exported as
@@ -110,11 +116,6 @@ fi
 if [ -n "$_locked_url" ]; then
   export GBRAIN_DATABASE_URL="$_locked_url"
 fi
-
-prefix() { sed 's/^/gstack-gbrain-source-wireup: /' >&2; }
-warn()   { echo "$*" | prefix; }
-# die <message> [exit_code]: warn with just the message, exit with code (default 1).
-die()    { warn "$1"; exit "${2:-1}"; }
 
 # Refuse to rm anything outside $HOME/. Defends against GSTACK_BRAIN_WORKTREE=/
 # or empty-string overrides that would otherwise have line 169 / 161 nuke the
