@@ -1403,7 +1403,9 @@ export async function runFreeShard(
     : { command: process.execPath, args: buildShardArgs(files, { parallel: options.parallel, rootDir }) };
 
   const env = { ...(options.env ?? process.env) };
-  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-free-shard-'));
+  // Resolved: macOS os.tmpdir() is /var/folders/..., /var is a symlink, and
+  // CSO private state (lib/cso/state.ts) refuses any symlink ancestor.
+  const stateDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-free-shard-')));
   const childTmp = path.join(stateDir, 'tmp');
   fs.mkdirSync(childTmp);
   env.TMPDIR = childTmp;
