@@ -75,6 +75,15 @@ describe("#2679: skill-content mktemp guards", () => {
     expect(rendered).toMatch(/REDACT_FILE=\$\(mktemp "\$\{TMPDIR:-\/tmp\}\/[^"]+"\)\s*\|\|\s*\{[^}]*exit 1/);
   });
 
+  test("redact-doc scan file honours TMPDIR (no bare mktemp)", () => {
+    // Bare `mktemp` on macOS acts as `-t tmp`, which prefers the per-user
+    // confstr temp dir over TMPDIR, so a paused MEDIUM body landed outside
+    // the caller's temp root. GNU mktemp honours TMPDIR either way, so this
+    // static pin is what catches a regression on Linux CI.
+    const rendered = readScript("spec/sections/gate-and-file.md");
+    expect(rendered).not.toMatch(/REDACT_FILE=\$\(mktemp(?: -t [^)]*)?\)/);
+  });
+
   test("ship pr-body template guards PR_BODY_FILE=$(mktemp ...) with a loud exit", () => {
     const body = readScript("ship/sections/pr-body.md.tmpl");
     // G3 (#2952): the mktemp now carries a ${TMPDIR:-/tmp} template.
