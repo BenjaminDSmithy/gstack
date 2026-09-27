@@ -135,9 +135,21 @@ describe('pr-prep Step 3: fetch health is checked before the guard', () => {
         expect(r.out).toContain('FETCH_STATUS: ok (4/4)');
         expect(r.out).toContain('#913 reindex cli fix https://example.com/913');
         const calls = fs.readFileSync(argLog, 'utf-8').trim().split('\n');
-        expect(calls).toHaveLength(4);
-        expect(calls[0]).toStartWith('[issue][list][--repo][acme/widgets][--state][open][--search][synopsis truncate]');
-        expect(calls[3]).toStartWith('[pr][list][--repo][acme/widgets][--state][merged]');
+        // Full argv per call: each _pp_fetch input is a named variable, so a
+        // misspelt one would reach gh as an empty argument.
+        const q = '[--repo][acme/widgets]';
+        const s = '[--search][synopsis truncate]';
+        expect(calls).toEqual([
+          `[issue][list]${q}[--state][open]${s}[--limit][8][--json][number,title,url,labels]`,
+          `[pr][list]${q}[--state][open]${s}[--limit][8][--json][number,title,url,headRefName,author]`,
+          `[issue][list]${q}[--state][closed]${s}[--limit][5][--json][number,title,url,closedAt]`,
+          `[pr][list]${q}[--state][merged]${s}[--limit][5][--json][number,title,url,mergedAt]`,
+        ]);
+        const rawDir = r.out.match(/raw fetches: (\S+)/)?.[1];
+        expect(rawDir).toBeDefined();
+        expect(fs.readdirSync(rawDir!).filter((f) => f.endsWith('.json')).sort()).toEqual(
+          ['issues-closed.json', 'issues-open.json', 'prs-merged.json', 'prs-open.json'],
+        );
       });
     });
   }
