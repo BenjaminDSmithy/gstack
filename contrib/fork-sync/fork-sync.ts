@@ -960,7 +960,11 @@ export async function run(cfg: Config): Promise<RunResult> {
     const kind = worktreeKind(gitDir, commonDir, fsResolve);
     if (kind.kind === 'unresolved') return pre(`cannot resolve the checkout's git directory: ${kind.detail}`);
     if (kind.kind === 'linked') {
-      return pre('the durable checkout is a linked worktree; the live suite must run from the main checkout');
+      // The detail is the point: this verdict asserts a fact about the
+      // repository's layout, so it names the two paths that disagreed. Without
+      // them a wrong verdict reads exactly like a right one — which is why the
+      // 2026-09-27 recurrence of this message could not be traced from its log.
+      return pre(`the durable checkout is a linked worktree; the live suite must run from the main checkout (${kind.detail})`);
     }
     if (!cfg.noLand) {
       const live = realpathOrNull(cfg.liveLink);
