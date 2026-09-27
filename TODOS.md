@@ -5328,9 +5328,14 @@ per-shard `stateDir` likewise).
   with `this test timed out after 5000ms`. They now carry
   `SPAWNING_TEST_TIMEOUT_MS` (30s), the budget their wall-timeout sibling
   already had — correct in direction, but it does NOT make the case reliable:
-  the first post-change sample failed at `30002.40ms`. The child it spawns is
-  `bun -e 'console.log("ok")'`, so a 30-second stall is process-spawn
-  starvation on this box, not anything about the code under test.
+  it failed 3 of 8 post-change runs, every time at ~30001ms. The child it
+  spawns is `bun -e 'console.log("ok")'`, and `runFreeShard` also builds and
+  removes several temp trees around it, so a 30-second stall is
+  process/filesystem starvation on this box, not anything about the code under
+  test. Note the rate did NOT fall when the budget rose (3 of 24 at 5s, 3 of 8
+  at 30s, different load windows), which is the evidence that the budget was
+  never the binding constraint. Raising it further would hide the machine
+  rather than fix it; the remedy below is the fix.
 
   That starvation is the substrate under this whole entry, and it has named
   causes. Measured 2026-09-28: 1756 processes, `fseventsd` at 113% CPU, and
@@ -5343,5 +5348,15 @@ per-shard `stateDir` likewise).
   reproducible failure. Killing those two orphans is the cheapest available
   improvement to every gate on this machine; it is the owner's call, not a
   test-suite change. Effort S, outside this repo.
+
+**Post-fix sampling.** 8 runs of the same six-file combination on the landed
+fixes (load 89-209): **0 fork-sync test failures**, and 0 occurrences of
+`BLOCKED_PRECONDITION`, `linked worktree`, `cannot resolve` or `ROLLED_BACK`.
+Against arm A's 3 spurious verdicts in 12 runs, 0 in 8 is consistent with the
+fixes working but is NOT proof — if the per-run rate had held unchanged, the
+expected count over 8 runs is about 2, so 0 is weak-to-moderate evidence, not a
+demonstration. The demonstrations are the red-first tests, one of which
+(`a git that cannot run ...`) reproduces its failure deterministically instead
+of by load.
 
 **Priority:** P2 (case 2 reverts landings). **Depends on:** none.
