@@ -3012,7 +3012,7 @@ REMOTE_REF=$(git ls-remote --heads origin refs/heads/<branch-name>) || {
   echo "STATUS: BLOCKED — cannot verify remote branch; restore access before pushing"
   exit 1
 }
-REMOTE=$(printf '%s\n' "$REMOTE_REF" | awk '{print $1}')
+REMOTE=$(printf '%s\n' "$REMOTE_REF" | awk '{print $(1)}')
 REMOTE=${REMOTE:-none}
 echo "LOCAL: $LOCAL  REMOTE: $REMOTE"
 [ "$LOCAL" = "$REMOTE" ] && echo "ALREADY_PUSHED" || echo "PUSH_NEEDED"
