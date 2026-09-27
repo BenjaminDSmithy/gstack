@@ -844,6 +844,12 @@ describe('fork-sync run (sandbox repos)', () => {
     // The claim is only ever made about a git dir that RESOLVED: an
     // unresolvable path reports itself instead of being read as this.
     expect(r.out).not.toContain('cannot resolve');
+    // And it names the two paths that disagreed. The 2026-09-27 recurrence of
+    // this exact message could not be traced from its log, because the body
+    // asserted the repository's layout without carrying the evidence for it —
+    // so a wrong verdict and a right one read identically.
+    expect(r.out).toContain(path.join(sb.durable, '.git', 'worktrees', 'linked'));
+    expect(r.out).toContain(`!= ${path.join(sb.durable, '.git')}`);
   });
 
   e2e('a live link that does not resolve to the checkout is a precondition STOP', (sb) => {
