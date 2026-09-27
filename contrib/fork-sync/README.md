@@ -79,6 +79,13 @@ directory). It hands off to this job and skips its own pull and discard.
      100-190 for hours that is hours of wall clock to re-derive a baseline the
      next scheduled run re-measures for free.
 
+   The set errs toward naming too much, not too little. The runner picks its
+   abnormal-shard message from an ordered list, and a shard with failing tests
+   or an unhandled error never reaches the branches that say whether bun's
+   summary accounted for every file — so that shard is surrendered whole even
+   when it probably ran everything and only got its exit code wrong. A gate
+   must not claim knowledge it lacks, so the extra names stay.
+
    Two cases cannot be named at all, and the verdict says which: a shard that
    died before printing its plan (`gate.ours.unnamedShards`), and a suite that
    printed no shard line whatsoever. An empty unrun set there means nothing is

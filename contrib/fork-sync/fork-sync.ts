@@ -237,6 +237,19 @@ const SHARD_PLAN = /^\[test:free\] shard (\d+)\/(\d+) plan:(.*)$/;
 // The runner's own verdicts on a shard that did not run all its files:
 // `failed with exit code signal|<n>` (1 is an ordinary test failure) and
 // `exited 0 but … Treating as FAILED.` (a truncated run).
+//
+// PRECISION LIMIT, measured 2026-09-28. The runner picks that `exited 0 but …`
+// reason from an ORDERED list (scripts/test-free-shards.ts, the `reason`
+// ternary): a shard with failing tests or an unhandled error reports
+// "reported N failing test(s) and M unhandled error(s)" and NEVER reaches the
+// two branches that say whether bun's summary accounted for every file. So
+// that message is ambiguous about completeness, and such a shard is treated
+// here as unvouched-for even when it may have run every file and only lied
+// about its exit code (observed: shard 4 of 6 ran 2123s and reported 101
+// failures, almost certainly complete, yet its 178 files are surrendered).
+// Conservative on purpose — a gate must not claim knowledge it lacks — but it
+// inflates the named set. Making the runner state its summary's file
+// accounting on every abnormal line would sharpen it; see TODOS.md.
 const SHARD_ABNORMAL = /^\[test:free\] shard (\d+)\/\d+ (?:failed with exit code (signal|\d+)|exited 0 but .*Treating as FAILED\.)/;
 
 /**
