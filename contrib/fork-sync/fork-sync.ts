@@ -42,6 +42,9 @@
  *      installed skills serve (gstack-config gbrain-refresh). Any failure
  *      after the switch rolls back to the old branch.
  *
+ * Hand landings on the durable checkout rebuild that render through git
+ * hooks: `install-hooks` writes them, and `render-hook` is what they call.
+ *
  * A STOP is remembered per (reason, upstream, tip), so a blocked pair notifies
  * once, not every run. Either side moving re-arms the attempt.
  *
@@ -56,6 +59,7 @@
  *   bun contrib/fork-sync/fork-sync.ts status [--brief|--json]
  *   bun contrib/fork-sync/fork-sync.ts install-agent [--print] [--notify <path>]
  *   bun contrib/fork-sync/fork-sync.ts uninstall-agent
+ *   bun contrib/fork-sync/fork-sync.ts install-hooks [--print] | uninstall-hooks
  */
 import { spawn, spawnSync } from 'child_process';
 import * as fs from 'fs';
@@ -410,7 +414,11 @@ function sh(cmd: string, args: string[], opts: { cwd?: string; env?: NodeJS.Proc
   return { code: r.status ?? (r.error ? 127 : 1), stdout: (r.stdout ?? '').trimEnd(), stderr: (r.stderr ?? '').trim() };
 }
 
-const GIT_ENV: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_MERGE_AUTOEDIT: 'no' };
+// GSTACK_SKIP_RENDER_HOOK: this job's own switches and rebases must not fire
+// the render hooks. A landing refreshes the render once, explicitly, in verify.
+const GIT_ENV: NodeJS.ProcessEnv = {
+  ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_MERGE_AUTOEDIT: 'no', GSTACK_SKIP_RENDER_HOOK: '1',
+};
 
 function git(cwd: string, ...args: string[]): Sh {
   return sh('git', args, { cwd, env: GIT_ENV, timeoutMs: 600_000 });
@@ -1252,6 +1260,169 @@ function runMigrations(cfg: Config, oldVersion: string): void {
   }
 }
 
+// ─── Render hooks ───────────────────────────────────────────────────────────
+//
+// Installed skills serve the gbrain render in ~/.gstack/render/claude, and its
+// SKILL.md files Read section files by absolute render-tree paths. So a commit
+// that reaches the durable checkout any way but a fork-sync landing (a hand
+// fast-forward, a branch switch, a rebase, a cherry-pick) is not live until
+// that render is rebuilt. These git hooks rebuild it. They sit in the
+// repository's hooks dir, which every linked worktree shares, so each returns
+// at once unless it fired in the durable checkout itself. `git reset --hard`
+// fires no hook: after one, run `gstack-config gbrain-refresh` by hand.
+
+export const RENDER_HOOKS = ['post-merge', 'post-checkout', 'post-rewrite', 'post-commit'] as const;
+export const RENDER_HOOK_MARKER = 'gstack fork-sync render hook';
+
+/** The hook file install-hooks writes: a thin shim into the checkout's own copy of this script. */
+export function renderHookShim(hook: string): string {
+  return [
+    '#!/bin/bash',
+    `# ${RENDER_HOOK_MARKER}, written by contrib/fork-sync/fork-sync.ts install-hooks.`,
+    '# Rebuilds the gbrain render the installed skills serve when a landing moves the',
+    '# durable checkout; other worktrees return at once. GSTACK_SKIP_RENDER_HOOK=1',
+    '# disables it for one command; fork-sync.ts uninstall-hooks removes it.',
+    '[ -n "${GSTACK_SKIP_RENDER_HOOK:-}" ] && exit 0',
+    'script="$(git rev-parse --show-toplevel 2>/dev/null)/contrib/fork-sync/fork-sync.ts"',
+    '# A checkout whose copy predates render-hook (an older fork worktree) stays silent.',
+    'grep -q "render-hook" "$script" 2>/dev/null || exit 0',
+    'command -v bun >/dev/null 2>&1 || { echo "gstack render hook: bun is not on PATH, so the live render was not rebuilt. Run: gstack-config gbrain-refresh" >&2; exit 0; }',
+    `exec bun "$script" render-hook ${hook} "$@"`,
+    '',
+  ].join('\n');
+}
+
+export interface RenderHookFacts {
+  hook: string;
+  args: string[];
+  /** The hook fired in the main worktree the live link resolves to. */
+  atLive: boolean;
+  /** A rebase is mid-flight (rebase-merge or rebase-apply exists). */
+  rebasing: boolean;
+  /** Lines left in the sequencer todo, the current pick included; null outside a pick or revert sequence. */
+  picksLeft: number | null;
+}
+
+/**
+ * Why a hook should NOT rebuild the render, or null when it should. Measured
+ * on git 2.55: a rebase fires post-checkout and every post-commit with
+ * rebase-merge present, then post-rewrite once; a ranged cherry-pick fires
+ * post-commit per pick while sequencer/todo still lists the current pick, so
+ * the last pick sees exactly one line; an amend fires post-commit and then
+ * post-rewrite. Each landing therefore rebuilds once, at its end.
+ */
+export function renderHookSkip(f: RenderHookFacts): string | null {
+  if (!f.atLive) return 'not the durable checkout';
+  switch (f.hook) {
+    case 'post-merge':
+      return f.args[0] === '1' ? 'squash merge: HEAD did not move' : null;
+    case 'post-checkout':
+      if (f.args[2] !== '1') return 'file checkout';
+      if (f.args[0] === f.args[1]) return 'HEAD did not move';
+      return f.rebasing ? 'rebase in progress: post-rewrite rebuilds when it ends' : null;
+    case 'post-rewrite':
+      return f.args[0] === 'rebase' ? null : 'amend: post-commit already rebuilt';
+    case 'post-commit':
+      if (f.rebasing) return 'rebase in progress: post-rewrite rebuilds when it ends';
+      if (f.picksLeft !== null && f.picksLeft > 1) return `${f.picksLeft - 1} more pick(s) to go`;
+      return null;
+    default:
+      return `not a render hook: ${f.hook}`;
+  }
+}
+
+/** Runs inside a git hook, in whichever worktree fired it. Never fails the git command. */
+function renderHook(cfg: Config, hook: string, args: string[]): number {
+  if (process.env.GSTACK_SKIP_RENDER_HOOK) return 0;
+  const here = (...a: string[]) => sh('git', a, { timeoutMs: 30_000 }).stdout;
+  const top = here('rev-parse', '--show-toplevel');
+  if (!top) return 0;
+  // An empty answer must stay empty: resolved, it would name the cwd.
+  const resolved = (p: string) => (p ? path.resolve(process.cwd(), p) : '');
+  const gitPath = (p: string) => resolved(here('rev-parse', '--git-path', p));
+  const gitDir = realpathOrNull(here('rev-parse', '--absolute-git-dir'));
+  const commonDir = realpathOrNull(resolved(here('rev-parse', '--git-common-dir')));
+  let picksLeft: number | null = null;
+  try {
+    picksLeft = fs.readFileSync(gitPath('sequencer/todo') || '/nonexistent', 'utf8').split('\n')
+      .filter((l) => l.trim() && !l.trimStart().startsWith('#')).length;
+  } catch { /* no pick or revert sequence */ }
+  const skip = renderHookSkip({
+    hook, args, picksLeft,
+    atLive: realpathOrNull(top) === realpathOrNull(cfg.liveLink) && gitDir !== null && gitDir === commonDir,
+    rebasing: [gitPath('rebase-merge'), gitPath('rebase-apply')].some((d) => d !== '' && fs.existsSync(d)),
+  });
+  if (skip) return 0;
+  console.error(`gstack render hook (${hook}): the live checkout is now at ${here('rev-parse', '--short', 'HEAD')}; rebuilding the render its skills serve.`);
+  // The refresh inspects the install as its own repository; the hook's GIT_*
+  // variables describe the worktree that fired it.
+  const env = { ...process.env };
+  for (const k of Object.keys(env)) if (/^GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|PREFIX|OBJECT_DIRECTORY)$/.test(k)) delete env[k];
+  const r = spawnSync('/bin/bash', ['-c', fill(cfg.renderCmd, { live: cfg.liveLink })], {
+    cwd: top, env, stdio: 'inherit', timeout: cfg.stepTimeoutMs,
+  });
+  if (r.status !== 0) {
+    console.error(`gstack render hook: the refresh ${r.status === null ? 'was killed' : `exited ${r.status}`}; `
+      + `the previous render is still live. Run: ${cfg.liveLink}/bin/gstack-config gbrain-refresh`);
+  }
+  return 0;
+}
+
+function hooksDir(cfg: Config): string {
+  return path.resolve(cfg.repo, gitOk(cfg.repo, 'rev-parse', '--git-path', 'hooks'));
+}
+
+function renderHooksInstalled(cfg: Config): number {
+  try {
+    const dir = hooksDir(cfg);
+    return RENDER_HOOKS.filter((h) => {
+      try { return fs.readFileSync(path.join(dir, h), 'utf8').includes(RENDER_HOOK_MARKER); } catch { return false; }
+    }).length;
+  } catch { return 0; }
+}
+
+function installHooks(cfg: Config, args: string[]): number {
+  if (args.includes('--print')) { process.stdout.write(renderHookShim('post-merge')); return 0; }
+  // A hooksPath dir is usually shared by every repository on the machine.
+  const shared = git(cfg.repo, 'config', '--get', 'core.hooksPath').stdout;
+  if (shared) {
+    console.error(`core.hooksPath is set (${shared}), so hooks there run for other repositories too. Not writing render hooks; `
+      + `chain "bun ${path.join(cfg.repo, 'contrib', 'fork-sync', 'fork-sync.ts')} render-hook <hook> \\"$@\\"" from yours instead.`);
+    return 1;
+  }
+  const dir = hooksDir(cfg);
+  fs.mkdirSync(dir, { recursive: true });
+  let kept = 0;
+  for (const hook of RENDER_HOOKS) {
+    const file = path.join(dir, hook);
+    let present = false;
+    try { fs.lstatSync(file); present = true; } catch { /* free */ }
+    let ours = false;
+    try { ours = fs.readFileSync(file, 'utf8').includes(RENDER_HOOK_MARKER); } catch { /* absent or dangling */ }
+    if (present && !ours) {
+      console.error(`kept ${file}: a hook you own is already there. Add this line to it to chain the render hook:\n`
+        + `  bun "${path.join(cfg.repo, 'contrib', 'fork-sync', 'fork-sync.ts')}" render-hook ${hook} "$@"`);
+      kept += 1;
+      continue;
+    }
+    fs.writeFileSync(file, renderHookShim(hook), { mode: 0o755 });
+    fs.chmodSync(file, 0o755);
+    console.log(`installed ${file}`);
+  }
+  return kept ? 1 : 0;
+}
+
+function uninstallHooks(cfg: Config): number {
+  const dir = hooksDir(cfg);
+  for (const hook of RENDER_HOOKS) {
+    const file = path.join(dir, hook);
+    try {
+      if (fs.readFileSync(file, 'utf8').includes(RENDER_HOOK_MARKER)) { fs.rmSync(file); console.log(`removed ${file}`); }
+    } catch { /* absent */ }
+  }
+  return 0;
+}
+
 // ─── Status and LaunchAgent ─────────────────────────────────────────────────
 
 function agentLoaded(): boolean {
@@ -1268,7 +1439,10 @@ export function status(cfg: Config, mode: 'brief' | 'json' | 'full'): string {
   const brief = `fork-sync: ${agent}; last run ${when}: ${last?.outcome ?? 'none'}`
     + (state.blocked ? ` — STOPPED (${state.blocked.reason}), needs a human` : '');
   if (mode === 'brief') return brief;
-  return [brief, last?.detail ? `  ${last.detail}` : '', `  state: ${path.join(cfg.stateDir, 'state.json')}`,
+  const hooks = renderHooksInstalled(cfg);
+  const hookLine = hooks === RENDER_HOOKS.length ? `  render hooks: installed (${hooks}/${RENDER_HOOKS.length})`
+    : `  render hooks: ${hooks}/${RENDER_HOOKS.length} installed; hand landings will not rebuild the live render (run install-hooks)`;
+  return [brief, last?.detail ? `  ${last.detail}` : '', hookLine, `  state: ${path.join(cfg.stateDir, 'state.json')}`,
     `  log:   ${path.join(cfg.stateDir, 'fork-sync.log')}`].filter(Boolean).join('\n');
 }
 
@@ -1372,8 +1546,12 @@ export async function main(argv: string[]): Promise<number> {
         return installAgent(parseArgs(cfgArgs), rest);
       }
       case 'uninstall-agent': return uninstallAgent();
+      case 'install-hooks': return installHooks(parseArgs(rest.filter((a) => a !== '--print')), rest);
+      case 'uninstall-hooks': return uninstallHooks(parseArgs(rest));
+      // Called by the hook shims with git's own hook arguments, which are not flags.
+      case 'render-hook': return renderHook(defaultConfig(), rest[0] ?? '', rest.slice(1));
       default:
-        console.log('usage: fork-sync.ts run [--dry-run] [--no-land] [--force] [--ignore-load] | status [--brief|--json] | install-agent [--print] [--notify <path>] | uninstall-agent');
+        console.log('usage: fork-sync.ts run [--dry-run] [--no-land] [--force] [--ignore-load] | status [--brief|--json] | install-agent [--print] [--notify <path>] | uninstall-agent | install-hooks [--print] | uninstall-hooks');
         return command ? 1 : 0;
     }
   } catch (err) {
