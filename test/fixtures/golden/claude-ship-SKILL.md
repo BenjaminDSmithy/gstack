@@ -721,7 +721,7 @@ integration contract (its Step 7):
   confirmations, it is ship that owns the gate decision
 - Use `--base "$BASE_BRANCH"` for the commit walk
 - Write pr-prep's machine-readable report to `/tmp/ship-pr-prep.json`
-  (`{"summary": "...", "worst": "EXACT_DUP|OVERLAP|SIBLING|CLEAN",
+  (`{"summary": "...", "worst": "EXACT_DUP|UNVERIFIED|OVERLAP|SIBLING|CLEAN",
   "commits": [...]}`) before returning here
 
 Then enforce the gate on that report:
@@ -730,7 +730,7 @@ Then enforce the gate on that report:
 if [ ! -f /tmp/ship-pr-prep.json ]; then
   echo "[ship] pr-prep produced no report — continuing (audit not run)" >&2
 else
-  PR_PREP_WORST=$(jq -r '.worst // "CLEAN"' /tmp/ship-pr-prep.json 2>/dev/null || echo CLEAN)
+  PR_PREP_WORST=$(jq -r '.worst // "UNVERIFIED"' /tmp/ship-pr-prep.json 2>/dev/null || echo UNVERIFIED)
   jq -r '.summary // empty' /tmp/ship-pr-prep.json 2>/dev/null || true
   echo "PR_PREP_WORST: $PR_PREP_WORST"
 fi
@@ -747,7 +747,9 @@ ABORT ship and print:
     3. Override with /ship --skip-pr-prep if coordinated with the upstream PR author
 ```
 
-`OVERLAP` / `SIBLING` / `CLEAN` are informational — continue to Step 2.
+`UNVERIFIED` means an upstream search did not run (or the report is unreadable):
+say the audit did NOT clear the branch, then continue. `OVERLAP` / `SIBLING` /
+`CLEAN` are informational — continue to Step 2.
 
 Note: the JSON report path (`/tmp/ship-pr-prep.json`) is read again in
 Step 19 (PR body assembly) to surface SIBLING / OVERLAP findings as a
