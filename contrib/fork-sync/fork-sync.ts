@@ -38,8 +38,9 @@
  *   6. Land. Re-verify the live checkout (same branch, same tip, clean), make
  *      sure the old tip is on origin, push the new branch (a NEW ref, never a
  *      force), switch the live checkout to it, run ./setup and the version
- *      migrations, and prove the suite starts. Any failure after the switch
- *      rolls back to the old branch.
+ *      migrations, prove the suite starts, and rebuild the gbrain render the
+ *      installed skills serve (gstack-config gbrain-refresh). Any failure
+ *      after the switch rolls back to the old branch.
  *
  * A STOP is remembered per (reason, upstream, tip), so a blocked pair notifies
  * once, not every run. Either side moving re-arms the attempt.
@@ -87,6 +88,8 @@ export interface Config {
   setupCmd: string | null;
   proofCmd: string;
   proofExpect: string;
+  /** Rebuilds the gbrain render the installed skills serve; must exit 0. */
+  renderCmd: string;
   notifyCmd: string | null;
   maxLoad: number;
   /** Consecutive load deferrals allowed before a run proceeds anyway. */
@@ -483,6 +486,7 @@ export function defaultConfig(env: NodeJS.ProcessEnv = process.env): Config {
     setupCmd: null,
     proofCmd: '{live}/bin/gstack-skill-start --skill sync-gbrain --model claude --parent-pid {pid}',
     proofExpect: 'SKILL_START_PROTO: 1',
+    renderCmd: '{live}/bin/gstack-config gbrain-refresh',
     notifyCmd: env.FORK_SYNC_NOTIFY || null,
     maxLoad: env.FORK_SYNC_MAX_LOAD ? Number(env.FORK_SYNC_MAX_LOAD) : cpus * 4,
     maxLoadDefers: 3,
@@ -511,7 +515,7 @@ export function parseArgs(argv: string[], base: Config = defaultConfig()): Confi
     '--worktree-root': 'worktreeRoot', '--state-dir': 'stateDir', '--gstack-state-dir': 'gstackStateDir',
     '--install-cmd': 'installCmd', '--freshness-cmd': 'freshnessCmd', '--build-cmd': 'buildCmd',
     '--suite-cmd': 'suiteCmd', '--isolate-cmd': 'isolateCmd', '--setup-cmd': 'setupCmd',
-    '--proof-cmd': 'proofCmd', '--proof-expect': 'proofExpect', '--notify': 'notifyCmd',
+    '--proof-cmd': 'proofCmd', '--proof-expect': 'proofExpect', '--render-cmd': 'renderCmd', '--notify': 'notifyCmd',
     '--branch': 'branch', '--onto': 'onto', '--mirror-branch': 'mirrorBranch',
   };
   const bool: Record<string, keyof Config> = {
@@ -1194,6 +1198,13 @@ async function land(cfg: Config, c: LandCtx): Promise<RunResult> {
     if (!proof.stdout.split('\n').some((l) => l.trim() === cfg.proofExpect)) {
       return `the proof command did not print "${cfg.proofExpect}" (exit ${proof.code})`;
     }
+    // Installed skills serve the gbrain render, not the checkout, so the
+    // landing is not live until the render is rebuilt from it. ./setup
+    // renders too but only warns when that fails; this step must succeed,
+    // and it also proves no installed skill link was left dangling.
+    const renderLog = path.join(c.runDir, `render-${label}.log`);
+    const r = await runLogged(fill(cfg.renderCmd, { live: cfg.liveLink }), repo, renderLog, cfg.stepTimeoutMs);
+    if (r.code !== 0) return `the render refresh exited ${r.code}${r.timedOut ? ' (timed out)' : ''}; see ${renderLog}`;
     return null;
   };
 
