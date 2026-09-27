@@ -379,7 +379,10 @@ export interface Resolved { path: string; real: string | null; why: string }
  */
 export function worktreeKind(gitDir: string, commonDir: string, resolve: (p: string) => Resolved):
 { kind: 'main' | 'linked' | 'unresolved'; detail: string } {
-  const resolved = [gitDir, commonDir].map(resolve);
+  // One argument, explicitly: `.map(resolve)` would hand the resolver
+  // (element, index, array), and a resolver with optional parameters takes
+  // those as its own.
+  const resolved = [gitDir, commonDir].map((p) => resolve(p));
   const unresolved = resolved.filter((r) => r.real === null);
   if (unresolved.length > 0) {
     return { kind: 'unresolved', detail: unresolved.map((r) => `${r.path} (${r.why})`).join('; ') };
@@ -388,10 +391,50 @@ export function worktreeKind(gitDir: string, commonDir: string, resolve: (p: str
   return { kind: 'main', detail: resolved[0].real ?? '' };
 }
 
-/** `worktreeKind`'s resolver over the real filesystem. */
-export function fsResolve(p: string): Resolved {
-  try { return { path: p, real: fs.realpathSync(p), why: '' }; }
-  catch (err) { return { path: p, real: null, why: (err as Error).message }; }
+/** fs error codes that describe a passing shortage, not a path that is wrong. */
+const TRANSIENT_RESOLVE = new Set(['EMFILE', 'ENFILE', 'EAGAIN', 'EINTR', 'EIO']);
+
+/** A synchronous pause: every caller on this path is synchronous. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * `worktreeKind`'s resolver over the real filesystem, retrying a shortage.
+ *
+ * realpath needs a file descriptor. Measured on this box (macOS 25.6,
+ * 2026-09-28): `fs.realpathSync` on a path that EXISTS throws
+ * `EMFILE: too many open files, lstat <path>` once the process is out of
+ * descriptors, while `statSync` on the same path still succeeds. And in a main
+ * checkout the two paths the precondition compares are the IDENTICAL string
+ * (`rev-parse --absolute-git-dir` and `path.resolve(repo, --git-common-dir)`,
+ * measured byte-identical), so the 2026-09-27 `linked worktree` STOP was only
+ * reachable if one of two resolves OF ONE STRING failed under a competing
+ * suite's descriptor pressure.
+ *
+ * `worktreeKind` no longer mislabels that as a layout fact, but a run still
+ * STOPPED on it, and the STOP is memoised until upstream or the tip moves — so
+ * a shortage lasting milliseconds parked the fork. Retry the transient codes;
+ * answer a path that is genuinely wrong at once, so a real negative is never
+ * slowed by a retry it cannot benefit from.
+ */
+export function fsResolve(
+  p: string,
+  realpath: (q: string) => string = fs.realpathSync,
+  attempts = 3,
+  sleep: (ms: number) => void = sleepSync,
+): Resolved {
+  let why = '';
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try { return { path: p, real: realpath(p), why: '' }; }
+    catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      why = e.message;
+      if (!TRANSIENT_RESOLVE.has(e.code ?? '')) break;
+      if (attempt < attempts - 1) sleep(50 * (attempt + 1));
+    }
+  }
+  return { path: p, real: null, why };
 }
 
 /** Ours-only unattributed failures cannot be isolated to a file. */
