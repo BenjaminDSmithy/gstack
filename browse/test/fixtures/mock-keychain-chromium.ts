@@ -44,7 +44,7 @@ export function liveProcessArgv(pid: number): string[] {
   }
   // ps joins argv with spaces, so an argument containing a space comes back
   // split. Fine for matching switches, which never contain one.
-  const result = spawnSync('ps', ['-ww', '-o', 'args=', '-p', String(pid)], { encoding: 'utf8' });
+  const result = spawnSync('ps', ['-ww', '-o', 'args=', '-p', String(pid)], { encoding: 'utf8', timeout: 30_000 });
   if (result.status !== 0) throw new Error(`ps could not read pid ${pid}`);
   return result.stdout.trim().split(/\s+/);
 }
