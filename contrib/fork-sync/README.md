@@ -223,6 +223,34 @@ stop (conflict, stale docs, regression, rollback) is skipped until upstream or
 the branch moves. A transient one (dirty tree, push, collision) retries every
 run but pages only once.
 
+### Every precondition names its evidence
+
+`BLOCKED_PRECONDITION` is memoised as deterministic, so a precondition that
+reads a transient failure as a fact about the repository parks the fork until
+upstream or the tip moves. Three of those have been measured, all the same
+shape — a verdict that reads as settled while resting on evidence the code
+threw away:
+
+- `realpathOrNull(a) !== realpathOrNull(b)` swallowed the fs error, so ONE
+  unresolvable path compared as a mismatch and BOTH compared as a match.
+  realpath needs a file descriptor: measured on macOS 25.6, `realpathSync` on
+  a path that exists throws `EMFILE` once the process is out of them. In a
+  main checkout the git dir and the common dir are the IDENTICAL string, so
+  `the durable checkout is a linked worktree` was only reachable if one of two
+  resolves of one string failed. Now `worktreeKind` / `samePath` return
+  `unresolved` as a third answer, and `fsResolve` retries the transient codes.
+- `git rev-parse --is-inside-work-tree` was read by stdout alone, so a git
+  that could not run produced `not a git work tree`. Reproduced 1 in 9 local
+  six-file runs. Now the question is settled only by a git that ANSWERED.
+- The same for `symbolic-ref --quiet --short HEAD`, which reported a detached
+  HEAD for a git that never answered. `--quiet` legitimately exits 1 on a
+  detached HEAD with empty stderr, so the two are told apart by stderr.
+
+The rule, for anything added here: a precondition may assert a fact about the
+repository only from an answer it actually received, and its message carries
+the evidence — the paths compared, the exit code, the stderr. A message that
+cannot be falsified from the log is the bug, not the symptom.
+
 ## Clearing a conflict by hand
 
 Rebase in a worktree, not the live checkout. Rekey each conflicting commit by
