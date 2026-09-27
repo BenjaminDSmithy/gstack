@@ -4565,3 +4565,126 @@ Keep the conservative default: an unparseable or absent accounting must stay
 unvouched, because a gate must not claim knowledge it lacks.
 
 **Priority:** P3. **Depends on:** none. **Effort:** S.
+
+### P2: fork-sync preconditions that assert repo facts from evidence they never gathered (measured 2026-09-28)
+
+The 2026-09-27 report was one test — `test/fork-sync.test.ts`'s
+`a dirty live checkout STOPS without discarding anything, and re-arms once
+cleaned` — STOPPING with
+`BLOCKED_PRECONDITION the durable checkout is a linked worktree` against a
+sandbox durable checkout that is a plain clone. Sampling the configuration it
+was seen in settled the question and found the shape is systemic, not one
+test's flake.
+
+**Method.** The six-file combination
+(`test/fork-sync.test.ts test/test-free-shards.test.ts
+test/test-free-shards-capture.test.ts
+test/test-free-shards-sandbox-knobs.test.ts test/run-shard-child.test.ts
+test/strict-output.test.ts`) as ONE `bun test` invocation — representative,
+because `bun run test` packs several files into one shard process. 12 runs per
+arm, interleaved A/B so ambient load hits both sides equally, `gstack-detach`
+so a harness reap could not kill it. Arm A = 2288d0ed (the tip, with 53aeaa4d's
+`worktreeKind`), arm B = c99bd6e2 (53aeaa4d^, the swallowing comparison).
+
+**Conditions.** This box idles at 1-minute load 90–110 with NO suite running
+(fseventsd pinned at 100%, two runaway `node` processes at ~91% each, 1831
+processes), so load is a poor proxy for suite contention here. Arm A saw load
+91–382 (mean 192), arm B 105–213 (mean 163). No competing suite ran; the
+session's own work ran concurrently, which the interleave makes symmetric.
+
+**Result: 0 of 24 runs reproduced the reported symptom.** `linked worktree` 0,
+`cannot resolve` 0, and the reported test itself never failed. Arm A 5 of 12
+runs red, arm B 1 of 12 — the gap is mostly that arm A has 16 more tests (161
+vs 145), and three of those newer tests are what failed.
+
+**But three DIFFERENT spurious verdicts appeared on the tip, all the same
+shape:** a result read without checking whether the subprocess or the
+filesystem actually answered.
+
+1. `BLOCKED_PRECONDITION not a git work tree: durable` — 1 of 12 arm-A runs,
+   load 91, in `an unrun touched file that passes in isolation is vouched for`.
+   `git rev-parse --is-inside-work-tree` was read by stdout alone, so a git
+   that could not run gave `'' !== 'true'`. FIXED, with a deterministic e2e
+   (a `git` shim first on PATH reproduces the message byte-for-byte). Note the
+   commit that fixed it says "1 of 9" — that was the sample in hand when it was
+   written, before the last three pairs landed. 1 of 12 is the final figure.
+2. `ROLLED_BACK ... the proof command did not print "SKILL_START_PROTO: 1"
+   (exit 0)` — 1 of 12 arm-A runs, in `a red baseline does not block ...`.
+   The proof command WAS `echo 'SKILL_START_PROTO: 1'`, and it exited 0. So
+   `sh()` returned status 0 with empty stdout — the same lost-output class the
+   free runner's anti-truncation backstop exists for. NOT FIXED. Worse than a
+   BLOCK: it reverts a landing that passed the gate. The fix is the same rule —
+   a proof that printed NOTHING on exit 0 is not evidence the proof failed; it
+   is absent evidence, and should be retried before a rollback is ordered.
+3. A wedged-shard run returned exit 3 where 2 (`INCONCLUSIVE`) was expected —
+   1 of 12 arm-A runs. WHICH `BLOCKED_*` cannot be recovered, because that
+   assertion checked `.code` before `.out`. The assertion order is now fixed
+   (`8e3e822a`), so the next occurrence names itself; the underlying cause is
+   still unidentified.
+
+**The reported symptom's own mechanism, established without reproducing it.**
+In a MAIN checkout the two paths the precondition compares are the identical
+string — measured: `rev-parse --absolute-git-dir` gives `<repo>/.git`, and
+`path.resolve(repo, rev-parse --git-common-dir)` resolves `.git` to the same
+`<repo>/.git`, byte-identical; for a linked worktree they differ
+(`<repo>/.git/worktrees/<name>` vs `<repo>/.git`). So pre-fix
+`realpathOrNull(gitDir) !== realpathOrNull(commonDir)` compared two resolves
+OF ONE STRING, and the observed verdict was unreachable unless one of the two
+threw. realpath needs a descriptor: measured on this box, with 60 held against
+a soft limit of 64, `fs.realpathSync` on a path that EXISTS throws
+`EMFILE: too many open files, lstat <path>` while `statSync` on the same path
+succeeds. A competing full free suite was REPORTED running when the failure was seen —
+that condition comes from the 2026-09-27 session's record, not from anything
+measured here.
+Ruled out along the way: an inherited `GIT_COMMON_DIR` (nothing in the repo
+assigns `process.env.GIT_*`; `makeSandbox` deletes all three anyway), and a
+sibling test sweeping the sandbox out of `os.tmpdir()` (every `rmSync` in the
+five companions is scoped to its own `mkdtemp`, and the free runner's
+per-shard `stateDir` likewise).
+
+**Left to do.**
+
+- **The proof-command rollback (case 2).** Retry a proof that printed nothing
+  on exit 0 before ordering a rollback. Effort S. This is the highest-value
+  remaining item: it is the only one of the three whose spurious verdict
+  CHANGES THE REPOSITORY.
+- **Case 3's actual cause.** Re-run the combination until it recurs; the
+  reordered assertion will now name the verdict.
+- **Transient precondition STOPs are memoised as deterministic.**
+  `BLOCKED_PRECONDITION` is remembered per (reason, upstream sha, branch tip),
+  so a git that could not run or a path that could not be resolved parks the
+  fork until upstream or the tip moves. `fsResolve` now retries the transient
+  fs codes and the git checks report how git failed, but the OUTCOME is still
+  a memoised block. fork-sync already bounds load deferrals at three in a row;
+  a transient precondition failure probably belongs in that family. Effort M —
+  it needs a deferral counter per precondition reason, and a genuinely broken
+  checkout must still end in a block rather than deferring forever.
+- **No injection seam for two site-level polarity changes.** `renderHook`'s
+  `atLive` and `installAgent`'s foreign-copy guard now require
+  `samePath(...).same === true`, but neither can be driven to an unresolvable
+  pairing in a test: `SELF` is a module constant and `renderHook` resolves
+  through the real filesystem. The `samePath` unit cases pin the semantics, not
+  the sites. Effort S.
+- **Not fork-sync, and NOT fixed by the budget change:**
+  `test/test-free-shards.test.ts`'s spawning cases ran on bun's default 5s
+  budget, and the anti-truncation case failed 3 of 24 runs across BOTH arms
+  with `this test timed out after 5000ms`. They now carry
+  `SPAWNING_TEST_TIMEOUT_MS` (30s), the budget their wall-timeout sibling
+  already had — correct in direction, but it does NOT make the case reliable:
+  the first post-change sample failed at `30002.40ms`. The child it spawns is
+  `bun -e 'console.log("ok")'`, so a 30-second stall is process-spawn
+  starvation on this box, not anything about the code under test.
+
+  That starvation is the substrate under this whole entry, and it has named
+  causes. Measured 2026-09-28: 1756 processes, `fseventsd` at 113% CPU, and
+  TWO ORPHANED synapse TUI processes — pid 76429 (3d 7h, 94.8%,
+  `~/worktrees/084c/synapse/apps/cli/pipeline/tui/v3/tui-app.js --demo`) and
+  pid 85497 (2d 10h, 93.6%, the same script under
+  `~/src/personal/synapse`), both reparented to launchd. A trivial spawn timed
+  in the same minute took 0.02s, so the starvation is BURSTY, which is exactly
+  the profile that produces one spurious verdict in twelve runs rather than a
+  reproducible failure. Killing those two orphans is the cheapest available
+  improvement to every gate on this machine; it is the owner's call, not a
+  test-suite change. Effort S, outside this repo.
+
+**Priority:** P2 (case 2 reverts landings). **Depends on:** none.
