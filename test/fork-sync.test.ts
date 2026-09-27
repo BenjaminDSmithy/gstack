@@ -568,8 +568,8 @@ describe('fork-sync run (sandbox repos)', () => {
   e2e('clean upstream advance: up to date, then dry run, then lands as a new branch, pushed, proven and marked', (sb) => {
     const before = liveState(sb);
     const current = runSync(sb);
-    expect(current.code).toBe(0);
     expect(current.out).toContain('UP_TO_DATE');
+    expect(current.code).toBe(0);
 
     const up = upstreamShips(sb, '1.1.0.0', { 'up.txt': 'up\n' });
     const stateFile = path.join(sb.home, '.gstack', 'fork-sync', 'state.json');
@@ -577,8 +577,8 @@ describe('fork-sync run (sandbox repos)', () => {
     const stateBefore = fs.readFileSync(stateFile, 'utf8');
     const runsBefore = fs.existsSync(runsDir) ? fs.readdirSync(runsDir).length : 0;
     const dry = runSync(sb, ['--dry-run']);
-    expect(dry.code).toBe(0);
     expect(dry.out).toContain('would land as feat/x-1.1.0');
+    expect(dry.code).toBe(0);
     // A dry run writes nothing: same state, no new run directory.
     expect(fs.readFileSync(stateFile, 'utf8')).toBe(stateBefore);
     expect(fs.existsSync(runsDir) ? fs.readdirSync(runsDir).length : 0).toBe(runsBefore);
@@ -622,8 +622,8 @@ describe('fork-sync run (sandbox repos)', () => {
     // A main with its own commit is never moved.
     git(sb.durable, sb.env, 'branch', '-f', 'main', 'feat/x-1.0.0');
     const r = runSync(sb);
-    expect(r.code).toBe(3);
     expect(r.out).toContain('BLOCKED_CONFLICT');
+    expect(r.code).toBe(3);
     expect(r.out).toContain('main has commits upstream lacks');
     expect(git(sb.durable, sb.env, 'rev-parse', 'main')).toBe(before.head);
     expect(liveState(sb)).toEqual(before);
@@ -636,8 +636,8 @@ describe('fork-sync run (sandbox repos)', () => {
 
     // Same pair again: skipped, not re-paged.
     const again = runSync(sb);
-    expect(again.code).toBe(0);
     expect(again.out).toContain('SKIPPED_BLOCKED');
+    expect(again.code).toBe(0);
     expect(notes(sb)).toHaveLength(1);
   });
 
@@ -650,8 +650,8 @@ describe('fork-sync run (sandbox repos)', () => {
     const before = liveState(sb);
 
     const r = runSync(sb);
-    expect(r.code).toBe(3);
     expect(r.out).toContain('BLOCKED_REGRESSION');
+    expect(r.code).toBe(3);
     expect(liveState(sb)).toEqual(before);
     expect(git(sb.durable, sb.env, 'rev-parse', '--verify', 'refs/fork-sync/attempt')).toMatch(/^[0-9a-f]{40}$/);
     expect(notes(sb)[0]).toContain('test/ours.test.ts');
@@ -662,16 +662,16 @@ describe('fork-sync run (sandbox repos)', () => {
     git(sb.durable, sb.env, 'push', '-q', 'origin', 'feat/x-1.0.0');
     upstreamShips(sb, '1.1.0.0', { 'up.txt': 'up\n' });
     const flakyOnly = runSync(sb);
-    expect(flakyOnly.code).toBe(2);
     expect(flakyOnly.out).toContain('INCONCLUSIVE');
+    expect(flakyOnly.code).toBe(2);
 
     commit(sb.durable, sb.env, 'feat: ours also breaks a test', {
       '.fake-failures': 'test/ok.test.ts — flaked\ntest/bad.test.ts — breaks\n', '.fake-iso-fail': 'test/bad.test.ts\n', 'test/bad.test.ts': '//\n',
     });
     git(sb.durable, sb.env, 'push', '-q', 'origin', 'feat/x-1.0.0');
     const confirmed = runSync(sb);
-    expect(confirmed.code).toBe(3);
     expect(confirmed.out).toContain('BLOCKED_REGRESSION');
+    expect(confirmed.code).toBe(3);
     expect(notes(sb).some((l) => l.includes('test/bad.test.ts'))).toBe(true);
   });
 
@@ -685,8 +685,8 @@ describe('fork-sync run (sandbox repos)', () => {
     const before = liveState(sb);
 
     const r = runSync(sb);
-    expect(r.code).toBe(2);
     expect(r.out).toContain('INCONCLUSIVE');
+    expect(r.code).toBe(2);
     // The whole point: a verdict that says WHICH files, not only that a shard
     // died. `regressions=0` over a set that silently excluded them is the bug.
     expect(r.out).toContain('test/never-reached.test.ts');
@@ -704,8 +704,8 @@ describe('fork-sync run (sandbox repos)', () => {
     upstreamShips(sb, '1.1.0.0', { 'up.txt': 'up\n' });
     const before = liveState(sb);
     const r = runSync(sb, ['--suite-cmd', "echo 'bun: command not found'"]);
-    expect(r.code).toBe(2);
     expect(r.out).toContain('INCONCLUSIVE');
+    expect(r.code).toBe(2);
     expect(r.out).toContain('printed no shard line at all');
     expect(liveState(sb)).toEqual(before);
   });
@@ -730,8 +730,8 @@ describe('fork-sync run (sandbox repos)', () => {
     const before = liveState(sb);
 
     const r = runSync(sb);
-    expect(r.code).toBe(3);
     expect(r.out).toContain('BLOCKED_REGRESSION');
+    expect(r.code).toBe(3);
     expect(r.out).toContain('test/shared.test.ts');
     expect(liveState(sb)).toEqual(before);
     const gate = stateJson(sb).lastRun.gate;
@@ -784,8 +784,8 @@ describe('fork-sync run (sandbox repos)', () => {
     upstreamShips(sb, '1.1.0.0', { 'up.txt': 'up\n' });
     const before = liveState(sb);
     const r = runSync(sb, ['--freshness-cmd', 'echo drift >> a.txt']);
-    expect(r.code).toBe(3);
     expect(r.out).toContain('BLOCKED_STALE');
+    expect(r.code).toBe(3);
     expect(liveState(sb)).toEqual(before);
     expect(notes(sb)[0]).toContain('a.txt');
   });
@@ -794,8 +794,8 @@ describe('fork-sync run (sandbox repos)', () => {
     upstreamShips(sb, '1.1.0.0', { 'up.txt': 'up\n' });
     write(path.join(sb.durable, 'ours1.txt'), 'uncommitted edit\n');
     const r = runSync(sb);
-    expect(r.code).toBe(3);
     expect(r.out).toContain('BLOCKED_DIRTY');
+    expect(r.code).toBe(3);
     expect(fs.readFileSync(path.join(sb.durable, 'ours1.txt'), 'utf8')).toBe('uncommitted edit\n');
     expect(liveState(sb).worktrees).toBe(1);
 
@@ -819,8 +819,8 @@ describe('fork-sync run (sandbox repos)', () => {
     const before = liveState(sb);
     upstreamShips(sb, '1.1.0.0', { '.break-setup': 'x\n' });
     const r = runSync(sb, ['--setup-cmd', 'test ! -f .break-setup']);
-    expect(r.code).toBe(4);
     expect(r.out).toContain('ROLLED_BACK');
+    expect(r.code).toBe(4);
     expect(liveState(sb).branch).toBe(before.branch);
     expect(liveState(sb).head).toBe(before.head);
     expect(notes(sb)[0]).toContain('rolled back');
@@ -839,8 +839,8 @@ describe('fork-sync run (sandbox repos)', () => {
     upstreamShips(sb, '1.1.0.0', { '.break-render': 'x\n' });
     const log = path.join(sb.base, 'render.log');
     const r = runSync(sb, ['--render-cmd', `git symbolic-ref --short HEAD >> ${log}; test ! -f .break-render`]);
-    expect(r.code).toBe(4);
     expect(r.out).toContain('ROLLED_BACK');
+    expect(r.code).toBe(4);
     expect(liveState(sb).branch).toBe(before.branch);
     expect(liveState(sb).head).toBe(before.head);
     expect(notes(sb)[0]).toContain('render refresh exited 1');
@@ -852,8 +852,8 @@ describe('fork-sync run (sandbox repos)', () => {
     git(sb.durable, sb.env, 'push', '-q', 'origin', 'upstream/main:refs/heads/feat/x-1.1.0');
     const before = liveState(sb);
     const r = runSync(sb);
-    expect(r.code).toBe(3);
     expect(r.out).toContain('BLOCKED_COLLISION');
+    expect(r.code).toBe(3);
     expect(liveState(sb)).toEqual(before);
   });
 
@@ -871,8 +871,8 @@ describe('fork-sync run (sandbox repos)', () => {
     upstreamShips(sb, '1.1.0.0', { 'up.txt': 'up\n' });
     const before = liveState(sb);
     const r = runSync(sb, ['--no-land', '--branch', 'feat/y-1.0.0']);
-    expect(r.code).toBe(0);
     expect(r.out).toContain('REHEARSED');
+    expect(r.code).toBe(0);
     expect(liveState(sb)).toEqual(before);
     expect(notes(sb)).toEqual([]);
     expect(stateJson(sb).rehearsal.outcome).toBe('REHEARSED');
@@ -885,8 +885,8 @@ describe('fork-sync run (sandbox repos)', () => {
     fs.unlinkSync(link);
     fs.symlinkSync(linked, link);
     const r = runSync(sb);
-    expect(r.code).toBe(3);
     expect(r.out).toContain('BLOCKED_PRECONDITION');
+    expect(r.code).toBe(3);
     expect(r.out).toContain('linked worktree');
     // The claim is only ever made about a git dir that RESOLVED: an
     // unresolvable path reports itself instead of being read as this.
@@ -933,8 +933,8 @@ describe('fork-sync run (sandbox repos)', () => {
     const other = path.join(sb.base, 'elsewhere');
     fs.mkdirSync(other);
     const r = runSync(sb, ['--repo', sb.durable, '--live-link', other]);
-    expect(r.code).toBe(3);
     expect(r.out).toContain('BLOCKED_PRECONDITION');
+    expect(r.code).toBe(3);
   });
 });
 
@@ -1047,8 +1047,8 @@ describe('render hooks (sandbox repo)', () => {
     fs.writeFileSync(path.join(hooksDir, 'post-merge'), mine, { mode: 0o755 });
 
     const inst = hookCli(sb, 'install-hooks');
-    expect(inst.code).toBe(1);
     expect(inst.out).toContain(`kept ${path.join(hooksDir, 'post-merge')}`);
+    expect(inst.code).toBe(1);
     expect(inst.out).toContain('render-hook post-merge "$@"');
     expect(fs.readFileSync(path.join(hooksDir, 'post-merge'), 'utf8')).toBe(mine);
     for (const hook of RENDER_HOOKS.filter((h) => h !== 'post-merge')) {
@@ -1065,8 +1065,8 @@ describe('render hooks (sandbox repo)', () => {
     const shared = path.join(sb.base, 'shared-hooks');
     git(sb.durable, sb.env, 'config', 'core.hooksPath', shared);
     const refused = hookCli(sb, 'install-hooks');
-    expect(refused.code).toBe(1);
     expect(refused.out).toContain('core.hooksPath is set');
+    expect(refused.code).toBe(1);
     expect(fs.existsSync(shared)).toBe(false);
   });
 });
