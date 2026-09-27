@@ -18,6 +18,9 @@ const RESOLVED_DIR = realpathSync(DIR);
 
 // Publish readiness only after the grandchild has initialized and flushed both
 // inherited pipes; a PID returned by spawn alone does not establish that state.
+// The holder runs outside every process group the test runner can kill (the
+// escaped case is its own session), so a shard killed before a test's cleanup
+// would orphan it forever. Its keep-alive is bounded, far above any test here.
 writeFileSync(DESCENDANT, `
 import { appendFileSync, writeFileSync } from 'node:fs';
 const record = stage => {
@@ -27,7 +30,8 @@ const record = stage => {
 };
 record('descendant_start');
 await Bun.sleep(Number(process.env.DESCENDANT_DELAY_MS || 0));
-setInterval(() => {}, 1000);
+const keepAlive = setInterval(() => {}, 1000);
+setTimeout(() => clearInterval(keepAlive), Number(process.env.FIXTURE_MAX_MS) || 60_000);
 await new Promise(resolve => process.stdout.write(' ', resolve));
 record('stdout_flushed');
 await new Promise(resolve => process.stderr.write(' ', resolve));
@@ -354,6 +358,20 @@ describe('Claude Code restricted execution', () => {
       const pid = Number(readFileSync(PID, 'utf8'));
       if (running(pid)) process.kill(pid, 'SIGKILL');
     }
+  });
+
+  test('the pipe holder exits unaided once its lifetime bound elapses', () => {
+    const pidFile = path.join(DIR, 'bounded-holder.pid');
+    const start = Date.now();
+    // Pipes stay open and drained throughout, as an inherited holder's would.
+    const result = spawnSync(process.execPath, [DESCENDANT], {
+      env: { ...process.env, PID_FILE: pidFile, FIXTURE_MAX_MS: '300' }, encoding: 'utf8', timeout: 10_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(0);
+    expect(Number(readFileSync(pidFile, 'utf8'))).toBe(result.pid);
+    expect(Date.now() - start).toBeGreaterThanOrEqual(300);
   });
 
   test('CLI exits nonzero for malformed responses and argument failures', () => {
