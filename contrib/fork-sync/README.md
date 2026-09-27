@@ -160,6 +160,48 @@ removes it. Alerts go through the `--notify` command (the synapse
 `--remote --priority high --tags warning` when loud). Without `--notify`,
 alerts fall back to an `osascript` banner.
 
+## Landing by hand: the render hooks
+
+A commit that reaches the durable checkout any other way (a fast-forward, a
+branch switch, a rebase, a cherry-pick, a commit made there) changes
+`~/.claude/skills/gstack` but not `~/.gstack/render/claude`. The installed
+skills keep serving the old render until it is rebuilt. Render hooks do
+that. Install them once, from the durable checkout's copy:
+
+```bash
+bun ~/.claude/skills/gstack/contrib/fork-sync/fork-sync.ts install-hooks
+```
+
+This writes `post-merge`, `post-checkout`, `post-rewrite` and `post-commit`
+shims into the repository's hooks directory. Each shim runs the checkout's
+own copy of this script, so hook logic updates with every landing. Linked
+worktrees share that directory, but a hook does nothing unless it fired in
+the durable checkout that `~/.claude/skills/gstack` resolves to. Each way of
+landing rebuilds once, when it finishes:
+
+- A fast-forward or merge rebuilds in `post-merge`. A squash merge does not
+  move HEAD, so it doesn't rebuild.
+- A branch switch rebuilds in `post-checkout`. A file checkout does not.
+- A rebase rebuilds once in `post-rewrite`, not at each replayed commit.
+- A ranged cherry-pick rebuilds at its last pick.
+- A commit or amend made in the checkout rebuilds in `post-commit`.
+
+The rebuild runs `gstack-config gbrain-refresh` and prints its result into
+the git command's output. `git reset --hard` fires no hook, so run the
+refresh by hand after one:
+
+```bash
+~/.claude/skills/gstack/bin/gstack-config gbrain-refresh
+```
+
+`GSTACK_SKIP_RENDER_HOOK=1` silences the hooks for one command. fork-sync
+sets it on its own git calls because `land()` refreshes explicitly.
+`install-hooks` never overwrites a hook you own. It prints a line for you
+to chain from yours instead. It refuses to write anywhere when
+`core.hooksPath` is set, because that directory usually serves every
+repository. `status` shows whether all four hooks are installed, and
+`uninstall-hooks` removes only its own.
+
 ## Outcomes
 
 | Outcome | Exit | Pages? | What to do |
