@@ -12,7 +12,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   compareVersions, droppedSubjects, fill, gateCandidates, landingBranchName, nameList,
-  fsResolve, parseSuiteLog, renderPlist, suiteComplete, unvouchedFiles, worktreeKind, defaultConfig,
+  fsResolve, parseSuiteLog, renderPlist, samePath, suiteComplete, unvouchedFiles, worktreeKind, defaultConfig,
   RENDER_HOOKS, RENDER_HOOK_MARKER, renderHookShim, renderHookSkip,
 } from '../contrib/fork-sync/fork-sync';
 
@@ -208,6 +208,53 @@ describe('worktreeKind', () => {
     const k = worktreeKind('/a/.git', '/b/.git', stub({ '/a/.git': '/real/a/.git', '/b/.git': new Error('ENOENT') }));
     expect(k.kind).toBe('unresolved');
     expect(k.detail).toContain('/b/.git');
+  });
+});
+
+// The swallow `worktreeKind` was extracted to kill survived in the three
+// live-link comparisons, which still read `realpathOrNull(a) !== realpathOrNull(b)`.
+// Both directions are wrong and the SECOND is the dangerous one: two
+// unresolvable paths compared EQUAL, so a pairing nothing could stat was
+// vouched for as correct and the run proceeded.
+describe('samePath', () => {
+  const stub = (map: Record<string, string | Error>) => (p: string) => {
+    const v = map[p];
+    return v instanceof Error ? { path: p, real: null, why: v.message } : { path: p, real: v, why: '' };
+  };
+
+  test('two paths that resolve to one place are the same, and say where', () => {
+    const r = samePath('/link', '/repo', stub({ '/link': '/real/repo', '/repo': '/real/repo' }));
+    expect(r.same).toBe(true);
+    expect(r.detail).toContain('/real/repo');
+  });
+
+  test('a resolved mismatch is a mismatch, and names both sides', () => {
+    const r = samePath('/link', '/repo', stub({ '/link': '/real/elsewhere', '/repo': '/real/repo' }));
+    expect(r.same).toBe(false);
+    expect(r.detail).toContain('/real/elsewhere');
+    expect(r.detail).toContain('/real/repo');
+  });
+
+  test('an unresolvable side is neither same nor different: null, with the reason', () => {
+    const one = samePath('/link', '/repo', stub({ '/link': new Error('ENOENT: no such file'), '/repo': '/real/repo' }));
+    expect(one.same).toBeNull();
+    expect(one.detail).toContain('/link');
+    expect(one.detail).toContain('ENOENT');
+    // Both unresolvable is the direction that used to compare EQUAL.
+    const both = samePath('/link', '/repo', stub({ '/link': new Error('EMFILE'), '/repo': new Error('EMFILE') }));
+    expect(both.same).toBeNull();
+    expect(both.detail).toContain('/link');
+    expect(both.detail).toContain('/repo');
+  });
+
+  test('the resolver is called with the path and nothing else', () => {
+    const arity: number[] = [];
+    const resolver = (...args: unknown[]) => {
+      arity.push(args.length);
+      return { path: String(args[0]), real: '/same', why: '' };
+    };
+    expect(samePath('/a', '/b', resolver).same).toBe(true);
+    expect(arity).toEqual([1, 1]);
   });
 });
 
