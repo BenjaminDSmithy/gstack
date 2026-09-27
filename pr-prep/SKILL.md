@@ -597,6 +597,19 @@ arguments into one variable and split it later. Give each value its own
 quoted variable, and walk a list with `while IFS= read -r item; do ...;
 done` over newline-separated input.
 
+**No positional parameters in this skill.** When a skill is invoked with
+arguments (`/pr-prep --repo owner/name --base main`, or a Skill-tool call
+with args), Claude Code rewrites the skill text before you read it: a
+dollar sign followed by digits becomes that argument, counting the first
+word as index 0, and the `ARGUMENTS` placeholder becomes the whole argument
+string. An index past the last argument stays literal. Observed 2026-09-27:
+`--repo garrytan/gstack --base main` turned the fetch helper's output path
+into `$_PP/garrytan/gstack.json`, its `gh` call into `gh "--base" list`,
+and its `--state` into `main`, so every fetch would have failed. That is
+why `_pp_fetch` reads named `_PP_*` variables set on each call line.
+`test/pr-prep-arg-substitution.test.ts` fails if a bash block here gains a
+positional parameter.
+
 Upstream titles are tracker TEXT judged by the model, so every read is
 enveloped by `bin/gstack-issue-guard`. Each fetch writes gh's raw JSON to a
 scratch file (mechanical input for the scorer in Step 4). Only after gh
@@ -607,28 +620,31 @@ through the guard (model-context ingress).
 _PP=$(mktemp -d "${TMPDIR:-/tmp}/gstack-pr-prep.XXXXXX")
 _PP_FAILED=0
 
-# _pp_fetch <file-stem> <issue|pr> <state> <limit> <json-fields>
+# Inputs are named variables on the call line, never positional parameters
+# (see "No positional parameters" above). Every call sets all five:
+#   _PP_STEM=<file-stem> _PP_KIND=<issue|pr> _PP_STATE=<state>
+#   _PP_LIMIT=<n> _PP_FIELDS=<json-fields> _pp_fetch
 _pp_fetch() {
-  local out="$_PP/$1.json"
-  if gh "$2" list --repo "$REPO" --state "$3" --search "$QUERY" \
-       --limit "$4" --json "$5" > "$out" 2> "$out.err" \
+  local out="$_PP/$_PP_STEM.json"
+  if gh "$_PP_KIND" list --repo "$REPO" --state "$_PP_STATE" --search "$QUERY" \
+       --limit "$_PP_LIMIT" --json "$_PP_FIELDS" > "$out" 2> "$out.err" \
      && jq -e 'type == "array"' "$out" > /dev/null 2>&1; then
     jq -r '.[] | "#\(.number) \(.title) \(.url)"' "$out" \
-      | ~/.claude/skills/gstack/bin/gstack-issue-guard --stdin --source "pr-prep-$1" \
-      || { echo "[pr-prep] FETCH FAILED: $1 (issue guard exited non-zero)"; _PP_FAILED=$((_PP_FAILED + 1)); }
+      | ~/.claude/skills/gstack/bin/gstack-issue-guard --stdin --source "pr-prep-$_PP_STEM" \
+      || { echo "[pr-prep] FETCH FAILED: $_PP_STEM (issue guard exited non-zero)"; _PP_FAILED=$((_PP_FAILED + 1)); }
   else
-    echo "[pr-prep] FETCH FAILED: $1 (gh $2 list --state $3): $(head -c 300 "$out.err" | tr '\n' ' ')"
+    echo "[pr-prep] FETCH FAILED: $_PP_STEM (gh $_PP_KIND list --state $_PP_STATE): $(head -c 300 "$out.err" | tr '\n' ' ')"
     mv -f "$out" "$out.failed" 2>/dev/null
     _PP_FAILED=$((_PP_FAILED + 1))
   fi
 }
 
 # Open issues + PRs (highest collision risk)
-_pp_fetch issues-open   issue open   8 number,title,url,labels
-_pp_fetch prs-open      pr    open   8 number,title,url,headRefName,author
+_PP_STEM=issues-open   _PP_KIND=issue _PP_STATE=open   _PP_LIMIT=8 _PP_FIELDS=number,title,url,labels _pp_fetch
+_PP_STEM=prs-open      _PP_KIND=pr    _PP_STATE=open   _PP_LIMIT=8 _PP_FIELDS=number,title,url,headRefName,author _pp_fetch
 # Closed in last 90 days (might be unreleased master fix)
-_pp_fetch issues-closed issue closed 5 number,title,url,closedAt
-_pp_fetch prs-merged    pr    merged 5 number,title,url,mergedAt
+_PP_STEM=issues-closed _PP_KIND=issue _PP_STATE=closed _PP_LIMIT=5 _PP_FIELDS=number,title,url,closedAt _pp_fetch
+_PP_STEM=prs-merged    _PP_KIND=pr    _PP_STATE=merged _PP_LIMIT=5 _PP_FIELDS=number,title,url,mergedAt _pp_fetch
 
 echo "[pr-prep] raw fetches: $_PP"
 if [ "$_PP_FAILED" -eq 0 ]; then
@@ -666,8 +682,9 @@ Read the result this way:
 Hard guard on a failed fetch — read the stderr it printed: a rate limit
 (HTTP 403/429) means wait for the reset and re-run that commit; an auth
 error means suggest `gh auth refresh`; `unknown command` / `unknown flag`
-means the arguments were mangled (usually word-splitting) — fix the call
-rather than retrying it. Never false-clear on a failed fetch.
+means the arguments were mangled (word-splitting, or a positional parameter
+rewritten by argument substitution) — fix the call rather than retrying it.
+Never false-clear on a failed fetch.
 
 ## Step 4: Score each upstream hit
 
