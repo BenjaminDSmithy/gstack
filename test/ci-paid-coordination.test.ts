@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { buildRunManifest, collectPaidTestFiles, shardCaseId, shardTrial, type PaidRunManifest, type SliceResult } from '../scripts/test-paid-shards';
 import { STRICT_RETRY_CASE_BUDGETS } from './helpers/eval-budgets';
+import { GLOBAL_TOUCHFILES, getChangedFiles } from './helpers/touchfiles';
 import { approvedCookieWorkflowSource, manualReviewFixture } from './helpers/manual-judge-review-fixture';
 
 const ROOT = path.resolve(import.meta.dir, '..');
@@ -183,23 +184,83 @@ describe('dependency-free CI planner and report execution', () => {
     });
   }
 
-  test('diff-selected host planning matches the same checkout with no installed dependencies', () => {
-    const git = Bun.which('git')!;
-    const gitDir = spawnSync(git, ['rev-parse', '--absolute-git-dir'], { cwd: ROOT, encoding: 'utf8', timeout: 10_000 });
-    expect(gitDir.status).toBe(0);
-    const manifestPath = path.join(fixture, 'diff-manifest.json');
+  function hermeticGitEnv(gitDir: string, workTree: string): NodeJS.ProcessEnv {
+    return {
+      PATH: path.dirname(Bun.which('git')!),
+      HOME: fixture,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_DIR: gitDir,
+      GIT_WORK_TREE: workTree,
+    };
+  }
+
+  /** getChangedFiles' spawn, pinned to one git environment. */
+  function gitIn(gitEnv: NodeJS.ProcessEnv): typeof spawnSync {
+    return ((command: string, args: string[], options: object) =>
+      spawnSync(command, args, { timeout: 10_000, ...options, env: gitEnv })) as unknown as typeof spawnSync;
+  }
+
+  // Both planners read ONE git environment. Git loads core.excludesFile from
+  // HOME's config, so an in-process plan that inherited the runner's HOME
+  // honoured the operator's global gitignore while the subprocess
+  // (HOME=fixture) did not: a file ignored only there, such as the
+  // .claude/session-brief.md Claude Desktop writes into session worktrees,
+  // flipped the subprocess from run-all to diff selection.
+  function planBothWays(name: string, gitEnv: NodeJS.ProcessEnv) {
+    const manifestPath = path.join(fixture, `${name}.json`);
     const env = { EVALS_ALL: '', EVALS_BASE: 'HEAD' };
-    const planned = run(['--emit-plan', manifestPath, '--slices', '6'], 'gate', {
-      ...env,
-      PATH: path.dirname(git),
-      GIT_DIR: gitDir.stdout.trim(),
-      GIT_WORK_TREE: ROOT,
-    });
+    const planned = run(['--emit-plan', manifestPath, '--slices', '6'], 'gate', { ...env, ...gitEnv });
     expect(planned.status, planned.stderr).toBe(0);
-    const manifest: PaidRunManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    expect(manifest).toEqual(buildRunManifest({ tier: 'gate', sliceCount: 6, evalsAll: false, env }));
-    expect(manifest.evalsAll).toBe(false);
+    const changedFiles = getChangedFiles(env.EVALS_BASE, gitEnv.GIT_WORK_TREE!, gitIn(gitEnv));
+    return {
+      changedFiles,
+      subprocess: JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as PaidRunManifest,
+      inProcess: buildRunManifest({ tier: 'gate', sliceCount: 6, evalsAll: false, env, changedFiles }),
+    };
+  }
+
+  test('diff-selected host planning matches the same checkout with no installed dependencies', () => {
+    const gitDir = spawnSync('git', ['rev-parse', '--absolute-git-dir'], { cwd: ROOT, encoding: 'utf8', timeout: 10_000 });
+    expect(gitDir.status).toBe(0);
+    const { subprocess, inProcess } = planBothWays('diff-manifest', hermeticGitEnv(gitDir.stdout.trim(), ROOT));
+    expect(subprocess).toEqual(inProcess);
+    expect(subprocess.evalsAll).toBe(false);
   });
+
+  test('host planning parity holds for a file only the operator global gitignore hides', () => {
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-paid-global-ignore-'));
+    try {
+      const repo = path.join(scratch, 'repo');
+      fs.mkdirSync(repo);
+      const gitEnv = hermeticGitEnv(path.join(repo, '.git'), repo);
+      const setupEnv = { PATH: gitEnv.PATH, HOME: fixture, GIT_CONFIG_NOSYSTEM: '1' };
+      for (const args of [['init', '-q', '-b', 'main'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.com',
+        'commit', '-q', '--allow-empty', '-m', 'Seed global-ignore fixture']]) {
+        const git = spawnSync('git', args, { cwd: repo, env: setupEnv, encoding: 'utf8', timeout: 10_000 });
+        expect(git.status, git.stderr).toBe(0);
+      }
+      // Desktop's session brief, plus a global touchfile so the selection is
+      // visible in the manifest (every test, not run-all's null or junk's []).
+      const planted = ['.claude/session-brief.md', GLOBAL_TOUCHFILES[0]];
+      for (const file of planted) {
+        fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
+        fs.writeFileSync(path.join(repo, file), 'x\n');
+      }
+      const operatorIgnore = path.join(scratch, 'operator.gitignore');
+      const operatorConfig = path.join(scratch, 'operator.gitconfig');
+      fs.writeFileSync(operatorIgnore, `${planted.join('\n')}\n`);
+      fs.writeFileSync(operatorConfig, `[core]\n\texcludesFile = ${operatorIgnore}\n`);
+
+      // The operator's git view hides both files; the hermetic view shows them.
+      expect(getChangedFiles('HEAD', repo, gitIn({ ...gitEnv, GIT_CONFIG_GLOBAL: operatorConfig }))).toEqual([]);
+
+      const { changedFiles, subprocess, inProcess } = planBothWays('global-ignore-manifest', gitEnv);
+      expect(changedFiles.sort()).toEqual([...planted].sort());
+      expect(subprocess.selectionReason).toBe('diff');
+      expect(subprocess.selection?.e2e?.length).toBeGreaterThan(0);
+      expect(subprocess).toEqual(inProcess);
+    } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
+  }, 30_000);
 
   for (const tier of ['gate', 'periodic'] as const) {
     test(`${tier}: host planner preserves the complete manifest and report fails closed`, () => {
