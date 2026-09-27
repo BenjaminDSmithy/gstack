@@ -3573,7 +3573,7 @@ if [ -x "$DETECT_BIN" ]; then
           fi
         else
           rm -rf "$_GSTACK_RENDER_TMP"
-          log "  warning: gen:skill-docs:user failed — previous render (if any) left in place, links stay valid. Run 'bun run gen:skill-docs:user --host claude --out-dir $_GSTACK_RENDER_DIR' manually if you want fresh brain-aware blocks"
+          log "  warning: gen:skill-docs:user failed — previous render (if any) left in place, links stay valid. Fix the error above, then re-run ./setup or 'gstack-config gbrain-refresh' for fresh brain-aware blocks"
         fi
       fi
     else
