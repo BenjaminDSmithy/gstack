@@ -1527,6 +1527,16 @@ export async function runFreeShard(
   const log = options.log ?? ((line: string) => console.log(line));
   const label = `[test:free] shard ${shardNumber}/${totalShards}`;
 
+  // Name every file this shard was TOLD to run, BEFORE it runs any of them.
+  // A shard that wedges or gets truncated prints no terminal summary, so
+  // afterwards nothing can tell which of its files ran: the default console
+  // policy emits failures, not passes, and the packing is not reproducible
+  // from a later invocation (fullSuiteJobs() and the durations seed both
+  // vary). This line is the only record of what a silent shard's silence
+  // covers. contrib/fork-sync's gate parses it so an incomplete run can say
+  // WHICH files it cannot vouch for, not merely that it was incomplete.
+  log(`${label} plan: ${files.join(' ')}`);
+
   // Empty shard = fast no-op SUCCESS. Indices are stable for the CI matrix,
   // so an unoccupied index must not fail or shift work to a different runner.
   if (files.length === 0) {
