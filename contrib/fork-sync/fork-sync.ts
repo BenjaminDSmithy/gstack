@@ -391,6 +391,25 @@ export function worktreeKind(gitDir: string, commonDir: string, resolve: (p: str
   return { kind: 'main', detail: resolved[0].real ?? '' };
 }
 
+/**
+ * Whether two paths are the same place, keeping an unresolvable path
+ * distinguishable from a genuine mismatch. This is the swallow `worktreeKind`
+ * was extracted to kill, in the live-link comparisons it survived in:
+ * `realpathOrNull(a) !== realpathOrNull(b)` reads ONE unresolvable path as a
+ * mismatch, and BOTH unresolvable as a match — the second direction vouching
+ * for a pairing nothing could stat, which is the worse of the two.
+ */
+export function samePath(a: string, b: string, resolve: (p: string) => Resolved):
+{ same: boolean | null; detail: string } {
+  // One argument, explicitly: see `worktreeKind`.
+  const r = [a, b].map((p) => resolve(p));
+  const unresolved = r.filter((x) => x.real === null);
+  if (unresolved.length > 0) {
+    return { same: null, detail: unresolved.map((x) => `${x.path} (${x.why})`).join('; ') };
+  }
+  return { same: r[0].real === r[1].real, detail: `${r[0].real} vs ${r[1].real}` };
+}
+
 /** fs error codes that describe a passing shortage, not a path that is wrong. */
 const TRANSIENT_RESOLVE = new Set(['EMFILE', 'ENFILE', 'EAGAIN', 'EINTR', 'EIO']);
 
@@ -967,8 +986,9 @@ export async function run(cfg: Config): Promise<RunResult> {
       return pre(`the durable checkout is a linked worktree; the live suite must run from the main checkout (${kind.detail})`);
     }
     if (!cfg.noLand) {
-      const live = realpathOrNull(cfg.liveLink);
-      if (live !== realpathOrNull(repo)) return pre(`the live link resolves to ${live ?? 'nothing'}, not the durable checkout; re-run ./setup there`);
+      const pairing = samePath(cfg.liveLink, repo, fsResolve);
+      if (pairing.same === null) return pre(`cannot resolve the live link against the durable checkout: ${pairing.detail}`);
+      if (!pairing.same) return pre(`the live link does not resolve to the durable checkout (${pairing.detail}); re-run ./setup there`);
     }
     for (const remote of [cfg.upstreamRemote, cfg.originRemote]) {
       if (git(repo, 'remote', 'get-url', remote).code !== 0) return pre(`no '${remote}' remote: not a fork install`);
@@ -1134,8 +1154,9 @@ export async function run(cfg: Config): Promise<RunResult> {
 
     // A suite run can repoint the live link (older team-mode tests ran ./setup
     // with the real HOME). Never leave the machine pointing into a throwaway.
-    if (!cfg.noLand && realpathOrNull(cfg.liveLink) !== realpathOrNull(repo)) {
-      logLine(cfg, 'WARN the live link moved during the gate; restoring it from the durable checkout');
+    const gatePairing = samePath(cfg.liveLink, repo, fsResolve);
+    if (!cfg.noLand && gatePairing.same !== true) {
+      logLine(cfg, `WARN the live link moved during the gate (${gatePairing.detail}); restoring it from the durable checkout`);
       await runLogged(setupCommand(cfg), repo, path.join(runDir, 'setup.log'), cfg.stepTimeoutMs);
     }
 
@@ -1248,7 +1269,8 @@ async function land(cfg: Config, c: LandCtx): Promise<RunResult> {
     const s = await runLogged(setupCommand(cfg), repo, setupLog, cfg.stepTimeoutMs);
     if (s.code !== 0) return `./setup exited ${s.code}${s.timedOut ? ' (timed out)' : ''}`;
     if (label === 'land') runMigrations(cfg, c.oldVersion);
-    if (realpathOrNull(cfg.liveLink) !== realpathOrNull(repo)) return 'the live link does not resolve to the durable checkout after setup';
+    const setupPairing = samePath(cfg.liveLink, repo, fsResolve);
+    if (setupPairing.same !== true) return `the live link does not resolve to the durable checkout after setup (${setupPairing.detail})`;
     const proof = sh('/bin/bash', ['-c', fill(cfg.proofCmd, { live: cfg.liveLink, pid: String(process.pid) })], { cwd: repo, timeoutMs: 120_000 });
     if (!proof.stdout.split('\n').some((l) => l.trim() === cfg.proofExpect)) {
       return `the proof command did not print "${cfg.proofExpect}" (exit ${proof.code})`;
