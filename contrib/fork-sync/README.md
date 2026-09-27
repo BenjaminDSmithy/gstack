@@ -51,6 +51,42 @@ directory). It hands off to this job and skips its own pull and discard.
    never isolated; the parent test that spawned them fails in its own right. A
    regression confirmed in isolation STOPS the run even when a shard wedged.
    An incomplete run with nothing confirmed is `INCONCLUSIVE`, and retries.
+
+   **What a comparative verdict cannot see.** Comparing failure LISTS says
+   nothing about a file that produced no line on either side. A shard that dies
+   before reaching a file leaves it out of both lists, so it is in neither
+   `regressions` nor `baseline` and `regressions=0` reads as "nothing broke"
+   over a set that quietly excludes it. Measured 2026-09-27: shard 2 of 6 was
+   truncated on both trees, `test/ceo-mode-preference-al.test.ts` appeared in
+   neither log, and running it directly failed it.
+
+   A shard is vouched for only by its own terminal summary, which the runner
+   requires to report exactly the planned file count. So each shard now names
+   the files it was told to run before it runs them
+   (`[test:free] shard 2/6 plan: …`), and a shard that never finished
+   surrenders that whole set minus any file that did manage a failure or crash
+   line. Those files are the **unrun set**:
+
+   - Every one of them is NAMED — in `fork-sync.log`, in the `INCONCLUSIVE`
+     detail, and in full under `gate.verdict.unrun` in `state.json`.
+   - The ones our commits TOUCH are re-run in isolation on both trees right
+     away. A failure confirmed that way is a regression by the same rule as any
+     other, and STOPS the run; one that passes is recorded under
+     `gate.verdict.vouched` (not `flaky` — it was never seen failing). This is
+     bounded by construction: it is the `upstream..rebased` test-file diff.
+   - The rest are named, not run. Isolation is one process per file and a
+     wedged shard holds ~180 of them; on a box that sits at 1-minute load
+     100-190 for hours that is hours of wall clock to re-derive a baseline the
+     next scheduled run re-measures for free.
+
+   An unrun file never escalates on the bare fact of being unrun.
+   `BLOCKED_REGRESSION` is memoised per (reason, upstream sha, branch tip) and
+   pages loudly, so raising it off a shard that wedged — a load artefact, not a
+   property of the commits — would freeze the fork behind a flake until a human
+   forced it. Escalation happens through measurement or not at all. Equally,
+   naming files never turns an incomplete run green: a shard that did not
+   finish is still a shard that did not finish, even once every touched file in
+   it has been vouched for.
 6. **Land.** These steps run in order:
    - Re-verify the live checkout: same branch, same tip, clean.
    - Push the old tip to `origin` as a `backup/fork-sync-*` ref, unless origin
@@ -112,7 +148,7 @@ alerts fall back to an `osascript` banner.
 |---|---|---|---|
 | `UP_TO_DATE`, `LANDED`, `REHEARSED`, `DRY_RUN` | 0 | a landing banner (loud if something was dropped) | nothing |
 | `SKIPPED_BLOCKED` | 0 | no | the pair already stopped; see below |
-| `DEFERRED_LOAD`, `DEFERRED_BUSY`, `DEFERRED_FETCH`, `INCONCLUSIVE`, `ABORTED_MOVED` | 2 | loud after 6 in a row | usually nothing; retries next slot |
+| `DEFERRED_LOAD`, `DEFERRED_BUSY`, `DEFERRED_FETCH`, `INCONCLUSIVE`, `ABORTED_MOVED` | 2 | loud after 6 in a row | usually nothing; retries next slot. `INCONCLUSIVE` names the files it could not vouch for |
 | `BLOCKED_CONFLICT` | 3 | loud, once per pair | rekey the named commit by hand (below) |
 | `BLOCKED_STALE` | 3 | loud, once per pair | regenerate and commit on the branch |
 | `BLOCKED_REGRESSION` | 3 | loud, once per pair | the rebased tip is at `refs/fork-sync/attempt`; fix on the branch |

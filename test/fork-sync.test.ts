@@ -11,8 +11,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
-  compareVersions, droppedSubjects, fill, gateCandidates, landingBranchName,
-  parseSuiteLog, renderPlist, suiteComplete, defaultConfig,
+  compareVersions, droppedSubjects, fill, gateCandidates, landingBranchName, nameList,
+  parseSuiteLog, renderPlist, suiteComplete, unvouchedFiles, defaultConfig,
 } from '../contrib/fork-sync/fork-sync';
 
 const ROOT = path.resolve(import.meta.dir, '..');
@@ -77,6 +77,67 @@ describe('suite log parsing', () => {
     expect([...ours.failingFiles]).toEqual([]);
     expect(gateCandidates(ours, base, [])).toEqual([]);
     expect(gateCandidates(ours, parseSuiteLog(''), [])).toEqual([]);
+  });
+
+  // The defect this pins, measured 2026-09-27 on run 20260927-181603: shard 2
+  // of 6 was truncated on BOTH trees, so test/ceo-mode-preference-al.test.ts
+  // produced no line on either side, landed in neither `regressions` nor
+  // `baseline`, and `regressions=0` read as "nothing broke" over a set that
+  // excluded it. Run directly, that file failed.
+  test('an unfinished shard leaks its whole planned set: the run cannot vouch for those files', () => {
+    const r = parseSuiteLog([
+      '[test:free] full suite: 4 files across 2 shard processes (duration-packed)',
+      '[test:free] shard 1/2 plan: test/a.test.ts test/quiet.test.ts',
+      '[test:free] shard 2/2 plan: test/never-reached.test.ts test/reported.test.ts',
+      '[test:free] shard 1/2: 2 files, 30s, pass',
+      '[test:free] shard 2/2 exited 0 but never printed bun\'s terminal summary — the run was truncated. Treating as FAILED.',
+      '[test:free] shard 2/2: 2 files, 65s, fail',
+      '  ✗ test/reported.test.ts — got as far as failing',
+    ].join('\n'));
+    expect(r.plans.get(1)).toEqual(['test/a.test.ts', 'test/quiet.test.ts']);
+    expect(suiteComplete(r)).toBe(false);
+    const un = unvouchedFiles(r);
+    // Shard 1 finished, so its files are vouched for — including the one that
+    // passed quietly. Shard 2 did not, so its files are not; the file that got
+    // as far as printing a failure is left to the comparative verdict.
+    expect(un.files).toEqual(['test/never-reached.test.ts']);
+    expect(un.shards).toEqual([2]);
+    expect(un.unnamedShards).toEqual([]);
+  });
+
+  test('a complete run has nothing unvouched, however red it is', () => {
+    const r = parseSuiteLog([
+      '[test:free] shard 1/1 plan: test/a.test.ts test/b.test.ts',
+      '[test:free] shard 1/1 failed with exit code 1',
+      '[test:free] shard 1/1: 2 files, 30s, fail',
+      '  ✗ test/a.test.ts — red',
+    ].join('\n'));
+    expect(suiteComplete(r)).toBe(true);
+    expect(unvouchedFiles(r)).toEqual({ files: [], shards: [], unnamedShards: [] });
+  });
+
+  test('a timed-out shard is unvouched, and one with no plan line at all is named as unnameable', () => {
+    const timedOut = parseSuiteLog([
+      '[test:free] shard 1/2 plan: test/a.test.ts',
+      '[test:free] shard 2/2 plan: test/slow.test.ts',
+      '[test:free] shard 1/2: 1 files, 5s, pass',
+      '[test:free] shard 2/2: 1 files, 3600s, timed-out',
+    ].join('\n'));
+    expect(unvouchedFiles(timedOut)).toEqual({ files: ['test/slow.test.ts'], shards: [2], unnamedShards: [] });
+
+    // The whole-suite wall can fire before a shard prints anything: its plan
+    // is missing, so its files cannot be named and the verdict must say so
+    // rather than report an empty unrun set as "nothing to worry about".
+    const noPlan = parseSuiteLog([
+      '[test:free] shard 1/2 plan: test/a.test.ts',
+      '[test:free] shard 1/2: 1 files, 5s, pass',
+    ].join('\n'));
+    expect(unvouchedFiles(noPlan)).toEqual({ files: [], shards: [2], unnamedShards: [2] });
+  });
+
+  test('nameList bounds what a log line or a notification carries', () => {
+    expect(nameList(['a', 'b'], 3)).toBe('a, b');
+    expect(nameList(['a', 'b', 'c', 'd'], 3)).toBe('a, b, c and 1 more');
   });
 
   test('gate candidates: ours-only failures and crashes, plus touched tests failing anywhere', () => {
@@ -166,18 +227,27 @@ function makeSandbox(opts: { pushCarried?: boolean } = {}): Sandbox {
   const notifyLog = path.join(base, 'notify.log');
   write(path.join(bin, 'notify'), `#!${BASH}\nprintf '%s\\n' "$*" >> ${JSON.stringify(notifyLog)}\n`, 0o755);
   // Fake free suite: fails every `file — test` line listed in .fake-failures.
+  // .fake-plan names the files the shard was TOLD to run (the real runner's
+  // `plan:` line); .fake-truncate makes the shard exit without bun's summary,
+  // so those files ran without ever reporting.
   write(path.join(bin, 'suite'), [
     `#!${BASH}`,
     'n=0; [ -f .fake-failures ] && n=$(grep -c . .fake-failures)',
     'end=fail; [ -f .fake-wedge ] && end=timed-out',
     'echo "[test:free] full suite: 3 files across 1 shard processes"',
+    `[ -f .fake-plan ] && echo "[test:free] shard 1/1 plan: $(tr '\\n' ' ' < .fake-plan)"`,
+    'if [ -f .fake-truncate ]; then',
+    '  echo "[test:free] shard 1/1 exited 0 but never printed bun\'s terminal summary — the run was truncated (a process.exit fired mid-suite). Treating as FAILED."',
+    'fi',
     'if [ "$n" -gt 0 ]; then',
     '  echo "[test:free] shard 1/1: 3 files, 1s, $end"',
     '  echo "[test:free] FAIL — $n failing test(s) in 1 file(s), 0 crashed worker(s). Full log: /dev/null"',
     '  while IFS= read -r l; do [ -n "$l" ] && echo "  ✗ $l"; done < .fake-failures',
     '  exit 1',
     'fi',
-    'echo "[test:free] shard 1/1: 3 files, 1s, pass"',
+    'echo "[test:free] shard 1/1: 3 files, 1s, $end"',
+    '[ -f .fake-truncate ] && exit 1',
+    'exit 0',
     '',
   ].join('\n'), 0o755);
   // Fake isolated run: fails when the tree's .fake-iso-fail lists the file.
@@ -381,6 +451,86 @@ describe('fork-sync run (sandbox repos)', () => {
     expect(confirmed.code).toBe(3);
     expect(confirmed.out).toContain('BLOCKED_REGRESSION');
     expect(notes(sb).some((l) => l.includes('test/bad.test.ts'))).toBe(true);
+  });
+
+  e2e('an incomplete run NAMES the files it cannot vouch for, not just the condition', (sb) => {
+    commit(sb.durable, sb.env, 'feat: ours truncates a shard', {
+      '.fake-truncate': 'x\n',
+      '.fake-plan': 'test/never-reached.test.ts\ntest/also-unreached.test.ts\n',
+    });
+    git(sb.durable, sb.env, 'push', '-q', 'origin', 'feat/x-1.0.0');
+    upstreamShips(sb, '1.1.0.0', { 'up.txt': 'up\n' });
+    const before = liveState(sb);
+
+    const r = runSync(sb);
+    expect(r.code).toBe(2);
+    expect(r.out).toContain('INCONCLUSIVE');
+    // The whole point: a verdict that says WHICH files, not only that a shard
+    // died. `regressions=0` over a set that silently excluded them is the bug.
+    expect(r.out).toContain('test/never-reached.test.ts');
+    expect(r.out).toContain('test/also-unreached.test.ts');
+    expect(liveState(sb)).toEqual(before);
+    const gate = stateJson(sb).lastRun.gate;
+    expect(gate.verdict.unrun).toEqual(['test/also-unreached.test.ts', 'test/never-reached.test.ts']);
+    expect(gate.ours.unvouchedShards).toEqual([1]);
+    // Inconclusive stays inconclusive: naming files must not turn a truncated
+    // run into a pass.
+    expect(gate.verdict.verdict).toBe('inconclusive');
+  });
+
+  e2e('an unrun file our commits TOUCH is re-run on both trees: a confirmed failure STOPS', (sb) => {
+    // Phase 1: upstream ships the file and we land onto it, so pristine
+    // upstream has it too and the isolated comparison is a real three-way.
+    upstreamShips(sb, '1.1.0.0', { 'test/shared.test.ts': '// upstream\n' });
+    expect(runSync(sb).out).toContain('LANDED');
+
+    // Phase 2: our commit touches that file, and the shard holding it dies
+    // before reporting on it — the dangerous case. Nothing measured what we
+    // changed, and the comparative diff of failure lists cannot see it.
+    commit(sb.durable, sb.env, 'feat: ours edits a test that then goes unrun', {
+      'test/shared.test.ts': '// ours\n',
+      '.fake-truncate': 'x\n',
+      '.fake-plan': 'test/shared.test.ts\n',
+      '.fake-iso-fail': 'test/shared.test.ts\n',
+    });
+    git(sb.durable, sb.env, 'push', '-q', 'origin', 'feat/x-1.1.0');
+    upstreamShips(sb, '1.2.0.0', { 'up2.txt': 'up\n' });
+    const before = liveState(sb);
+
+    const r = runSync(sb);
+    expect(r.code).toBe(3);
+    expect(r.out).toContain('BLOCKED_REGRESSION');
+    expect(r.out).toContain('test/shared.test.ts');
+    expect(liveState(sb)).toEqual(before);
+    const gate = stateJson(sb).lastRun.gate;
+    expect(gate.verdict.regressions).toEqual(['test/shared.test.ts']);
+    expect(gate.verdict.unrun).toEqual([]);
+    expect(notes(sb).some((l) => l.includes('test/shared.test.ts'))).toBe(true);
+  });
+
+  e2e('an unrun touched file that passes in isolation is vouched for, and is not called flaky', (sb) => {
+    upstreamShips(sb, '1.1.0.0', { 'test/shared.test.ts': '// upstream\n' });
+    expect(runSync(sb).out).toContain('LANDED');
+
+    commit(sb.durable, sb.env, 'feat: ours edits a test that then goes unrun', {
+      'test/shared.test.ts': '// ours\n', '.fake-truncate': 'x\n', '.fake-plan': 'test/shared.test.ts\n',
+    });
+    git(sb.durable, sb.env, 'push', '-q', 'origin', 'feat/x-1.1.0');
+    upstreamShips(sb, '1.2.0.0', { 'up2.txt': 'up\n' });
+    const before = liveState(sb);
+
+    const r = runSync(sb);
+    expect(r.out).toContain('INCONCLUSIVE');
+    expect(r.code).toBe(2);
+    // Nothing landed: a shard that did not finish is still a shard that did
+    // not finish, even once every touched file in it has been vouched for.
+    expect(liveState(sb)).toEqual(before);
+    const gate = stateJson(sb).lastRun.gate;
+    expect(gate.verdict.vouched).toEqual(['test/shared.test.ts']);
+    // It was never seen failing, so calling it flaky would inflate that count.
+    expect(gate.verdict.flaky).toEqual([]);
+    expect(gate.verdict.unrun).toEqual([]);
+    expect(gate.verdict.regressions).toEqual([]);
   });
 
   e2e('a red baseline does not block, and an ours-only failure that passes in isolation is flaky', (sb) => {
