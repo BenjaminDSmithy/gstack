@@ -1418,7 +1418,7 @@ function renderHook(cfg: Config, hook: string, args: string[]): number {
   } catch { /* no pick or revert sequence */ }
   const skip = renderHookSkip({
     hook, args, picksLeft,
-    atLive: realpathOrNull(top) === realpathOrNull(cfg.liveLink) && gitDir !== null && gitDir === commonDir,
+    atLive: samePath(top, cfg.liveLink, fsResolve).same === true && gitDir !== null && gitDir === commonDir,
     rebasing: [gitPath('rebase-merge'), gitPath('rebase-apply')].some((d) => d !== '' && fs.existsSync(d)),
   });
   if (skip) return 0;
@@ -1568,8 +1568,9 @@ function installAgent(cfg: Config, args: string[]): number {
   const scriptPath = path.join(cfg.repo, 'contrib', 'fork-sync', 'fork-sync.ts');
   // The agent must run the DURABLE checkout's copy, which updates with every
   // landing. Pointing launchd into a worktree would dangle once it is reaped.
-  if (realpathOrNull(SELF) !== realpathOrNull(scriptPath) && !args.includes('--allow-foreign')) {
-    console.error(`install-agent must run from the durable checkout's copy (${scriptPath}), not ${SELF}.`);
+  const own = samePath(SELF, scriptPath, fsResolve);
+  if (own.same !== true && !args.includes('--allow-foreign')) {
+    console.error(`install-agent must run from the durable checkout's copy (${scriptPath}), not ${SELF}. (${own.detail})`);
     return 1;
   }
   if (notifyCmd && !fs.existsSync(notifyCmd)) { console.error(`notifier not found: ${notifyCmd}`); return 1; }
