@@ -12,7 +12,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   compareVersions, droppedSubjects, fill, gateCandidates, landingBranchName, nameList,
-  parseSuiteLog, renderPlist, suiteComplete, unvouchedFiles, defaultConfig,
+  parseSuiteLog, renderPlist, suiteComplete, unvouchedFiles, worktreeKind, defaultConfig,
 } from '../contrib/fork-sync/fork-sync';
 
 const ROOT = path.resolve(import.meta.dir, '..');
@@ -159,6 +159,42 @@ describe('suite log parsing', () => {
   });
 });
 
+describe('worktreeKind', () => {
+  const stub = (map: Record<string, string | Error>) => (p: string) => {
+    const v = map[p];
+    return v instanceof Error ? { path: p, real: null, why: v.message } : { path: p, real: v, why: '' };
+  };
+
+  test('a main worktree resolves both paths to the same place', () => {
+    expect(worktreeKind('/r/.git', '/r/.git', stub({ '/r/.git': '/real/r/.git' })))
+      .toEqual({ kind: 'main', detail: '/real/r/.git' });
+  });
+
+  test('a linked worktree is a RESOLVED mismatch', () => {
+    const k = worktreeKind('/r/.git/worktrees/w', '/r/.git', stub({
+      '/r/.git/worktrees/w': '/real/r/.git/worktrees/w', '/r/.git': '/real/r/.git',
+    }));
+    expect(k.kind).toBe('linked');
+  });
+
+  // The defect: a path that could not be STATTED used to compare as null
+  // against a real path and be reported as a linked worktree — a loud,
+  // memoised claim about the repo layout that nothing had established, and
+  // unfalsifiable afterwards because the fs error was swallowed.
+  test('a path that cannot be resolved says so, and is never read as linked', () => {
+    const k = worktreeKind('/r/.git', '/r/.git', stub({ '/r/.git': new Error('EMFILE: too many open files') }));
+    expect(k.kind).toBe('unresolved');
+    expect(k.detail).toContain('EMFILE');
+    expect(k.detail).toContain('/r/.git');
+  });
+
+  test('one side unresolvable is unresolved, not linked', () => {
+    const k = worktreeKind('/a/.git', '/b/.git', stub({ '/a/.git': '/real/a/.git', '/b/.git': new Error('ENOENT') }));
+    expect(k.kind).toBe('unresolved');
+    expect(k.detail).toContain('/b/.git');
+  });
+});
+
 describe('small helpers', () => {
   test('droppedSubjects is a multiset difference', () => {
     expect(droppedSubjects(['a', 'b', 'b', 'c'], ['b', 'c'])).toEqual(['a', 'b']);
@@ -232,6 +268,10 @@ function makeSandbox(opts: { pushCarried?: boolean } = {}): Sandbox {
   };
   delete env.GIT_DIR;
   delete env.GIT_WORK_TREE;
+  // All three selectors are one hazard class (test/ship-hook-refresh.test.ts
+  // clears the same set): an inherited GIT_COMMON_DIR would make the sandbox's
+  // own main checkout look like a linked worktree and STOP every run.
+  delete env.GIT_COMMON_DIR;
 
   const notifyLog = path.join(base, 'notify.log');
   write(path.join(bin, 'notify'), `#!${BASH}\nprintf '%s\\n' "$*" >> ${JSON.stringify(notifyLog)}\n`, 0o755);
@@ -644,6 +684,21 @@ describe('fork-sync run (sandbox repos)', () => {
     expect(liveState(sb)).toEqual(before);
     expect(notes(sb)).toEqual([]);
     expect(stateJson(sb).rehearsal.outcome).toBe('REHEARSED');
+  });
+
+  e2e('a live checkout that really is a linked worktree is a precondition STOP', (sb) => {
+    const linked = path.join(sb.base, 'linked');
+    git(sb.durable, sb.env, 'worktree', 'add', '--detach', linked, 'feat/x-1.0.0');
+    const link = path.join(sb.home, '.claude', 'skills', 'gstack');
+    fs.unlinkSync(link);
+    fs.symlinkSync(linked, link);
+    const r = runSync(sb);
+    expect(r.code).toBe(3);
+    expect(r.out).toContain('BLOCKED_PRECONDITION');
+    expect(r.out).toContain('linked worktree');
+    // The claim is only ever made about a git dir that RESOLVED: an
+    // unresolvable path reports itself instead of being read as this.
+    expect(r.out).not.toContain('cannot resolve');
   });
 
   e2e('a live link that does not resolve to the checkout is a precondition STOP', (sb) => {
