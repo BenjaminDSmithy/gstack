@@ -22,24 +22,40 @@ import { MOCK_KEYCHAIN_SWITCHES, mockKeychainChromium } from './fixtures/mock-ke
 
 const ROOT = path.resolve(import.meta.dir, '../..');
 
+const DIA_LAUNCHER = /\b(?:nativeDiaLaunchOptions|runProtectedLaunch)\s*\(/;
+const transpiler = new Bun.Transpiler({ loader: 'ts' });
+
+/** Whether the call at `at` sits inside the argument list of a `mockKeychainChromium(` call. */
+function insideShimCall(code: string, at: number): boolean {
+  let depth = 0;
+  for (let i = at - 1; i >= 0; i--) {
+    if (code[i] === ')') depth++;
+    else if (code[i] === '(') {
+      if (depth > 0) depth--;
+      else if (/\bmockKeychainChromium\s*$/.test(code.slice(Math.max(0, i - 64), i))) return true;
+    }
+  }
+  return false;
+}
+
 /**
- * Lines of a test file that hand a real Chromium to the Dia launcher without
- * the shim: every non-comment `chromium.executablePath()` in a file that calls
- * the launcher must sit inside a `mockKeychainChromium(` call on the same line.
- * Inline block comments are stripped first, so a comment cannot vouch for it.
+ * Real-Chromium launches a test file hands to the Dia launcher without the
+ * shim, as the offending code lines. Bun's transpiler strips comments with a
+ * real lexer, joins calls split across lines, and keeps strings and templates,
+ * so a comment cannot vouch for a launch and launch code built as a string
+ * (the comparison test's probe is) is still checked. Every
+ * `chromium.executablePath()` must sit inside a `mockKeychainChromium(` call.
  */
-function unshimmedStandIns(text: string): number[] {
-  if (!/\b(?:nativeDiaLaunchOptions|runProtectedLaunch)\(/.test(text)) return [];
-  const lines: number[] = [];
-  text.split('\n').forEach((raw, index) => {
-    const line = raw.replace(/\/\*.*?\*\//g, '');
-    if (/^\s*(?:\/\/|\*)/.test(line)) return;
-    const launch = line.indexOf('chromium.executablePath()');
-    if (launch === -1) return;
-    const shim = line.indexOf('mockKeychainChromium(');
-    if (shim === -1 || shim > launch) lines.push(index + 1);
-  });
-  return lines;
+function unshimmedStandIns(source: string): string[] {
+  if (!DIA_LAUNCHER.test(source)) return [];
+  const code = transpiler.transformSync(source);
+  if (!DIA_LAUNCHER.test(code)) return [];
+  return [...code.matchAll(/\bchromium\s*\.\s*executablePath\s*\(/g)]
+    .filter(match => !insideShimCall(code, match.index!))
+    .map(match => {
+      const end = code.indexOf('\n', match.index!);
+      return code.slice(code.lastIndexOf('\n', match.index!) + 1, end === -1 ? undefined : end).trim();
+    });
 }
 
 function sourceFiles(directory: string, pattern: RegExp): string[] {
@@ -77,23 +93,34 @@ describe('test-owned Chromium launches keep the keychain mocked', () => {
     for (const file of sourceFiles(import.meta.dir, /\.test\.ts$/)) {
       if (file === import.meta.path) continue;
       for (const line of unshimmedStandIns(readFileSync(file, 'utf8'))) {
-        unshimmed.push(`${path.relative(ROOT, file).split(path.sep).join('/')}:${line}`);
+        unshimmed.push(`${path.relative(ROOT, file).split(path.sep).join('/')}: ${line}`);
       }
     }
     expect(unshimmed).toEqual([]);
   });
 
-  test('the stand-in check flags each unshimmed launch site, not the file', () => {
+  test('the stand-in check flags each unshimmed launch, whatever its layout', () => {
+    const launcher = 'nativeDiaLaunchOptions(exe, env);';
     const wrapped = 'const exe = mockKeychainChromium(dir, realpathSync(chromium.executablePath()));';
     const raw = 'await runProtectedLaunch(chromium.executablePath(), profile, env);';
-    expect(unshimmedStandIns(['nativeDiaLaunchOptions(exe, env);', wrapped].join('\n'))).toEqual([]);
-    // One shimmed launch no longer exempts a second, raw one in the same file.
-    expect(unshimmedStandIns([wrapped, 'nativeDiaLaunchOptions(exe, env);', raw].join('\n'))).toEqual([3]);
-    // A comment cannot vouch for a raw launch, and a comment line is not a launch.
-    expect(unshimmedStandIns(['runProtectedLaunch(/* mockKeychainChromium( */ chromium.executablePath());'].join('\n'))).toEqual([1]);
-    expect(unshimmedStandIns(['nativeDiaLaunchOptions(exe, env);', '// never pass chromium.executablePath() bare'].join('\n'))).toEqual([]);
+    const flagged = (...lines: string[]) => unshimmedStandIns(lines.join('\n')).length;
+    // Wrapped launches pass, on one line or spread across several.
+    expect(flagged(launcher, wrapped)).toBe(0);
+    expect(flagged(launcher, 'const exe = mockKeychainChromium(', '  dir,', '  realpathSync(chromium.executablePath()),', ');')).toBe(0);
+    // One shimmed launch does not exempt a raw one, in the same file or on the same line.
+    expect(flagged(wrapped, launcher, raw)).toBe(1);
+    expect(flagged(`mockKeychainChromium(dir, other); ${raw}`)).toBe(1);
+    expect(flagged(`${wrapped} ${raw}`)).toBe(1);
+    // A raw launch split across lines is still found.
+    expect(flagged('runProtectedLaunch(chromium.executablePath(', '), profile, env);')).toBe(1);
+    // Comments cannot vouch for a launch, and "/*" inside a string does not hide code.
+    expect(flagged('runProtectedLaunch(/* mockKeychainChromium( */ chromium.executablePath());')).toBe(1);
+    expect(flagged(`const a = "/*"; ${raw} const b = "*/";`)).toBe(1);
+    // A comment is not a launch; launch code built as a string still is.
+    expect(flagged(launcher, '// never pass chromium.executablePath() bare')).toBe(0);
+    expect(flagged(launcher, 'const probe = `runProtectedLaunch(chromium.executablePath(), home)`;')).toBe(1);
     // Files that never reach the Dia launcher keep Playwright's own mocks and are not checked.
-    expect(unshimmedStandIns('chromium.launch({ executablePath: chromium.executablePath() });')).toEqual([]);
+    expect(flagged('chromium.launch({ executablePath: chromium.executablePath() });')).toBe(0);
   });
 
   describe.skipIf(process.platform === 'win32')('mockKeychainChromium', () => {
