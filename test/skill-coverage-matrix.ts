@@ -43,9 +43,9 @@ export const SKILL_COVERAGE: Record<string, SkillCoverage> = {
     periodic: ['test/skill-e2e-workflow.test.ts'],
   },
   'pr-prep': {
-    gate: ['test/pr-prep-score.test.ts', 'test/skill-coverage-floor.test.ts'],
+    gate: ['test/pr-prep-score.test.ts', 'test/pr-prep-skill-blocks.test.ts', 'test/skill-coverage-floor.test.ts'],
     periodic: [],
-    rationale: 'Behavioral test pins the Step 4 collision-scorer bucketing; structural floor covers the rest.',
+    rationale: 'Behavioral tests pin the Step 4 collision-scorer bucketing and run the Step 3 fetch + Step 4.4 codex blocks against stub gh/codex under bash and zsh; structural floor covers the rest.',
   },
   review: {
     gate: ['test/skill-e2e-review.test.ts', 'test/skill-e2e-shared-libs.test.ts', 'test/skill-e2e-shared-libs-paths.test.ts', 'test/shared-libs-evidence.test.ts', 'test/shared-libs-rendering.test.ts', 'test/skill-coverage-floor.test.ts'],
