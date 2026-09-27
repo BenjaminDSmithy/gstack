@@ -69,10 +69,19 @@ describe("#2679: skill-content mktemp guards", () => {
     // source, so match to end-of-line rather than [^}]* (which stops at the
     // interpolation's closing brace).
     const body = readScript("scripts/resolvers/redact-doc.ts");
-    expect(body).toMatch(/REDACT_FILE=\$\(mktemp\)\s*\|\|\s*\{.*exit 1/);
+    expect(body).toMatch(/REDACT_FILE=\$\(mktemp "\\\$\{TMPDIR:-\/tmp\}\/gstack-redact\.XXXXXX"\)\s*\|\|\s*\{.*exit 1/);
     // And the rendered output (interpolation resolved) carries the guard too.
     const rendered = readScript("spec/sections/gate-and-file.md");
-    expect(rendered).toMatch(/REDACT_FILE=\$\(mktemp\)\s*\|\|\s*\{[^}]*exit 1/);
+    expect(rendered).toMatch(/REDACT_FILE=\$\(mktemp "\$\{TMPDIR:-\/tmp\}\/gstack-redact\.XXXXXX"\)\s*\|\|\s*\{[^}]*exit 1/);
+  });
+
+  test("redact-doc scan file honours TMPDIR (no bare mktemp)", () => {
+    // Bare `mktemp` on macOS acts as `-t tmp`, which prefers the per-user
+    // confstr temp dir over TMPDIR, so a paused MEDIUM body landed outside
+    // the caller's temp root. GNU mktemp honours TMPDIR either way, so this
+    // static pin is what catches a regression on Linux CI.
+    const rendered = readScript("spec/sections/gate-and-file.md");
+    expect(rendered).not.toMatch(/REDACT_FILE=\$\(mktemp(?: -t [^)]*)?\)/);
   });
 
   test("ship pr-body template guards PR_BODY_FILE=$(mktemp) with a loud exit", () => {
