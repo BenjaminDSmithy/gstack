@@ -24,9 +24,12 @@ Object.defineProperty(process, 'pid', { value: 0 });
 
 // Publish readiness only after the grandchild has initialized and flushed both
 // inherited pipes; a PID returned by spawn alone does not establish that state.
+// Its keep-alive is bounded, far above any test here, as in
+// claude-code-runner.test.ts: its lifetime never depends on cleanup running.
 writeFileSync(DESCENDANT, `
 import { writeFileSync } from 'node:fs';
-setInterval(() => {}, 1000);
+const keepAlive = setInterval(() => {}, 1000);
+setTimeout(() => clearInterval(keepAlive), Number(process.env.FIXTURE_MAX_MS) || 60_000);
 await new Promise(resolve => process.stdout.write(' ', resolve));
 await new Promise(resolve => process.stderr.write(' ', resolve));
 writeFileSync(process.env.PID_FILE!, String(process.pid));
@@ -103,6 +106,19 @@ describe('Windows Claude CLI job containment', () => {
     expect(parsed.error.code).toBe('supervision');
     expect(parsed.error.message).toContain('Claude Code Windows process supervision could not initialize');
     expect(() => readFileSync(PID_FILE)).toThrow();
+  });
+
+  test('the pipe holder exits unaided once its lifetime bound elapses', () => {
+    const pidFile = path.join(DIR, 'bounded-holder.pid');
+    const start = Date.now();
+    const result = spawnSync(process.execPath, [DESCENDANT], {
+      env: { ...process.env, PID_FILE: pidFile, FIXTURE_MAX_MS: '300' }, encoding: 'utf8', timeout: 10_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(0);
+    expect(Number(readFileSync(pidFile, 'utf8'))).toBe(result.pid);
+    expect(Date.now() - start).toBeGreaterThanOrEqual(300);
   });
 
   for (const [mode, expected] of [['descendant', 'output-drain'], ['timeout', 'timeout']]) {
