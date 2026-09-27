@@ -30,7 +30,11 @@
  *      only if it is ours alone and survives isolated re-runs: ours fails every
  *      attempt, while base passes one or lacks the file. A test file our
  *      commits touch is re-run in isolation even when both sides fail, so a
- *      red baseline cannot hide a regression in it.
+ *      red baseline cannot hide a regression in it. A comparative verdict is
+ *      blind to a file that produced no line on EITHER side, so a shard that
+ *      did not finish surrenders its whole planned set: those files are named
+ *      in the verdict, and the ones our commits touch are re-run here and now
+ *      rather than left unmeasured.
  *   6. Land. Re-verify the live checkout (same branch, same tip, clean), make
  *      sure the old tip is on origin, push the new branch (a NEW ref, never a
  *      force), switch the live checkout to it, run ./setup and the version
@@ -113,8 +117,22 @@ export interface SuiteResult {
   shardTotal: number;
   /** Shards that died by signal, exited abnormally, or were truncated: their files did not all run. */
   abnormal: Set<number>;
+  /** Shard -> the files it was TOLD to run, from the runner's `plan:` line. */
+  plans: Map<number, string[]>;
+  /** Shards whose epilogue said `timed-out`; the whole-suite wall sets `timedOut` instead. */
+  timedOutShards: Set<number>;
   timedOut: boolean;
   passedWhole: boolean;
+}
+
+/** Test files an incomplete run reached no verdict on, and why they cannot be named. */
+export interface UnvouchedSet {
+  /** Files in a shard that never finished, with no failure or crash line of their own. */
+  files: string[];
+  /** Shard numbers that did not finish. */
+  shards: number[];
+  /** Shards that did not finish AND never printed their plan: their files cannot be named. */
+  unnamedShards: number[];
 }
 
 export interface GateVerdict {
@@ -122,6 +140,10 @@ export interface GateVerdict {
   regressions: string[];
   flaky: string[];
   baseline: string[];
+  /** Files the run never reached a verdict on. Named, not run: see judge(). */
+  unrun: string[];
+  /** Unrun files our commits touch that an isolated re-run then proved good. */
+  vouched: string[];
   reasons: string[];
 }
 
@@ -209,6 +231,9 @@ export function normaliseTestPath(file: string): string {
 }
 const CRASH_LINE = /^ {2}⚠ crashed\+retried: (.+)$/;
 const SHARD_LINE = /^\[test:free\] shard (\d+)\/(\d+): \d+ files, \d+s, (pass|fail|timed-out)$/;
+// Printed by runFreeShard BEFORE the shard runs anything, so it survives a
+// wedge: the set of files that shard was told to run.
+const SHARD_PLAN = /^\[test:free\] shard (\d+)\/(\d+) plan:(.*)$/;
 // The runner's own verdicts on a shard that did not run all its files:
 // `failed with exit code signal|<n>` (1 is an ordinary test failure) and
 // `exited 0 but … Treating as FAILED.` (a truncated run).
@@ -222,7 +247,8 @@ const SHARD_ABNORMAL = /^\[test:free\] shard (\d+)\/\d+ (?:failed with exit code
 export function parseSuiteLog(text: string): SuiteResult {
   const result: SuiteResult = {
     failures: new Set(), failingFiles: new Set(), crashed: new Set(), unattributed: 0,
-    shardsSeen: new Set(), shardTotal: 0, abnormal: new Set(), timedOut: false, passedWhole: false,
+    shardsSeen: new Set(), shardTotal: 0, abnormal: new Set(), plans: new Map(),
+    timedOutShards: new Set(), timedOut: false, passedWhole: false,
   };
   for (const raw of text.split('\n')) {
     const line = raw.replace(/\r$/, '');
@@ -242,11 +268,17 @@ export function parseSuiteLog(text: string): SuiteResult {
     }
     const abnormal = SHARD_ABNORMAL.exec(line);
     if (abnormal && abnormal[2] !== '1') { result.abnormal.add(Number(abnormal[1])); continue; }
+    const plan = SHARD_PLAN.exec(line);
+    if (plan) {
+      result.plans.set(Number(plan[1]), plan[3].trim().split(/\s+/).filter(Boolean));
+      result.shardTotal = Math.max(result.shardTotal, Number(plan[2]));
+      continue;
+    }
     const shard = SHARD_LINE.exec(line);
     if (shard) {
       result.shardsSeen.add(Number(shard[1]));
       result.shardTotal = Math.max(result.shardTotal, Number(shard[2]));
-      if (shard[3] === 'timed-out') result.timedOut = true;
+      if (shard[3] === 'timed-out') { result.timedOut = true; result.timedOutShards.add(Number(shard[1])); }
     }
   }
   return result;
@@ -257,6 +289,43 @@ export function suiteComplete(r: SuiteResult): boolean {
   if (r.timedOut || r.shardTotal === 0 || r.abnormal.size > 0) return false;
   for (let i = 1; i <= r.shardTotal; i += 1) if (!r.shardsSeen.has(i)) return false;
   return true;
+}
+
+/**
+ * The files an incomplete run reached no verdict on.
+ *
+ * `regressions=0` over a comparative diff of FAILURE LISTS silently excludes
+ * every file that produced no line at all: a shard that dies before reaching
+ * a file puts it in neither side's list, so it is in neither `regressions`
+ * nor `baseline` and the verdict reads as "nothing broke" over a set that
+ * quietly omits it. Measured 2026-09-27: shard 2 of 6 was truncated on both
+ * trees and `test/ceo-mode-preference-al.test.ts` appeared in neither log,
+ * while a direct run failed it.
+ *
+ * A shard is vouched for only by its own terminal summary, which the runner
+ * requires to report EXACTLY the planned file count. So an unvouched shard
+ * (never finished, abnormal, or timed out) leaks its whole planned set, minus
+ * the files that did produce a failure or crash line — those the comparative
+ * verdict and the isolated re-runs already cover in their own right.
+ */
+export function unvouchedFiles(r: SuiteResult): UnvouchedSet {
+  const shards: number[] = [];
+  const unnamedShards: number[] = [];
+  const files = new Set<string>();
+  // The whole-suite wall can fire before any shard prints an epilogue, so a
+  // shard with no epilogue at all counts as unvouched, not as absent.
+  const total = Math.max(r.shardTotal, ...[0, ...r.plans.keys()]);
+  for (let i = 1; i <= total; i += 1) {
+    if (r.shardsSeen.has(i) && !r.abnormal.has(i) && !r.timedOutShards.has(i)) continue;
+    shards.push(i);
+    const plan = r.plans.get(i);
+    if (!plan) { unnamedShards.push(i); continue; }
+    for (const file of plan) {
+      if (r.failingFiles.has(file) || r.crashed.has(file)) continue;
+      files.add(file);
+    }
+  }
+  return { files: [...files].sort(), shards, unnamedShards };
 }
 
 /**
@@ -625,12 +694,41 @@ async function isolatedPasses(cfg: Config, root: string, file: string, logFile: 
   return false;
 }
 
+/** How many unrun file names a one-line message carries before it summarises. */
+const NAME_CAP = 8;
+
+/** `a, b, c and 4 more` — bounded for a log line or a notification body. */
+export function nameList(files: string[], cap = NAME_CAP): string {
+  if (files.length <= cap) return files.join(', ');
+  return `${files.slice(0, cap).join(', ')} and ${files.length - cap} more`;
+}
+
 async function judge(cfg: Config, ours: SuiteResult, base: SuiteResult, touchedTests: string[], oursRoot: string, baseRoot: string, runDir: string): Promise<GateVerdict> {
   // Isolate first, judge completeness second: a regression confirmed in
   // isolation is definitive even when a shard wedged, and naming it is what
   // makes the STOP actionable. An incomplete run with nothing confirmed can
   // prove nothing either way, so it stays inconclusive.
-  const v: GateVerdict = { verdict: 'pass', regressions: [], flaky: [], baseline: [], reasons: [] };
+  const v: GateVerdict = { verdict: 'pass', regressions: [], flaky: [], baseline: [], unrun: [], vouched: [], reasons: [] };
+  const isoLog = path.join(runDir, 'isolate.log');
+
+  /**
+   * The three-way isolated verdict on one file: ours passes => not ours to
+   * answer for; ours fails and base passes or lacks it => regression; both
+   * fail => baseline-red. Returns false when the file cannot be re-run here.
+   */
+  const isolate = async (file: string, flakyBucket: string[]): Promise<boolean> => {
+    if (!fs.existsSync(path.join(oursRoot, file))) {
+      // Attributed to a path this tree does not have: not a file we can re-run.
+      v.reasons.push(`skipped ${file}: not a file in the rebased tree`);
+      return false;
+    }
+    if (await isolatedPasses(cfg, oursRoot, file, isoLog)) { flakyBucket.push(file); return true; }
+    if (!fs.existsSync(path.join(baseRoot, file))) { v.regressions.push(`${file} (new on our side, fails)`); return true; }
+    if (await isolatedPasses(cfg, baseRoot, file, isoLog)) v.regressions.push(file);
+    else v.baseline.push(file);
+    return true;
+  };
+
   if (!suiteComplete(ours)) {
     v.verdict = 'inconclusive';
     v.reasons.push(ours.timedOut ? 'a shard of the rebased suite timed out' : 'the rebased suite did not finish every shard');
@@ -640,17 +738,48 @@ async function judge(cfg: Config, ours: SuiteResult, base: SuiteResult, touchedT
     v.verdict = 'inconclusive';
     v.reasons.push(`${unattributed} ours-only failure(s) could not be attributed to a file`);
   }
-  for (const file of gateCandidates(ours, base, touchedTests)) {
-    const isoLog = path.join(runDir, 'isolate.log');
-    if (!fs.existsSync(path.join(oursRoot, file))) {
-      // Attributed to a path this tree does not have: not a file we can re-run.
-      v.reasons.push(`skipped ${file}: not a file in the rebased tree`);
-      continue;
-    }
-    if (await isolatedPasses(cfg, oursRoot, file, isoLog)) { v.flaky.push(file); continue; }
-    if (!fs.existsSync(path.join(baseRoot, file))) { v.regressions.push(`${file} (new on our side, fails)`); continue; }
-    if (await isolatedPasses(cfg, baseRoot, file, isoLog)) v.regressions.push(file);
-    else v.baseline.push(file);
+  const candidates = gateCandidates(ours, base, touchedTests);
+  for (const file of candidates) await isolate(file, v.flaky);
+
+  // Files the run reached no verdict on. A comparative diff of failure lists
+  // cannot see them, so without this the verdict's `regressions=0` would be
+  // reported over a set that silently excludes them.
+  const unvouched = unvouchedFiles(ours);
+  const already = new Set(candidates);
+  const unrun = unvouched.files.filter((f) => !already.has(f));
+
+  // ESCALATION. An unrun file that our commits TOUCH is the dangerous case:
+  // nothing measured the thing we changed. It still does not escalate on the
+  // bare fact of being unrun — BLOCKED_REGRESSION is memoised per (reason,
+  // upstream sha, branch tip) and pages loudly, so raising it off a shard that
+  // wedged (a LOAD artefact, not a property of the commits) would freeze the
+  // fork behind a flake until a human forced it. It escalates through
+  // MEASUREMENT instead: touched unrun files are re-run in isolation on both
+  // trees here and now, and a failure confirmed that way is a regression by
+  // the same definitive rule as any other. Bounded by construction — this is
+  // the U..NEW test-file diff, a handful of files.
+  const touched = new Set(touchedTests);
+  const sweep = unrun.filter((f) => touched.has(f));
+  const swept = new Set<string>();
+  for (const file of sweep) {
+    // Passing in isolation VOUCHES for the file; it was never seen failing,
+    // so it is not flaky, and calling it that would inflate the flake count.
+    if (await isolate(file, v.vouched)) swept.add(file);
+  }
+  v.unrun = unrun.filter((f) => !swept.has(f));
+
+  // The rest are NAMED, not run. Isolation is one process per file and a
+  // wedged shard holds ~180 of them; on the box this runs on (1-minute load
+  // 100-190 for hours at a stretch) that is hours of wall clock to re-derive
+  // a baseline the next scheduled run re-measures for free. Naming them is
+  // what makes the inconclusive verdict actionable; running them is not.
+  if (v.unrun.length > 0) {
+    v.verdict = v.verdict === 'pass' ? 'inconclusive' : v.verdict;
+    v.reasons.push(`no verdict on ${v.unrun.length} test file(s) in unfinished shard(s) ${unvouched.shards.join(', ')}: ${nameList(v.unrun)}`);
+  }
+  if (unvouched.unnamedShards.length > 0) {
+    v.verdict = v.verdict === 'pass' ? 'inconclusive' : v.verdict;
+    v.reasons.push(`shard(s) ${unvouched.unnamedShards.join(', ')} did not finish and never printed a plan line, so their files cannot be named`);
   }
   if (v.regressions.length > 0) v.verdict = 'regression';
   return v;
@@ -867,15 +996,28 @@ export async function run(cfg: Config): Promise<RunResult> {
     const touchedTests = gitOk(repo, 'diff', '--name-only', U, NEW).split('\n')
       .filter((f) => /\.test\.ts$/.test(f) && fs.existsSync(path.join(oursDir, f)));
     const verdict = await judge(cfg, oursResult, baseResult, touchedTests, oursDir, baseDir, runDir);
+    // Both trees' unvouched sets are recorded: only ours can hide a regression,
+    // but a base shard that died is why a file of ours lands in `baseline`
+    // instead of `regressions`, and that is not reconstructable later.
+    const oursUnvouched = unvouchedFiles(oursResult);
+    const baseUnvouched = unvouchedFiles(baseResult);
     Object.assign(facts, {
       gate: {
-        ours: { failures: oursResult.failures.size, files: oursResult.failingFiles.size, complete: suiteComplete(oursResult), exit: oursSuite.code },
-        base: { failures: baseResult.failures.size, files: baseResult.failingFiles.size, complete: suiteComplete(baseResult), exit: baseSuite.code },
+        ours: {
+          failures: oursResult.failures.size, files: oursResult.failingFiles.size, complete: suiteComplete(oursResult), exit: oursSuite.code,
+          unvouchedShards: oursUnvouched.shards, unvouchedFiles: oursUnvouched.files.length, unnamedShards: oursUnvouched.unnamedShards,
+        },
+        base: {
+          failures: baseResult.failures.size, files: baseResult.failingFiles.size, complete: suiteComplete(baseResult), exit: baseSuite.code,
+          unvouchedShards: baseUnvouched.shards, unvouchedFiles: baseUnvouched.files.length, unnamedShards: baseUnvouched.unnamedShards,
+        },
         verdict,
       },
     });
     logLine(cfg, `gate ours=${oursResult.failures.size} base=${baseResult.failures.size} verdict=${verdict.verdict}`
-      + ` regressions=${verdict.regressions.length} flaky=${verdict.flaky.length} baseline=${verdict.baseline.length}`);
+      + ` regressions=${verdict.regressions.length} flaky=${verdict.flaky.length} baseline=${verdict.baseline.length}`
+      + ` unrun=${verdict.unrun.length} vouched=${verdict.vouched.length}`
+      + (verdict.unrun.length > 0 ? ` unrun-files=${nameList(verdict.unrun)}` : ''));
 
     // A suite run can repoint the live link (older team-mode tests ran ./setup
     // with the real HOME). Never leave the machine pointing into a throwaway.
