@@ -467,6 +467,11 @@ export function oursOnlyUnattributed(ours: SuiteResult, base: SuiteResult): numb
 
 interface Sh { code: number; stdout: string; stderr: string }
 
+/** How a git invocation failed, for a message that must not assert a repo fact. */
+function shWhy(r: Sh): string {
+  return `git exited ${r.code}${r.stderr ? `: ${r.stderr}` : ''}${r.stdout ? `, said "${r.stdout}"` : ''}`;
+}
+
 function sh(cmd: string, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}): Sh {
   const r = spawnSync(cmd, args, {
     cwd: opts.cwd, env: opts.env ?? process.env, encoding: 'utf8',
@@ -973,7 +978,14 @@ export async function run(cfg: Config): Promise<RunResult> {
     // 1. Preconditions.
     const repo = cfg.repo;
     const pre = (why: string) => { memoKey = `PRE|${why}`; return stop('BLOCKED_PRECONDITION', 'gstack fork-sync cannot run', why); };
-    if (git(repo, 'rev-parse', '--is-inside-work-tree').stdout !== 'true') return pre(`not a git work tree: ${path.basename(repo)}`);
+    // stdout ALONE cannot carry this: a git that could not run answers with an
+    // empty stdout, and `'' !== 'true'` then asserts that the checkout is not a
+    // work tree — a memoised claim nothing established. Reproduced 2026-09-28:
+    // 1 of 9 six-file runs STOPPED this way against a sandbox clone that was
+    // one. Only a git that ANSWERED can settle the question.
+    const inside = git(repo, 'rev-parse', '--is-inside-work-tree');
+    if (inside.code !== 0) return pre(`cannot ask whether ${path.basename(repo)} is a git work tree: ${shWhy(inside)}`);
+    if (inside.stdout !== 'true') return pre(`not a git work tree: ${path.basename(repo)} (git said "${inside.stdout}")`);
     const gitDir = gitOk(repo, 'rev-parse', '--absolute-git-dir');
     const commonDir = path.resolve(repo, gitOk(repo, 'rev-parse', '--git-common-dir'));
     const kind = worktreeKind(gitDir, commonDir, fsResolve);
@@ -993,7 +1005,12 @@ export async function run(cfg: Config): Promise<RunResult> {
     for (const remote of [cfg.upstreamRemote, cfg.originRemote]) {
       if (git(repo, 'remote', 'get-url', remote).code !== 0) return pre(`no '${remote}' remote: not a fork install`);
     }
-    const current = git(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD').stdout;
+    // `symbolic-ref --quiet` exits 1 on a genuinely detached HEAD with nothing
+    // on stderr, so the two are told apart by whether git ran at all: a
+    // non-zero exit WITH stderr is git failing, not a detached HEAD.
+    const head = git(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD');
+    if (head.code !== 0 && head.stderr) return pre(`cannot read HEAD in ${path.basename(repo)}: ${shWhy(head)}`);
+    const current = head.stdout;
     const branch = cfg.branch ?? current;
     if (!branch) return pre('the durable checkout is on a detached HEAD');
     if (!cfg.noLand && !cfg.dryRun && branch !== current) return pre(`--branch ${branch} is not the live branch; rehearse it with --no-land`);

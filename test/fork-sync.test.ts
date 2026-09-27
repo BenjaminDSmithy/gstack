@@ -899,6 +899,36 @@ describe('fork-sync run (sandbox repos)', () => {
     expect(r.out).toContain(`!= ${path.join(sb.durable, '.git')}`);
   });
 
+  // REPRODUCED on 2288d0ed, 2026-09-28: 1 of 9 runs of the six-file
+  // combination (`test/fork-sync.test.ts` with the five free-runner files, one
+  // bun process, 1-minute load 91) STOPPED with
+  // `BLOCKED_PRECONDITION not a git work tree: durable` against a sandbox
+  // durable checkout that IS a work tree. The check read only stdout, so a git
+  // that could not RUN — empty stdout — asserted a fact about the repository
+  // and discarded the reason. Same defect shape as the realpath swallow above:
+  // a verdict that reads as settled while resting on evidence it never
+  // gathered, memoised until upstream or the tip moves.
+  e2e('a git that cannot run reports itself, and never claims the repo is not a work tree', (sb) => {
+    const shim = path.join(sb.base, 'brokenbin');
+    write(path.join(shim, 'git'), `#!${BASH}\necho 'git: cannot fork' >&2\nexit 128\n`, 0o755);
+    const args = [
+      SCRIPT, 'run', '--ignore-load', '--notify', path.join(sb.bin, 'notify'),
+      '--install-cmd', 'true', '--freshness-cmd', 'true', '--build-cmd', 'true',
+      '--setup-cmd', 'true', '--render-cmd', 'true',
+    ];
+    const r = spawnSync(process.execPath, args, {
+      env: { ...sb.env, PATH: `${shim}:${sb.env.PATH ?? ''}` }, encoding: 'utf8', timeout: 90_000,
+    });
+    const out = `${r.stdout}\n${r.stderr}`;
+    expect(out).toContain('BLOCKED_PRECONDITION');
+    // The claim it must NOT make: nothing established that the checkout is not
+    // a work tree, and a later run with a working git would contradict it.
+    expect(out).not.toContain('not a git work tree');
+    // What it must say instead: that git failed, and how.
+    expect(out).toContain('git exited 128');
+    expect(out).toContain('cannot fork');
+  });
+
   e2e('a live link that does not resolve to the checkout is a precondition STOP', (sb) => {
     const other = path.join(sb.base, 'elsewhere');
     fs.mkdirSync(other);
