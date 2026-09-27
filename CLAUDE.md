@@ -230,6 +230,10 @@ Rules:
   If a block needs context from a previous step, restate it in the prose above.
 - **Express conditionals as English.** Instead of nested `if/elif/else` in bash,
   write numbered decision steps: "1. If X, do Y. 2. Otherwise, do Z."
+- **No `$<digit>`, `$ARGUMENTS` or declared `$name` in a skill body.** Claude
+  Code replaces them with the invocation's arguments, code blocks included
+  (#2896). Use a named variable, awk `$(N)`, or shell `"${N}"`
+  (`test/skill-arg-substitution.test.ts` enforces this).
 
 ## Writing style (V1)
 
