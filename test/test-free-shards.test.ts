@@ -489,6 +489,14 @@ describe('test-free-shards: shard args', () => {
   });
 });
 
+// Every case here spawns a real child process. bun's default per-test budget
+// is 5s, and on a loaded box that is not enough to spawn one: measured
+// 2026-09-28, `exit 0 WITHOUT bun's terminal summary` failed 3 of 24 runs of a
+// six-file combination, every time with `this test timed out after 5000ms`, at
+// 1-minute load 91-382. The wall-clock-deadline case below already carried
+// 30_000 for the same reason; the rest inherited the default.
+const SPAWNING_TEST_TIMEOUT_MS = 30_000;
+
 describe('test-free-shards: strict shard execution', () => {
   // Fake command seam, same pattern as test/paid-shards.test.ts: each "file"
   // label selects a child command. Unlike the paid runner, runFreeShard
@@ -518,31 +526,31 @@ describe('test-free-shards: strict shard execution', () => {
     const outcome = await runFreeShard(['no-summary'], 1, 1, { commandFor, quiet: true, log: () => {} });
     expect(outcome.status).toBe('failed');
     expect(outcome.exitCode).toBe(0);
-  });
+  }, SPAWNING_TEST_TIMEOUT_MS);
 
   test('exit 0 WITH the terminal summary passes, and the per-shard epilogue line is printed', async () => {
     const lines: string[] = [];
     const outcome = await runFreeShard(['pass'], 1, 1, { commandFor, quiet: true, log: (l) => lines.push(l) });
     expect(outcome.status).toBe('passed');
     expect(lines.some((l) => /^\[test:free\] shard 1\/1: 1 files, \d+s, pass$/.test(l))).toBe(true);
-  });
+  }, SPAWNING_TEST_TIMEOUT_MS);
 
   test('a non-zero exit stays a failure even when the summary is present', async () => {
     const outcome = await runFreeShard(['fail-exit'], 1, 1, { commandFor, quiet: true, log: () => {} });
     expect(outcome.status).toBe('failed');
     expect(outcome.exitCode).toBe(3);
-  });
+  }, SPAWNING_TEST_TIMEOUT_MS);
 
   test('a printed (fail) result line is a failure even on exit 0 (bun exit-code bug class)', async () => {
     const outcome = await runFreeShard(['fail-line-exit-zero'], 1, 1, { commandFor, quiet: true, log: () => {} });
     expect(outcome.status).toBe('failed');
     expect(outcome.exitCode).toBe(0);
-  });
+  }, SPAWNING_TEST_TIMEOUT_MS);
 
   test('a summary reporting the wrong file count is a failure (partial execution)', async () => {
     const outcome = await runFreeShard(['wrong-file-count'], 1, 1, { commandFor, quiet: true, log: () => {} });
     expect(outcome.status).toBe('failed');
-  });
+  }, SPAWNING_TEST_TIMEOUT_MS);
 
   test('a spinning shard is killed at the wall-clock deadline and reported timed-out, distinct from failed', async () => {
     const lines: string[] = [];
@@ -572,7 +580,7 @@ describe('test-free-shards: strict shard execution', () => {
     expect(outcome.failingFiles).toEqual([]);
     expect(outcome.unattributedFailures).toBe(0);
     expect(lines.some((l) => /^\[test:free\] shard 7\/20: 0 files, 0s, pass$/.test(l))).toBe(true);
-  });
+  }, SPAWNING_TEST_TIMEOUT_MS);
 
   test('the log-file path is announced once at start and the PASS epilogue repeats it', async () => {
     const lines: string[] = [];
@@ -582,7 +590,7 @@ describe('test-free-shards: strict shard execution', () => {
     expect(announced.length).toBe(1);
     // PASS epilogue carries the counts from the terminal summary + the log path.
     expect(lines.some((l) => /^\[test:free\] PASS — 3 tests, 1 files, \d+s\. Full log: .+\.log$/.test(l))).toBe(true);
-  });
+  }, SPAWNING_TEST_TIMEOUT_MS);
 
   test('spawned shard gets throwaway TMPDIR but NEVER an injected GSTACK_HOME', async () => {
     // GSTACK_HOME injection was tried and reverted: one shared scratch home
@@ -615,7 +623,7 @@ describe('test-free-shards: strict shard execution', () => {
     } finally {
       fs.rmSync(captureDir, { recursive: true, force: true });
     }
-  });
+  }, SPAWNING_TEST_TIMEOUT_MS);
 
   test('concurrent shards isolate browser state and remove it on success or failure', async () => {
     const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'free-shard-browse-'));
@@ -668,7 +676,7 @@ describe('test-free-shards: strict shard execution', () => {
     } finally {
       fs.rmSync(captureDir, { recursive: true, force: true });
     }
-  });
+  }, SPAWNING_TEST_TIMEOUT_MS);
 });
 
 describe('test-free-shards: output contract (log capture, quiet console, failure epilogue)', () => {
