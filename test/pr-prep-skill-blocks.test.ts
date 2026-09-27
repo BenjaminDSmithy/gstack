@@ -166,6 +166,7 @@ describe('pr-prep Step 4.4: codex second opinion', () => {
       spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', ...a], {
         cwd: repo,
         encoding: 'utf-8',
+        timeout: 30_000,
       });
     git('init', '-q', '-b', 'main');
     for (const n of ['one', 'two']) {
