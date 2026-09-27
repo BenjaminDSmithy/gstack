@@ -32,6 +32,17 @@ function run(cmd: string, env: Record<string, string> = {}, expectFail = false):
       env: (() => {
         const child: Record<string, string | undefined> = { ...process.env, GSTACK_STATE_DIR: tmpDir, ...env };
         if (!('GSTACK_HOME' in env)) delete child.GSTACK_HOME;
+        // gstack-relink resolves the gbrain render as GSTACK_USER_RENDER_DIR,
+        // else ${GSTACK_HOME:-$HOME/.gstack}/render/claude, and runs
+        // gstack-patch-names on it. HOME is the real one here, so a test that
+        // names neither variable rewrote every SKILL.md in the operator's
+        // live render (prefix flips, leaving names prefixed if the run died
+        // mid-way) while its sections kept the old content. Pin it into the
+        // temp dir unless the test chose a location itself.
+        if (!('GSTACK_USER_RENDER_DIR' in env)) {
+          if ('GSTACK_HOME' in env) delete child.GSTACK_USER_RENDER_DIR;
+          else child.GSTACK_USER_RENDER_DIR = path.join(tmpDir, 'no-render');
+        }
         return child;
       })(),
       encoding: 'utf-8',
@@ -104,6 +115,22 @@ describe('gstack-relink (#578)', () => {
     expect(fs.existsSync(path.join(skillsDir, 'gstack-ship'))).toBe(true);
     expect(fs.existsSync(path.join(skillsDir, 'gstack-review'))).toBe(true);
     expect(output).toContain('gstack-');
+  });
+
+  // The harness passes the real HOME through. A test that names no render
+  // location must still never reach $HOME/.gstack/render/claude: relink
+  // patches name: fields in whatever render it resolves.
+  test('the harness never lets relink patch the render under HOME', () => {
+    setupMockInstall(['qa']);
+    const fakeHome = path.join(tmpDir, 'fake-home');
+    const liveRender = path.join(fakeHome, '.gstack', 'render', 'claude', 'qa', 'SKILL.md');
+    fs.mkdirSync(path.dirname(liveRender), { recursive: true });
+    fs.writeFileSync(liveRender, '---\nname: qa\ndescription: live\n---\n# live render\n');
+    const env = { HOME: fakeHome, GSTACK_INSTALL_DIR: installDir, GSTACK_SKILLS_DIR: skillsDir };
+    run(`${path.join(installDir, 'bin', 'gstack-config')} set skill_prefix true`, env);
+    run(`${path.join(installDir, 'bin', 'gstack-relink')}`, env);
+    expect(fs.existsSync(path.join(skillsDir, 'gstack-qa'))).toBe(true);
+    expect(fs.readFileSync(liveRender, 'utf-8')).toBe('---\nname: qa\ndescription: live\n---\n# live render\n');
   });
 
   // Test 12: flat symlinks when skill_prefix=false
