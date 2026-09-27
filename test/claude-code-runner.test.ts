@@ -53,10 +53,10 @@ const prompt = await Bun.stdin.text();
 record('stdin_read');
 writeFileSync(process.env.CAPTURE!, JSON.stringify({args:process.argv.slice(2),prompt,cwd:process.cwd(),model:process.env.ANTHROPIC_MODEL,auth:process.env.ANTHROPIC_API_KEY}));
 const mode = process.env.FAKE_MODE;
-if (mode === 'startup-timeout') {
-  setInterval(() => {}, 1000);
-  await new Promise(() => {});
-}
+// Hang modes wait for the runner to kill them. The runner spawns this fake in
+// its own process group on POSIX, so a test run killed first would orphan it.
+const hang = async () => { await Bun.sleep(Number(process.env.FIXTURE_MAX_MS) || 60_000); process.exit(124); };
+if (mode === 'startup-timeout') await hang();
 if (mode === 'timeout' || mode === 'descendant' || mode === 'escaped') {
   rmSync(process.env.PID_FILE!, { force: true });
   // libuv on Windows kills non-detached children when this fake exits. The
@@ -75,13 +75,13 @@ if (mode === 'timeout' || mode === 'descendant' || mode === 'escaped') {
     await Bun.sleep(5);
   }
   record('readiness_observed');
-  if (mode === 'timeout') await new Promise(() => {});
+  if (mode === 'timeout') await hang();
 }
 if (mode === 'auth') { process.stderr.write('Not logged in. Please run claude /login.'); process.exit(1); }
 if (mode === 'overflow') {
   const block = Buffer.alloc(1024 * 1024, 120);
   for(let i=0;i<18;i++) { process.stdout.write(block); process.stderr.write(block); }
-  await new Promise(() => {});
+  await hang();
 }
 if (mode === 'malformed') { process.stdout.write('broken JSON'); process.exit(0); }
 if (mode === 'array') { process.stdout.write('[]'); process.exit(0); }
@@ -373,6 +373,21 @@ describe('Claude Code restricted execution', () => {
     expect(Number(readFileSync(pidFile, 'utf8'))).toBe(result.pid);
     expect(Date.now() - start).toBeGreaterThanOrEqual(300);
   });
+
+  // One spawn per test keeps each case well inside bun's default 5s test
+  // timeout when a single file is run directly on a loaded machine.
+  for (const mode of ['startup-timeout', 'overflow']) {
+    test(`the ${mode} fake exits unaided once its lifetime bound elapses`, () => {
+      const start = Date.now();
+      const result = spawnSync(process.execPath, [FAKE], {
+        env: { ...env(mode), FIXTURE_MAX_MS: '300' }, input: 'prompt', stdio: ['pipe', 'ignore', 'ignore'], timeout: 10_000,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status).toBe(124);
+      expect(Date.now() - start).toBeGreaterThanOrEqual(300);
+    });
+  }
 
   test('CLI exits nonzero for malformed responses and argument failures', () => {
     const cli = path.join(ROOT, 'bin/gstack-claude-code');
