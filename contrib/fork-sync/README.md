@@ -110,6 +110,11 @@ directory). It hands off to this job and skips its own pull and discard.
    - Run `./setup` and the version migrations.
    - Prove the suite starts: `gstack-skill-start` must print
      `SKILL_START_PROTO: 1`.
+   - Rebuild the live render with `gstack-config gbrain-refresh`, which must
+     exit 0. Installed skills serve `~/.gstack/render/claude`, not the
+     checkout, so nothing the branch changed is live until this runs.
+     `./setup` renders too but only warns when that fails; this step also
+     checks that no installed skill link was left dangling.
 
    Any failure after the switch rolls back to the old branch.
 
@@ -190,5 +195,5 @@ side and regenerate. Never pick a side of generated output.
   history.
 - `~/.gstack/fork-sync/fork-sync.log` is one line per event.
 - `~/.gstack/fork-sync/runs/<stamp>/` holds `ours.log`, `base.log`,
-  `isolate.log` and `setup-*.log`.
+  `isolate.log`, `setup-*.log` and `render-*.log`.
 - `~/.gstack/fork-sync/launchd.log` holds the agent's stdout and stderr.
