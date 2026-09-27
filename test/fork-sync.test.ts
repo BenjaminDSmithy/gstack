@@ -13,6 +13,7 @@ import * as path from 'path';
 import {
   compareVersions, droppedSubjects, fill, gateCandidates, landingBranchName, nameList,
   parseSuiteLog, renderPlist, suiteComplete, unvouchedFiles, worktreeKind, defaultConfig,
+  RENDER_HOOKS, RENDER_HOOK_MARKER, renderHookShim, renderHookSkip,
 } from '../contrib/fork-sync/fork-sync';
 
 const ROOT = path.resolve(import.meta.dir, '..');
@@ -217,6 +218,52 @@ describe('small helpers', () => {
     expect(plist).toContain('<string>--scheduled</string>');
     expect(plist).toContain('<key>FORK_SYNC_NOTIFY</key><string>/n/iris-notify</string>');
   });
+});
+
+describe('render hooks: when a hook rebuilds the live render', () => {
+  const at = (hook: string, args: string[], extra: Partial<Parameters<typeof renderHookSkip>[0]> = {}) =>
+    renderHookSkip({ hook, args, atLive: true, rebasing: false, picksLeft: null, ...extra });
+
+  test('only the durable checkout rebuilds; every other worktree returns at once', () => {
+    expect(at('post-merge', ['0'])).toBeNull();
+    expect(at('post-merge', ['0'], { atLive: false })).toBe('not the durable checkout');
+  });
+
+  test('post-merge: a fast-forward or merge rebuilds, a squash (HEAD unmoved) does not', () => {
+    expect(at('post-merge', ['1'])).toContain('squash');
+  });
+
+  test('post-checkout: only a branch checkout that moved HEAD, and never mid-rebase', () => {
+    expect(at('post-checkout', ['a', 'b', '1'])).toBeNull();
+    expect(at('post-checkout', ['a', 'a', '1'])).toBe('HEAD did not move');
+    expect(at('post-checkout', ['a', 'b', '0'])).toBe('file checkout');
+    expect(at('post-checkout', ['a', 'b', '1'], { rebasing: true })).toContain('rebase in progress');
+  });
+
+  test('post-rewrite: a rebase rebuilds once at its end; an amend already did in post-commit', () => {
+    expect(at('post-rewrite', ['rebase'], { rebasing: true })).toBeNull();
+    expect(at('post-rewrite', ['amend'])).toContain('amend');
+  });
+
+  test('post-commit: a plain commit or the last pick rebuilds; earlier picks and rebase steps wait', () => {
+    expect(at('post-commit', [])).toBeNull();
+    expect(at('post-commit', [], { picksLeft: 1 })).toBeNull();
+    expect(at('post-commit', [], { picksLeft: 3 })).toBe('2 more pick(s) to go');
+    expect(at('post-commit', [], { rebasing: true })).toContain('rebase in progress');
+  });
+
+  test('the shim is /bin/bash, skippable, marked, and hands off to the checkout\'s own copy', () => {
+    for (const hook of RENDER_HOOKS) {
+      const shim = renderHookShim(hook);
+      expect(shim.startsWith('#!/bin/bash\n')).toBe(true);
+      expect(shim).toContain(RENDER_HOOK_MARKER);
+      expect(shim).toContain('[ -n "${GSTACK_SKIP_RENDER_HOOK:-}" ] && exit 0');
+      expect(shim).toContain('/contrib/fork-sync/fork-sync.ts"');
+      expect(shim).toContain('grep -q "render-hook" "$script" 2>/dev/null || exit 0');
+      expect(shim).toContain(`render-hook ${hook} "$@"`);
+    }
+  });
+
 });
 
 describe('landing render step', () => {
@@ -734,5 +781,138 @@ describe('fork-sync run (sandbox repos)', () => {
     const r = runSync(sb, ['--repo', sb.durable, '--live-link', other]);
     expect(r.code).toBe(3);
     expect(r.out).toContain('BLOCKED_PRECONDITION');
+  });
+});
+
+// ─── Render hooks, against a sandbox durable checkout ───────────────────────
+
+/**
+ * Give the durable checkout the two files a hook needs from its own tree: a
+ * copy of this script (the shim runs the checkout's copy) and a gstack-config
+ * stub whose gbrain-refresh records which HEAD it rendered and whether a hook
+ * variable leaked through.
+ */
+function withRenderTooling(sb: Sandbox): string {
+  const log = path.join(sb.home, 'refresh.log');
+  write(path.join(sb.durable, 'contrib', 'fork-sync', 'fork-sync.ts'), fs.readFileSync(SCRIPT, 'utf8'));
+  write(path.join(sb.durable, 'bin', 'gstack-config'), [
+    `#!${BASH}`,
+    'echo "$1 $(git rev-parse --short HEAD) $(git symbolic-ref -q --short HEAD || echo detached) git_dir=${GIT_DIR:-unset}" >> "$HOME/refresh.log"',
+    '',
+  ].join('\n'), 0o755);
+  git(sb.durable, sb.env, 'add', '-A');
+  git(sb.durable, sb.env, 'commit', '-q', '-m', 'tooling');
+  return log;
+}
+
+function hookCli(sb: Sandbox, ...args: string[]) {
+  const r = spawnSync(process.execPath, [SCRIPT, ...args], { env: sb.env, encoding: 'utf8', timeout: 90_000 });
+  return { code: r.status, out: `${r.stdout}\n${r.stderr}` };
+}
+
+function refreshes(log: string): string[] {
+  return fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) : [];
+}
+
+describe('render hooks (sandbox repo)', () => {
+  e2e('each way of landing on the durable checkout rebuilds the render once, at its end; other worktrees never do', (sb) => {
+    const log = withRenderTooling(sb);
+    const hooksDir = path.join(sb.durable, '.git', 'hooks');
+    expect(hookCli(sb, 'status').out).toContain('render hooks: 0/4 installed');
+    const inst = hookCli(sb, 'install-hooks');
+    expect(inst.code).toBe(0);
+    for (const hook of RENDER_HOOKS) expect(fs.statSync(path.join(hooksDir, hook)).mode & 0o111).not.toBe(0);
+    expect(hookCli(sb, 'status').out).toContain('render hooks: installed (4/4)');
+
+    const short = (rev: string) => git(sb.durable, sb.env, 'rev-parse', '--short', rev);
+    const wt = path.join(sb.base, 'wt');
+    // Creating a worktree fires post-checkout there: not the durable checkout.
+    git(sb.durable, sb.env, 'worktree', 'add', '-q', '-b', 'topic', wt);
+    commit(wt, sb.env, 'topic one', { 't1.txt': '1\n' });
+    commit(wt, sb.env, 'topic two', { 't2.txt': '2\n' });
+    expect(refreshes(log)).toEqual([]);
+
+    // A hand fast-forward.
+    git(sb.durable, sb.env, 'merge', '-q', '--ff-only', 'topic~1');
+    expect(refreshes(log)).toEqual([`gbrain-refresh ${short('HEAD')} feat/x-1.0.0 git_dir=unset`]);
+
+    // Opted out for one command, and a file checkout: neither rebuilds.
+    git(sb.durable, { ...sb.env, GSTACK_SKIP_RENDER_HOOK: '1' }, 'merge', '-q', '--ff-only', 'topic');
+    fs.writeFileSync(path.join(sb.durable, 'a.txt'), 'scribble\n');
+    git(sb.durable, sb.env, 'checkout', '--', 'a.txt');
+    expect(refreshes(log).length).toBe(1);
+
+    // A ranged cherry-pick of three commits rebuilds once, at the last pick.
+    commit(wt, sb.env, 'pick one', { 'p1.txt': '1\n' });
+    commit(wt, sb.env, 'pick two', { 'p2.txt': '2\n' });
+    commit(wt, sb.env, 'pick three', { 'p3.txt': '3\n' });
+    git(sb.durable, sb.env, 'cherry-pick', 'topic~3..topic');
+    expect(refreshes(log).length).toBe(2);
+    expect(refreshes(log)[1]).toBe(`gbrain-refresh ${short('HEAD')} feat/x-1.0.0 git_dir=unset`);
+
+    // A commit made in the durable checkout rebuilds; amending it rebuilds
+    // once more (post-commit), not twice (post-rewrite amend as well).
+    commit(sb.durable, sb.env, 'durable only', { 'd.txt': 'd\n' });
+    expect(refreshes(log).length).toBe(3);
+    git(sb.durable, sb.env, 'commit', '-q', '--amend', '-m', 'durable only, amended');
+    expect(refreshes(log).length).toBe(4);
+    expect(refreshes(log)[3]).toBe(`gbrain-refresh ${short('HEAD')} feat/x-1.0.0 git_dir=unset`);
+
+    // A rebase replaying that commit rebuilds once, after it ends, on the
+    // branch: not at its detached checkout, not per replayed commit.
+    commit(wt, sb.env, 'upstream-ish', { 'u.txt': 'u\n' });
+    git(sb.durable, sb.env, 'rebase', '-q', 'topic');
+    expect(git(sb.durable, sb.env, 'log', '-1', '--format=%s')).toBe('durable only, amended');
+    expect(refreshes(log).length).toBe(5);
+    expect(refreshes(log)[4]).toBe(`gbrain-refresh ${short('HEAD')} feat/x-1.0.0 git_dir=unset`);
+
+    // A landing that switches the live checkout to a new branch.
+    git(sb.durable, sb.env, 'branch', 'feat/x-1.1.0', 'topic');
+    git(sb.durable, sb.env, 'switch', '-q', 'feat/x-1.1.0');
+    expect(refreshes(log).length).toBe(6);
+    expect(refreshes(log)[5]).toBe(`gbrain-refresh ${short('HEAD')} feat/x-1.1.0 git_dir=unset`);
+
+    // Anything in the linked worktree, which shares the hooks, stays quiet.
+    git(wt, sb.env, 'merge', '-q', '--ff-only', 'feat/x-1.0.0');
+    git(wt, sb.env, 'switch', '-q', '-c', 'elsewhere', 'feat/x-1.0.0~2');
+    commit(wt, sb.env, 'wt only', { 'w.txt': 'w\n' });
+    expect(refreshes(log).length).toBe(6);
+
+    // A worktree whose copy of this script predates render-hook says nothing:
+    // no usage text leaks into its git output.
+    write(path.join(wt, 'contrib', 'fork-sync', 'fork-sync.ts'), 'console.log("usage: old fork-sync");\n');
+    const old = spawnSync('git', ['commit', '-q', '-am', 'old copy'], { cwd: wt, env: sb.env, encoding: 'utf8', timeout: 60_000 });
+    expect(old.status).toBe(0);
+    expect(`${old.stdout}${old.stderr}`).toBe('');
+  });
+
+  e2e('install-hooks keeps a hook the operator owns, refuses a shared hooksPath, and uninstall removes only its own', (sb) => {
+    const hooksDir = path.join(sb.durable, '.git', 'hooks');
+    fs.mkdirSync(hooksDir, { recursive: true });
+    const mine = '#!/bin/bash\necho mine\n';
+    fs.writeFileSync(path.join(hooksDir, 'post-merge'), mine, { mode: 0o755 });
+
+    const inst = hookCli(sb, 'install-hooks');
+    expect(inst.code).toBe(1);
+    expect(inst.out).toContain(`kept ${path.join(hooksDir, 'post-merge')}`);
+    expect(inst.out).toContain('render-hook post-merge "$@"');
+    expect(fs.readFileSync(path.join(hooksDir, 'post-merge'), 'utf8')).toBe(mine);
+    for (const hook of RENDER_HOOKS.filter((h) => h !== 'post-merge')) {
+      expect(fs.readFileSync(path.join(hooksDir, hook), 'utf8')).toBe(renderHookShim(hook));
+    }
+    // Re-running replaces its own shims and still keeps the operator's.
+    expect(hookCli(sb, 'install-hooks').code).toBe(1);
+    expect(fs.readFileSync(path.join(hooksDir, 'post-merge'), 'utf8')).toBe(mine);
+
+    expect(hookCli(sb, 'uninstall-hooks').code).toBe(0);
+    expect(fs.readdirSync(hooksDir)).toEqual(['post-merge']);
+    expect(fs.readFileSync(path.join(hooksDir, 'post-merge'), 'utf8')).toBe(mine);
+
+    const shared = path.join(sb.base, 'shared-hooks');
+    git(sb.durable, sb.env, 'config', 'core.hooksPath', shared);
+    const refused = hookCli(sb, 'install-hooks');
+    expect(refused.code).toBe(1);
+    expect(refused.out).toContain('core.hooksPath is set');
+    expect(fs.existsSync(shared)).toBe(false);
   });
 });
