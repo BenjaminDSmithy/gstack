@@ -219,6 +219,12 @@ describe('small helpers', () => {
   });
 });
 
+describe('landing render step', () => {
+  test('the default landing render step is gbrain-refresh on the live link', () => {
+    expect(defaultConfig({ HOME: '/h' } as NodeJS.ProcessEnv).renderCmd).toBe('{live}/bin/gstack-config gbrain-refresh');
+  });
+});
+
 describe('gstack-upgrade defers to fork-sync on fork installs', () => {
   test('Step 0 runs before the upgrade question and before any pull or discard', () => {
     for (const file of ['gstack-upgrade/SKILL.md.tmpl', 'gstack-upgrade/SKILL.md']) {
@@ -349,7 +355,7 @@ function runSync(sb: Sandbox, extra: string[] = []) {
     SCRIPT, 'run', '--ignore-load', '--notify', path.join(sb.bin, 'notify'),
     '--install-cmd', 'true', '--freshness-cmd', 'true', '--build-cmd', 'true',
     '--suite-cmd', path.join(sb.bin, 'suite'), '--isolate-cmd', `${path.join(sb.bin, 'iso')} {path} {root}`,
-    '--setup-cmd', 'true', '--proof-cmd', "echo 'SKILL_START_PROTO: 1'", ...extra,
+    '--setup-cmd', 'true', '--proof-cmd', "echo 'SKILL_START_PROTO: 1'", '--render-cmd', 'true', ...extra,
   ];
   const r = spawnSync(process.execPath, args, { env: sb.env, encoding: 'utf8', timeout: 90_000 });
   return { code: r.status, out: `${r.stdout}\n${r.stderr}` };
@@ -653,6 +659,27 @@ describe('fork-sync run (sandbox repos)', () => {
     expect(liveState(sb).branch).toBe(before.branch);
     expect(liveState(sb).head).toBe(before.head);
     expect(notes(sb)[0]).toContain('rolled back');
+  });
+
+  e2e('a landing rebuilds the live render from the new branch, after setup and the proof', (sb) => {
+    upstreamShips(sb, '1.1.0.0', { 'up.txt': 'up\n' });
+    const log = path.join(sb.base, 'render.log');
+    const r = runSync(sb, ['--render-cmd', `printf '%s %s\\n' {live} "$(git symbolic-ref --short HEAD)" >> ${log}`]);
+    expect(r.out).toContain('LANDED');
+    expect(fs.readFileSync(log, 'utf8')).toBe(`${path.join(sb.home, '.claude', 'skills', 'gstack')} feat/x-1.1.0\n`);
+  });
+
+  e2e('a render failure after the switch rolls back and re-renders the old branch', (sb) => {
+    const before = liveState(sb);
+    upstreamShips(sb, '1.1.0.0', { '.break-render': 'x\n' });
+    const log = path.join(sb.base, 'render.log');
+    const r = runSync(sb, ['--render-cmd', `git symbolic-ref --short HEAD >> ${log}; test ! -f .break-render`]);
+    expect(r.code).toBe(4);
+    expect(r.out).toContain('ROLLED_BACK');
+    expect(liveState(sb).branch).toBe(before.branch);
+    expect(liveState(sb).head).toBe(before.head);
+    expect(notes(sb)[0]).toContain('render refresh exited 1');
+    expect(fs.readFileSync(log, 'utf8')).toBe('feat/x-1.1.0\nfeat/x-1.0.0\n');
   });
 
   e2e('an existing landing branch means someone else is on it: STOP before any rebase', (sb) => {
