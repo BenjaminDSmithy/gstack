@@ -66,6 +66,29 @@ const SCANNER_EXEMPT: { file: string; pattern: string; reason: string }[] = [
   },
 ];
 
+// A gh/glab fetch piped straight into `gstack-issue-guard --stdin` hides the
+// fetch's exit status: a failed fetch leaves stdin empty and the guard prints
+// the same "(empty body)" envelope as a genuine empty result, so a failed
+// dedupe search reads as "no duplicates". Use a guard fetch mode (issue,
+// pr-body, pr-comments, search), or feed --stdin from a file whose fetch was
+// status-checked. `\|(?!\|)` is a pipe, not `||`.
+const STDIN_PIPE_RE = /\b(gh|glab)\s+[a-z][^\n]*?\|(?!\|)[^\n]*gstack-issue-guard\s+--stdin/;
+
+/** Lines with `\`-continuations joined, so a multi-line pipeline is one string. */
+function logicalLines(text: string): { line: number; text: string }[] {
+  const raw = text.split('\n');
+  const out: { line: number; text: string }[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const start = i;
+    let t = raw[i];
+    while (t.trimEnd().endsWith('\\') && i + 1 < raw.length) {
+      t = `${t.trimEnd().slice(0, -1)} ${raw[++i]}`;
+    }
+    out.push({ line: start + 1, text: t });
+  }
+  return out;
+}
+
 function trackedFiles(): string[] {
   const out = execSync('git ls-files', { cwd: ROOT, encoding: 'utf-8', maxBuffer: 32 * 1024 * 1024, timeout: 30_000 });
   return out
@@ -128,6 +151,50 @@ describe('tracker-text wiring scanner', () => {
       const hasMatch = content.split('\n').some((l) => pat.re.test(l) && !l.includes('gstack-issue-guard'));
       expect(hasMatch).toBe(true);
     }
+  });
+
+  test('no gh/glab fetch pipes straight into gstack-issue-guard --stdin', () => {
+    const violations: string[] = [];
+    for (const rel of trackedFiles()) {
+      const abs = path.join(ROOT, rel);
+      if (!fs.existsSync(abs)) continue;
+      for (const { line, text } of logicalLines(fs.readFileSync(abs, 'utf-8'))) {
+        if (STDIN_PIPE_RE.test(text)) violations.push(`${rel}:${line} ${text.trim().slice(0, 140)}`);
+      }
+    }
+    if (violations.length > 0) {
+      throw new Error(
+        `gh/glab fetch piped into gstack-issue-guard --stdin:\n  ${violations.join('\n  ')}\n\n` +
+          `A failed fetch leaves stdin empty and the guard envelopes it as "(empty body)", the same ` +
+          `output as a genuine empty result. Fix: use a guard fetch mode (issue <n>, pr-body [<n>] ` +
+          `[--repo R], pr-comments, search <issue|pr> <query>), which exits non-zero with NO envelope ` +
+          `when gh fails; or write the fetch to a file, check its exit status, and feed --stdin from it.`,
+      );
+    }
+    expect(violations).toEqual([]);
+  });
+
+  test('the --stdin pipe tripwire matches the pre-fix shapes and passes the safe ones', () => {
+    const hit = (s: string) => logicalLines(s).some(({ text }) => STDIN_PIPE_RE.test(text));
+    // Pre-fix /spec dedupe (a 3-line pipeline) and /land-and-deploy 3.5c.
+    expect(
+      hit(
+        'gh issue list --search "<keywords>" --state open --limit 10 --json number,title,url 2>/dev/null \\\n' +
+          `  | jq -r '.[] | "#\\(.number) \\(.title)"' \\\n` +
+          '  | ~/.claude/skills/gstack/bin/gstack-issue-guard --stdin --source issue-dedupe 2>/dev/null || true',
+      ),
+    ).toBe(true);
+    expect(
+      hit(
+        'gh pr view "$PR_NUMBER" --repo "$REPO" --json body --jq .body | ~/.claude/skills/gstack/bin/gstack-issue-guard --stdin --source "PR #$PR_NUMBER body"',
+      ),
+    ).toBe(true);
+    expect(hit("glab mr view -F json | jq -r .description | gstack-issue-guard --stdin")).toBe(true);
+    // Safe: a checked file, a jq read of a saved file, and the fetch modes.
+    expect(hit('~/.claude/skills/gstack/bin/gstack-issue-guard --stdin --source pr-body < "<run-dir>/body.md"')).toBe(false);
+    expect(hit(`jq -r '.[] | .body' /tmp/greptile_line.json | gstack-issue-guard --stdin --source greptile-line`)).toBe(false);
+    expect(hit('gstack-issue-guard search issue "<keywords>" --state open \\\n  || echo "DEDUPE FETCH FAILED"')).toBe(false);
+    expect(hit('gh pr view --json body -q .body > "<run-dir>/body.md" || exit 1')).toBe(false);
   });
 
   test('the guarded sites actually mention the guard (wiring, not just lib existence)', () => {
