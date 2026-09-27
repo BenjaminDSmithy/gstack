@@ -6,8 +6,11 @@
  * (test/tracker-guard-wiring.test.ts) fails CI on raw reads outside it.
  *
  *   gstack-issue-guard issue <n>       # gh issue: title + body + comments
- *   gstack-issue-guard pr-body         # gh: current PR body
+ *   gstack-issue-guard pr-body [<n>] [--repo <owner/repo>]
+ *                                      # gh: PR body (current branch's PR when <n> is omitted)
  *   gstack-issue-guard pr-comments     # gh: current PR issue-comments
+ *   gstack-issue-guard search <issue|pr> <query> [--repo <owner/repo>] [--state <s>] [--limit <n>]
+ *                                      # gh: "#<n> <title>" per match (titles the model judges)
  *   gstack-issue-guard --stdin [--source <label>]   # envelope stdin (works for glab too)
  *
  * Failure polarity: a gh/glab fetch failure exits NON-ZERO with NO envelope on
@@ -15,8 +18,16 @@
  * contract (greptile-triage skips silently; others surface the error).
  * Empty content IS enveloped (with a note): "empty" is data, "failed" is not.
  *
- * gh is spawned via an argv array — never string concatenation — and the
- * issue number is validated before use.
+ * `--stdin` cannot see the exit status of whatever feeds it: in
+ * `gh ... | gstack-issue-guard --stdin`, a failed gh leaves stdin empty and the
+ * guard prints the same "(empty body)" envelope a genuine empty result prints.
+ * So a gh read goes through a fetch mode above (the guard runs gh and checks
+ * it), and `--stdin` only reads text whose fetch the caller already checked,
+ * e.g. a file written by `gh ... > f || exit 1`. The wiring scanner fails CI
+ * on a gh/glab command piped straight into `--stdin`.
+ *
+ * gh is spawned via an argv array — never string concatenation — and every
+ * number, repo, state, and limit is validated before use.
  */
 
 import { spawnSync } from "child_process";
@@ -26,7 +37,11 @@ import { flagValue } from "../lib/bin-context";
 function gh(args: string[]): { ok: boolean; out: string; err: string } {
   try {
     const r = spawnSync("gh", args, { encoding: "utf-8", timeout: 30000, maxBuffer: 16 * 1024 * 1024 });
-    return { ok: r.status === 0, out: r.stdout ?? "", err: r.stderr ?? "" };
+    // A missing gh or a timeout sets r.error and leaves stderr empty; report
+    // it rather than "unknown error", so callers can tell "not installed"
+    // from auth or rate-limit failures.
+    const spawnErr = r.error ? String(r.error.message ?? r.error) : "";
+    return { ok: r.status === 0 && !r.error, out: r.stdout ?? "", err: (r.stderr ?? "").trim() || spawnErr };
   } catch (e: any) {
     return { ok: false, out: "", err: String(e?.message ?? e) };
   }
@@ -35,6 +50,39 @@ function gh(args: string[]): { ok: boolean; out: string; err: string } {
 function fail(msg: string): never {
   console.error(`gstack-issue-guard: ${msg}`);
   process.exit(1);
+}
+
+/**
+ * Split args into positionals and `--flag value` pairs. Only the flags in
+ * `allowed` are accepted, and each must carry a value, so a typo or a missing
+ * value fails loudly instead of silently changing the query.
+ */
+function parseArgs(args: string[], allowed: string[]): { positional: string[]; flags: Record<string, string> } {
+  const positional: string[] = [];
+  const flags: Record<string, string> = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith("--")) {
+      if (!allowed.includes(a)) fail(`unknown flag: ${JSON.stringify(a)}`);
+      const v = args[i + 1];
+      if (v === undefined) fail(`${a} needs a value`);
+      flags[a] = v;
+      i++;
+    } else {
+      positional.push(a);
+    }
+  }
+  return { positional, flags };
+}
+
+// [HOST/]OWNER/REPO, as gh --repo accepts it. A leading "-" can never pass.
+const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9._-]+){1,2}$/;
+
+function repoArgs(flags: Record<string, string>): string[] {
+  const repo = flags["--repo"];
+  if (repo === undefined) return [];
+  if (!REPO_RE.test(repo)) fail(`--repo must be [HOST/]OWNER/REPO, got: ${JSON.stringify(repo)}`);
+  return ["--repo", repo];
 }
 
 const [, , mode, ...rest] = process.argv;
@@ -50,7 +98,7 @@ if (mode === "issue") {
   const n = rest[0] ?? "";
   if (!/^[0-9]+$/.test(n)) fail(`issue number must be numeric, got: ${JSON.stringify(n)}`);
   const r = gh(["issue", "view", n, "--json", "title,body,comments"]);
-  if (!r.ok) fail(`gh issue view failed: ${r.err.trim() || "unknown error"}`);
+  if (!r.ok) fail(`gh issue view failed: ${r.err || "unknown error"}`);
   let title = "";
   let body = "";
   let comments: { author?: { login?: string }; body?: string }[] = [];
@@ -71,15 +119,21 @@ if (mode === "issue") {
 }
 
 if (mode === "pr-body") {
-  const r = gh(["pr", "view", "--json", "body", "--jq", ".body"]);
-  if (!r.ok) fail(`gh pr view failed: ${r.err.trim() || "unknown error"}`);
-  console.log(wrapUntrustedTrackerContent(r.out, "pr body"));
+  const { positional, flags } = parseArgs(rest, ["--repo"]);
+  if (positional.length > 1) fail(`pr-body takes at most one PR number, got: ${JSON.stringify(positional)}`);
+  const n = positional[0];
+  // An explicit but empty number (an unset "$PR_NUMBER") is an error, never
+  // a silent fallback to the current branch's PR.
+  if (n !== undefined && !/^[0-9]+$/.test(n)) fail(`PR number must be numeric, got: ${JSON.stringify(n)}`);
+  const r = gh(["pr", "view", ...(n !== undefined ? [n] : []), ...repoArgs(flags), "--json", "body", "--jq", ".body"]);
+  if (!r.ok) fail(`gh pr view failed: ${r.err || "unknown error"}`);
+  console.log(wrapUntrustedTrackerContent(r.out, n !== undefined ? `PR #${n} body` : "pr body"));
   process.exit(0);
 }
 
 if (mode === "pr-comments") {
   const r = gh(["pr", "view", "--json", "comments"]);
-  if (!r.ok) fail(`gh pr view failed: ${r.err.trim() || "unknown error"}`);
+  if (!r.ok) fail(`gh pr view failed: ${r.err || "unknown error"}`);
   let comments: { author?: { login?: string }; body?: string }[] = [];
   try {
     const j = JSON.parse(r.out);
@@ -95,4 +149,37 @@ if (mode === "pr-comments") {
   process.exit(0);
 }
 
-fail("usage: gstack-issue-guard issue <n> | pr-body | pr-comments | --stdin [--source <label>]");
+if (mode === "search") {
+  const { positional, flags } = parseArgs(rest, ["--repo", "--state", "--limit"]);
+  const [kind, query] = positional;
+  if (positional.length !== 2) fail(`search takes <issue|pr> <query>, got: ${JSON.stringify(positional)}`);
+  if (kind !== "issue" && kind !== "pr") fail(`search kind must be issue or pr, got: ${JSON.stringify(kind)}`);
+  if (query.trim() === "") fail("search query is empty");
+  const states = kind === "issue" ? ["open", "closed", "all"] : ["open", "closed", "merged", "all"];
+  const state = flags["--state"] ?? "open";
+  if (!states.includes(state)) fail(`--state for ${kind} must be one of ${states.join("|")}, got: ${JSON.stringify(state)}`);
+  const limit = flags["--limit"] ?? "10";
+  if (!/^[1-9][0-9]{0,2}$/.test(limit)) fail(`--limit must be 1-999, got: ${JSON.stringify(limit)}`);
+  const r = gh([kind, "list", ...repoArgs(flags), "--search", query, "--state", state, "--limit", limit, "--json", "number,title,url"]);
+  if (!r.ok) fail(`gh ${kind} list failed: ${r.err || "unknown error"}`);
+  // gh exiting 0 is not enough: anything but a JSON array is a failed fetch,
+  // never an empty result.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(r.out);
+  } catch {
+    fail(`gh ${kind} list returned unparseable JSON`);
+  }
+  if (!Array.isArray(parsed)) fail(`gh ${kind} list returned JSON that is not an array`);
+  const hits = parsed as { number?: unknown; title?: unknown }[];
+  const lines = hits.map((h) => `#${typeof h?.number === "number" ? h.number : "?"} ${typeof h?.title === "string" ? h.title : ""}`);
+  // The count sits in the trusted source label: the fetch succeeded, so
+  // "0 matches" here is a real zero, not a failure.
+  console.log(wrapUntrustedTrackerContent(lines.join("\n"), `${kind} search: ${hits.length} match${hits.length === 1 ? "" : "es"}`));
+  process.exit(0);
+}
+
+fail(
+  "usage: gstack-issue-guard issue <n> | pr-body [<n>] [--repo R] | pr-comments | " +
+    "search <issue|pr> <query> [--repo R] [--state S] [--limit N] | --stdin [--source <label>]",
+);
