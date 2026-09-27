@@ -12,7 +12,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   compareVersions, droppedSubjects, fill, gateCandidates, landingBranchName, nameList,
-  parseSuiteLog, renderPlist, suiteComplete, unvouchedFiles, worktreeKind, defaultConfig,
+  fsResolve, parseSuiteLog, renderPlist, suiteComplete, unvouchedFiles, worktreeKind, defaultConfig,
   RENDER_HOOKS, RENDER_HOOK_MARKER, renderHookShim, renderHookSkip,
 } from '../contrib/fork-sync/fork-sync';
 
@@ -189,10 +189,81 @@ describe('worktreeKind', () => {
     expect(k.detail).toContain('/r/.git');
   });
 
+  // `[a, b].map(resolve)` hands the callback (element, INDEX, ARRAY). A
+  // resolver with optional parameters — fsResolve takes an injectable realpath,
+  // an attempt count and a sleep — then receives 0 and the array in them and
+  // silently reports both paths unresolvable with no reason. Measured: it turned
+  // the real linked-worktree STOP into `cannot resolve ... (); ... ()`.
+  test('the resolver is called with the path and nothing else', () => {
+    const arity: number[] = [];
+    const resolver = (...args: unknown[]) => {
+      arity.push(args.length);
+      return { path: String(args[0]), real: '/same', why: '' };
+    };
+    expect(worktreeKind('/a', '/b', resolver).kind).toBe('main');
+    expect(arity).toEqual([1, 1]);
+  });
+
   test('one side unresolvable is unresolved, not linked', () => {
     const k = worktreeKind('/a/.git', '/b/.git', stub({ '/a/.git': '/real/a/.git', '/b/.git': new Error('ENOENT') }));
     expect(k.kind).toBe('unresolved');
     expect(k.detail).toContain('/b/.git');
+  });
+});
+
+describe('fsResolve', () => {
+  const errno = (code: string, message: string): NodeJS.ErrnoException => Object.assign(new Error(message), { code });
+  /** A realpath that throws the given errors in order, then returns `real`. */
+  const flaky = (errs: NodeJS.ErrnoException[], real: string) => {
+    const calls: string[] = [];
+    let thrown = 0;
+    return {
+      calls,
+      realpath: (p: string): string => {
+        calls.push(p);
+        if (thrown < errs.length) { thrown += 1; throw errs[thrown - 1]; }
+        return real;
+      },
+    };
+  };
+
+  // Measured on this box (macOS 25.6, 2026-09-28): realpath needs a file
+  // descriptor. `fs.realpathSync` on a path that EXISTS throws
+  // `EMFILE: too many open files, lstat <path>` once the process is out of
+  // descriptors, while `statSync` on the same path still succeeds. And in a
+  // main checkout the two paths the precondition compares are the IDENTICAL
+  // string (`--absolute-git-dir` and `path.resolve(repo, '--git-common-dir')`,
+  // measured byte-identical), so the 2026-09-27 'linked worktree' verdict was
+  // only reachable if one of two resolves OF ONE STRING failed. A descriptor
+  // shortage that lasts a millisecond is not a fact about the repository's
+  // layout, and a STOP on it is memoised until upstream or the tip moves.
+  test('a descriptor shortage that clears is retried, not reported', () => {
+    const f = flaky([errno('EMFILE', 'EMFILE: too many open files, lstat /r/.git')], '/real/r/.git');
+    const slept: number[] = [];
+    const r = fsResolve('/r/.git', f.realpath, 3, (ms) => slept.push(ms));
+    expect(r.real).toBe('/real/r/.git');
+    expect(r.why).toBe('');
+    expect(f.calls).toHaveLength(2);
+    expect(slept).toHaveLength(1);
+  });
+
+  test('a shortage that never clears reports itself, with the fs reason', () => {
+    const e = errno('ENFILE', 'ENFILE: file table overflow, lstat /r/.git');
+    const f = flaky([e, e, e], '/never');
+    const r = fsResolve('/r/.git', f.realpath, 3, () => {});
+    expect(r.real).toBeNull();
+    expect(r.why).toContain('ENFILE');
+    expect(f.calls).toHaveLength(3);
+  });
+
+  test('a path that is genuinely missing is answered at once, never slept on', () => {
+    const f = flaky([errno('ENOENT', "ENOENT: no such file or directory, lstat '/gone'")], '/never');
+    const slept: number[] = [];
+    const r = fsResolve('/gone', f.realpath, 3, (ms) => slept.push(ms));
+    expect(r.real).toBeNull();
+    expect(r.why).toContain('ENOENT');
+    expect(f.calls).toHaveLength(1);
+    expect(slept).toEqual([]);
   });
 });
 
