@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.91.4.0] - 2026-09-27
+
+**`/spec` keeps its redaction scan file inside your TMPDIR on macOS.**
+**One template change, pinned so Linux CI catches a regression.**
+
+Before `/spec` sends a spec body to Codex or files it, the redaction scan writes the exact bytes to a temp file and scans that file. That file was created with a bare `mktemp`. On macOS a bare `mktemp` behaves like `mktemp -t tmp`, which picks the per-user `/var/folders/.../T` directory over `TMPDIR` (see `mktemp(1)`). A scan paused on a MEDIUM finding, or a clean scan waiting for its sink, kept the spec body there instead of in the temp root you set. The scan now uses `mktemp "${TMPDIR:-/tmp}/gstack-redact.XXXXXX"`, which BSD, GNU and busybox `mktemp` all honour.
+
+### The two numbers that matter
+
+Source: `bun test test/spec-quality-gate-secret-sink.test.ts` and `bun test test/regression-pr1169-mktemp-fallbacks.test.ts`, each run against the old and the new scan block on macOS 26 with Bun 1.3.13.
+
+| Check | Before | After | Δ |
+|---|---:|---:|---:|
+| `/spec` secret-sink cases failing on macOS | 4 of 12 | 0 of 12 | −4 |
+| Pin cases that reject a bare `mktemp` scan file | 0 | 2 | +2 |
+
+GNU `mktemp` already honoured `TMPDIR`, so Linux CI never saw the escape. The new pin is a static check, so it fails on any OS if the scan block goes back to a bare or `-t` `mktemp`.
+
+### What this means for you
+
+If you run `/spec` on a Mac with your own `TMPDIR` (a sandbox, a per-project temp root, a hermetic test runner), the scanned copy of your spec now lives where you told temp files to go. Removal rules and the refusal to send an unscanned body when `mktemp` fails are unchanged. Upgrade and it applies.
+
+### Itemized changes
+
+#### Fixed
+
+- `/spec`'s redaction scan creates its scan file from an explicit `${TMPDIR:-/tmp}/gstack-redact.XXXXXX` template, so on macOS the spec body stays under `TMPDIR` rather than the per-user temp directory.
+
+#### For contributors
+
+- `test/spec-quality-gate-secret-sink.test.ts` asserts that the MEDIUM and clean-path scan files live in the `TMPDIR` the test hands the scan block.
+- `test/regression-pr1169-mktemp-fallbacks.test.ts` pins the `TMPDIR` template in `scripts/resolvers/redact-doc.ts` and the rendered `spec/sections/gate-and-file.md`, and rejects a bare or `-t` `mktemp` for `REDACT_FILE`.
+
 ## [1.91.2.0] - 2026-09-25
 
 `/sync-gbrain` can check whether the current worktree's pages are readable without writing a probe page or deleting guidance when the answer is uncertain.
