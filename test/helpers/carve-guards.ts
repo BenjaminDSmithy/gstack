@@ -163,7 +163,7 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // wave's headline capability) grows the union to 1.195x. Deliberate:
     // the section is on-demand (loads only for Apple store targets), so
     // per-invocation cost for non-iOS ships is one manifest line.
-    maxSizeRatio: 1.322, // Shared advisory identity/dedup + critical-severity validation: 248,065 union bytes / 187,706 baseline = 1.3216 (2026-09-17).
+    maxSizeRatio: 1.343, // fork: Step 1.5 pr-prep gate + single-select AskUserQuestion doctrine + the pr-prep fetch/codex blocks (+3,578B) over upstream's 247,937 union; measured 251,515 / 187,706 = 1.3399 (2026-09-27, v1.91.2.0).
   },
   'plan-ceo-review': {
     skill: 'plan-ceo-review',
@@ -181,12 +181,12 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // v1.65 merge: provisional larger-of-both-waves budget; re-measured below.
         // Fork port wave 2 (#703): the repo-doc-preference block in the design
     // check grew every plan-review skeleton ~0.7KB. Measured values noted.
-    maxSkeletonBytes: 80_150, // + depth-specific output and 0H/0I feasibility boundary clarity + the Aside probe's failure reason; measured 80,111.
+    maxSkeletonBytes: 80_750, // + depth-specific output and 0H/0I feasibility boundary clarity + the Aside probe's failure reason; measured 80,111. fork: +650B over upstream's 80,007; measured 80,657 (2026-09-27, v1.91.2.0).
     minUnionBytes: 123_600, // token-reduction Phases 1-2 (v1.69.x branch): preamble bash -> bin/gstack-skill-start, onboarding -> gated emission; measured union 137,346
     mustContain: ['SCOPE EXPANSION', 'SELECTIVE EXPANSION', 'HOLD SCOPE', 'SCOPE REDUCTION'],
     // Default-on Codex outside-voice (codexPreflight block + CODEX_MODE branch
     // prose replacing the smaller opt-in question) lands this ~5.2% over baseline.
-    maxSizeRatio: 1.081, // + the Aside probe's failure reason; measured 1.0803
+    maxSizeRatio: 1.088, // + the Aside probe's failure reason; measured 1.0803. fork: +650B over upstream's 163,921 union; measured 164,571 / 151,747 = 1.0845 (2026-09-27, v1.91.2.0)
   },
   'plan-eng-review': {
     skill: 'plan-eng-review',
@@ -218,7 +218,7 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // 1.08 → 1.10: the scope-gate exceptions block (+ its adversarial-review
     // hardening: host-anchored mode signal, precedence, passing-mention
     // guards) and the plan-mode preamble reword land the union at 1.092.
-    maxSizeRatio: 1.151, // + clarity rules for saved decisions/setup gates + the Aside probe's failure reason; measured 1.1504
+    maxSizeRatio: 1.16, // + clarity rules for saved decisions/setup gates + the Aside probe's failure reason; measured 1.1504. fork: +single-select AskUserQuestion doctrine (+650B) over upstream's 143,411; measured 144,061 / 124,597 = 1.1562 (2026-09-27, v1.91.2.0)
   },
   'plan-design-review': {
     skill: 'plan-design-review',
@@ -264,7 +264,7 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // check grew every plan-review skeleton ~0.7KB. Measured values noted.
     // #2499 project-scope MCP jq in the brain-sync block grew every tier-2+
     // skeleton ~1.5KB (entry resolution emitted once per SKILL.md).
-    maxSkeletonBytes: 68_550, // + v2.0 {{ASIDE_RESEARCH}} (Aside first, WebSearch fallback) + the Aside probe's failure reason; measured 68_544
+    maxSkeletonBytes: 68_850, // + v2.0 {{ASIDE_RESEARCH}} (Aside first, WebSearch fallback) + the Aside probe's failure reason; measured 68_544. fork: +681B over upstream's 68,094; measured 68,775 (2026-09-27, v1.91.2.0)
     minUnionBytes: 99_700, // token-reduction Phases 1-2 (v1.69.x branch); measured union 110,833
     mustContain: ['developer experience', 'Getting Started'],
     // Default-on Codex outside-voice (codexPreflight block + CODEX_MODE branch
@@ -404,7 +404,7 @@ do not launch the downstream skill or open a browser.`,
     // the cross-session decision-memory nudge) lands this carved skeleton just over
     // the strict 1.05; headroom for the shared preamble additions.
     // v1.64+v1.65 merge sums both waves' preamble growth; measured 1.073.
-    maxSizeRatio: 1.08,
+    maxSizeRatio: 1.092, // fork: +single-select AskUserQuestion doctrine (+774B) over upstream's 97,529; measured 98,303 / 90,375 = 1.0877 (2026-09-25)
   },
   cso: {
     skill: 'cso',
@@ -440,7 +440,7 @@ do not launch the downstream skill or open a browser.`,
     // The full-audit E2E asserts actual section loading alongside report/proof behavior.
     behavioral: 'external',
     externalTest: 'test/skill-e2e-cso.test.ts',
-    maxSkeletonBytes: 18_000,
+    maxSkeletonBytes: 18_100, // fork: +disable-model-invocation frontmatter (+31B) over upstream's 17,986; measured 18,017 (2026-09-25)
     minUnionBytes: 30_000, // v3 deliberately removes the shared export/startup preamble.
     mustContain: ['OWASP', 'STRIDE', 'daily', 'comprehensive', 'verif'],
     // Existing baseline comparison remains an upper bound; absolute limits above
