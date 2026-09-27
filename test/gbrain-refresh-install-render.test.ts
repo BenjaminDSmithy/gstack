@@ -19,9 +19,11 @@ function okBranch(): string {
   const labelMatch = /^\s*ok(?:\|[\w-]+)*\)/m.exec(SRC.slice(start));
   if (!labelMatch) throw new Error('Could not locate gbrain-refresh ok) branch');
   const ok = start + labelMatch.index;
-  const end = SRC.indexOf(';;', ok);
-  if (end < 0) throw new Error('Could not locate gbrain-refresh ok) branch terminator');
-  return SRC.slice(ok, end);
+  // The item ends at the first line that is only `;;`. Inline case arms in
+  // the body (`/*) ;; *) … ;;`) share a line with code, so they don't count.
+  const term = /^[ \t]*;;[ \t]*$/m.exec(SRC.slice(ok));
+  if (!term) throw new Error('Could not locate gbrain-refresh ok) branch terminator');
+  return SRC.slice(ok, ok + term.index);
 }
 
 describe('gstack-config gbrain-refresh: machine-wide render guards', () => {
@@ -31,8 +33,18 @@ describe('gstack-config gbrain-refresh: machine-wide render guards', () => {
     expect(branch).toContain('$HOME/.claude/skills/gstack');
   });
 
-  test('refuses a symlinked install (would dirty a dev worktree)', () => {
+  // A symlinked install renders only when it resolves to the root of a main
+  // worktree (a durable fork clone); a linked dev worktree stays refused.
+  // Behavior: test/gbrain-refresh-symlinked-install.test.ts.
+  test('refuses a symlinked install unless it is the root of a main worktree', () => {
     expect(branch).toMatch(/\[ -L "\$INSTALL_DIR" \]/);
+    expect(branch).toContain('[ "$_git_dir" != "$_common_dir" ]');
+    expect(branch).toContain('[ "$_top" != "$INSTALL_SRC" ]');
+    expect(branch).toContain('elif [ -n "$LINK_REFUSAL" ]; then');
+  });
+
+  test('never renders straight into the live render dir, even in advice', () => {
+    expect(branch).not.toMatch(/--out-dir "?\$RENDER_DIR"?[\s']/);
   });
 
   test('verifies it is a real gstack clone before mutating it', () => {
