@@ -729,21 +729,56 @@ The skill assumes `codex` CLI is on PATH (OpenAI's official CLI;
 this step — don't block. Different model family from Claude gives
 genuine independent signal.
 
+**Use `codex exec`, never `codex review "<prompt>"`.** `codex review`
+cannot review a named commit with custom instructions: `--base` and
+`--commit` both reject a prompt ("the argument '--base <BRANCH>' cannot be
+used with '[PROMPT]'"), and a bare prompt reviews the UNCOMMITTED working
+tree, not the commit the prompt names — on a clean tree that is a review of
+nothing. `codex exec --sandbox read-only` takes the prompt and reads the
+commit itself with `git show`.
+
+Set `CLEAN_COMMIT_SHAS` to the CLEAN commits' full SHAs, one per line. The
+loop reads lines (zsh does not word-split `$CLEAN_COMMIT_SHAS`), and each
+`codex exec` gets `< /dev/null` so it cannot swallow the loop's remaining
+SHAs as a `<stdin>` block.
+
 ```bash
-if command -v codex >/dev/null 2>&1; then
-  for sha in $CLEAN_COMMIT_SHAS; do
-    diff=$(git show "$sha" --stat --pretty=format:"%s")
-    subject=$(git log -1 --format=%s "$sha")
-    codex review "Review commit ${sha:0:8} '${subject}' for correctness,
-      edge cases, and CONTRIBUTING.md compliance. Focus on: regression
-      risk on adjacent code paths, missing tests, hash/version-bump
-      invariants if touching cache keys, ordering bugs if touching
-      conditionals or dispatchers. Flag P0/P1/P2 issues with file:line."
-  done
-else
+BASE="${BASE_BRANCH:-main}"
+_REPO_ROOT=$(git rev-parse --show-toplevel)
+if ! command -v codex >/dev/null 2>&1; then
   echo "[pr-prep] codex CLI not found — skipping second-opinion review.
    Install via 'brew install codex' or pin a fork-specific reviewer in
    your skill config."
+else
+  _CX=$(mktemp -d "${TMPDIR:-/tmp}/gstack-pr-prep-codex.XXXXXX")
+  printf '%s\n' "$CLEAN_COMMIT_SHAS" | tr -s ' \t' '\n\n' | while IFS= read -r sha; do
+    [ -n "$sha" ] || continue
+    subject=$(git log -1 --format=%s "$sha")
+    codex exec --sandbox read-only -C "$_REPO_ROOT" \
+      -o "$_CX/$sha.md" \
+      "Review git commit $sha ('$subject') in this repository. Run: git show $sha
+      to read the change, and git diff $BASE...HEAD --stat for the branch
+      around it. Review ONLY that commit, not the working tree. Check
+      correctness, edge cases, and CONTRIBUTING.md compliance. Focus on:
+      regression risk on adjacent code paths, missing tests,
+      hash/version-bump invariants if touching cache keys, ordering bugs if
+      touching conditionals or dispatchers. Flag P0/P1/P2 issues with
+      file:line. Do not modify any file." \
+      < /dev/null > "$_CX/$sha.log" 2>&1
+    rc=$?
+    review_bytes=0
+    [ -f "$_CX/$sha.md" ] && review_bytes=$(wc -c < "$_CX/$sha.md" | tr -d ' ')
+    # A usage-limit error can exit non-zero OR come back as a short "review".
+    if grep -qi 'usage limit' "$_CX/$sha.log" && { [ "$rc" -ne 0 ] || [ "$review_bytes" -lt 400 ]; }; then
+      echo "[pr-prep] CODEX SKIPPED: usage limit hit at $sha — no second opinion for it or any later CLEAN commit. This is NOT a pass."
+      break
+    elif [ "$rc" -eq 0 ] && [ "$review_bytes" -gt 0 ]; then
+      echo "=== codex review $sha ==="
+      cat "$_CX/$sha.md"
+    else
+      echo "[pr-prep] CODEX FAILED: $sha (exit $rc, no review written) — log: $_CX/$sha.log. This is NOT a pass."
+    fi
+  done
 fi
 ```
 
@@ -751,6 +786,14 @@ Surface findings in the report under each commit as a `Codex P{N}`
 line. P0/P1 findings escalate the commit's severity to OVERLAP at
 minimum (don't file as CLEAN until addressed). P2 findings stay
 CLEAN — author decides whether to fix-before-file or note-in-PR-body.
+
+A skipped or failed review is a soft skip with a warning, never a silent
+pass. Codex reporting "You've hit your usage limit" means the second
+opinion did NOT run: mark that commit and every later CLEAN commit
+`Codex: SKIPPED (usage limit)` in the report and in Step 5's summary, then
+carry on. The commit keeps its dedup bucket, but nothing may claim it was
+codex-reviewed. Report a `CODEX FAILED` line the same way, as
+`Codex: FAILED (see log)`.
 
 Real-world example (2026-05-26 motivating case):
 - PR #1427 (synopsis doc truncate) → codex P2: env-overridable cap
@@ -859,6 +902,13 @@ Print summary at end:
 
 ```
 Summary: 1 EXACT_DUP, 1 CLEAN. 1 commit blocked.
+```
+
+Name every gap in the summary too — an UNVERIFIED commit and a skipped
+codex review are the two ways this audit can look cleaner than it is:
+
+```
+Summary: 1 UNVERIFIED (fetch failed), 2 CLEAN (codex skipped: usage limit). 0 commits blocked, audit INCOMPLETE.
 ```
 
 ## Step 6: Refusal on EXACT_DUP
