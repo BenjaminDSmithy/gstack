@@ -79,6 +79,12 @@ directory). It hands off to this job and skips its own pull and discard.
      100-190 for hours that is hours of wall clock to re-derive a baseline the
      next scheduled run re-measures for free.
 
+   Two cases cannot be named at all, and the verdict says which: a shard that
+   died before printing its plan (`gate.ours.unnamedShards`), and a suite that
+   printed no shard line whatsoever. An empty unrun set there means nothing is
+   known, not that nothing is wrong — enumerate the changed code's consumers by
+   hand and run that set on both trees.
+
    An unrun file never escalates on the bare fact of being unrun.
    `BLOCKED_REGRESSION` is memoised per (reason, upstream sha, branch tip) and
    pages loudly, so raising it off a shard that wedged — a load artefact, not a
