@@ -344,6 +344,36 @@ export function gateCandidates(ours: SuiteResult, base: SuiteResult, touchedTest
   return [...files].sort();
 }
 
+/** How a path resolved: `real` is null when it could not be, with `why`. */
+export interface Resolved { path: string; real: string | null; why: string }
+
+/**
+ * Classify a checkout from its git dir and common dir.
+ *
+ * The comparison used to be `realpathOrNull(a) !== realpathOrNull(b)`, which
+ * swallowed the resolve error and compared null against a real path — so a
+ * path that could not be STATTED was reported as a linked worktree. That is a
+ * loud, memoised claim about the repository's layout that nothing had
+ * established, and unfalsifiable afterwards because the fs error was gone.
+ * Only a resolved mismatch is a linked worktree.
+ */
+export function worktreeKind(gitDir: string, commonDir: string, resolve: (p: string) => Resolved):
+{ kind: 'main' | 'linked' | 'unresolved'; detail: string } {
+  const resolved = [gitDir, commonDir].map(resolve);
+  const unresolved = resolved.filter((r) => r.real === null);
+  if (unresolved.length > 0) {
+    return { kind: 'unresolved', detail: unresolved.map((r) => `${r.path} (${r.why})`).join('; ') };
+  }
+  if (resolved[0].real !== resolved[1].real) return { kind: 'linked', detail: `${resolved[0].real} != ${resolved[1].real}` };
+  return { kind: 'main', detail: resolved[0].real ?? '' };
+}
+
+/** `worktreeKind`'s resolver over the real filesystem. */
+export function fsResolve(p: string): Resolved {
+  try { return { path: p, real: fs.realpathSync(p), why: '' }; }
+  catch (err) { return { path: p, real: null, why: (err as Error).message }; }
+}
+
 /** Ours-only unattributed failures cannot be isolated to a file. */
 export function oursOnlyUnattributed(ours: SuiteResult, base: SuiteResult): number {
   let n = 0;
@@ -859,7 +889,9 @@ export async function run(cfg: Config): Promise<RunResult> {
     if (git(repo, 'rev-parse', '--is-inside-work-tree').stdout !== 'true') return pre(`not a git work tree: ${path.basename(repo)}`);
     const gitDir = gitOk(repo, 'rev-parse', '--absolute-git-dir');
     const commonDir = path.resolve(repo, gitOk(repo, 'rev-parse', '--git-common-dir'));
-    if (realpathOrNull(gitDir) !== realpathOrNull(commonDir)) {
+    const kind = worktreeKind(gitDir, commonDir, fsResolve);
+    if (kind.kind === 'unresolved') return pre(`cannot resolve the checkout's git directory: ${kind.detail}`);
+    if (kind.kind === 'linked') {
       return pre('the durable checkout is a linked worktree; the live suite must run from the main checkout');
     }
     if (!cfg.noLand) {
