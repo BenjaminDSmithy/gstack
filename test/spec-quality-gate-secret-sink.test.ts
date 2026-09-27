@@ -2,7 +2,7 @@
 import { beforeAll, afterAll, describe, test, expect } from 'bun:test';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dir, '..');
 let output: string;
@@ -44,7 +44,8 @@ function runScan(host: 'claude' | 'codex', body: string, scanner: 'real' | 'brok
   if (fence.includes('<the exact')) throw new Error('Spec fixture bytes did not replace the scan placeholder');
   // Deliberately put sinks directly after the real fence. A missing executable
   // stop (the previous prose-only gate) sends/persists the secret and fails.
-  const script = `${errexit ? 'set -e\n' : ''}${fence}\n"$GSTACK_BIN/fake-reviewer" < "$REDACT_FILE"
+  const script = `${errexit ? 'set -e\n' : ''}${fence}\nprintf 'SCANNED_FILE: %s\\n' "$REDACT_FILE"
+"$GSTACK_BIN/fake-reviewer" < "$REDACT_FILE"
 cat "$REDACT_FILE" > "$SINK_DIR/archive.md"
 cat "$REDACT_FILE" > "$SINK_DIR/transcript.md"
 rm -f "$REDACT_FILE"
@@ -54,10 +55,17 @@ rm -f "$REDACT_FILE"
       env: { ...process.env, GSTACK_ROOT: runtime, GSTACK_BIN: bin, SINK_DIR: sinks, TMPDIR: temps },
       stdout: 'pipe', stderr: 'pipe', timeout: 10_000,
     });
-    return { code: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString(),
+    return { code: result.exitCode, tmp: temps, stdout: result.stdout.toString(), stderr: result.stderr.toString(),
       sinks: readdirSync(sinks).map(name => ({ name, body: readFileSync(join(sinks, name), 'utf8') })),
       pending: readdirSync(temps).map(name => readFileSync(join(temps, name), 'utf8')) };
   } finally { rmSync(scratch, { recursive: true, force: true }); }
+}
+
+// The scan file must live in the caller's TMPDIR: otherwise `pending` checks
+// an empty directory and passes vacuously (bare mktemp on macOS ignores TMPDIR).
+function printedDir(stdout: string, label: string): string | undefined {
+  const path = stdout.match(new RegExp(`^${label}: (.+)$`, 'm'))?.[1];
+  return path === undefined ? undefined : dirname(path);
 }
 
 for (const host of ['claude', 'codex'] as const) {
@@ -78,6 +86,7 @@ for (const host of ['claude', 'codex'] as const) {
       const result = runScan(host, body);
       expect(result.code).toBe(2);
       expect(result.sinks).toEqual([]);
+      expect(printedDir(result.stdout, 'REDACT_FILE')).toBe(result.tmp);
       expect(result.pending).toEqual([body + '\n']);
       expect(result.stderr).toContain('paused');
     });
@@ -96,6 +105,7 @@ for (const host of ['claude', 'codex'] as const) {
       expect(result.code).toBe(0);
       expect(result.sinks.map(sink => sink.name).sort()).toEqual(['archive.md', 'reviewer-received.txt', 'transcript.md']);
       expect(result.sinks.every(sink => sink.body === body + '\n')).toBe(true);
+      expect(printedDir(result.stdout, 'SCANNED_FILE')).toBe(result.tmp);
       expect(result.pending).toEqual([]);
     });
     test('redaction remains ahead of outside preflight and --no-gate only skips scoring', () => {
