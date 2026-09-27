@@ -135,6 +135,15 @@ describe('suite log parsing', () => {
     expect(unvouchedFiles(noPlan)).toEqual({ files: [], shards: [2], unnamedShards: [2] });
   });
 
+  test('a suite that printed no shard line at all names no shard and no file', () => {
+    const r = parseSuiteLog('bun: command not found');
+    expect(suiteComplete(r)).toBe(false);
+    expect(r.shardTotal).toBe(0);
+    // Nothing to enumerate: there is no shard count and no plan. The verdict
+    // has to say the plan itself is missing, which judge() does from this.
+    expect(unvouchedFiles(r)).toEqual({ files: [], shards: [], unnamedShards: [] });
+  });
+
   test('nameList bounds what a log line or a notification carries', () => {
     expect(nameList(['a', 'b'], 3)).toBe('a, b');
     expect(nameList(['a', 'b', 'c', 'd'], 3)).toBe('a, b, c and 1 more');
@@ -476,6 +485,16 @@ describe('fork-sync run (sandbox repos)', () => {
     // Inconclusive stays inconclusive: naming files must not turn a truncated
     // run into a pass.
     expect(gate.verdict.verdict).toBe('inconclusive');
+  });
+
+  e2e('a suite that never reported a shard says so, rather than naming an empty unrun set', (sb) => {
+    upstreamShips(sb, '1.1.0.0', { 'up.txt': 'up\n' });
+    const before = liveState(sb);
+    const r = runSync(sb, ['--suite-cmd', "echo 'bun: command not found'"]);
+    expect(r.code).toBe(2);
+    expect(r.out).toContain('INCONCLUSIVE');
+    expect(r.out).toContain('printed no shard line at all');
+    expect(liveState(sb)).toEqual(before);
   });
 
   e2e('an unrun file our commits TOUCH is re-run on both trees: a confirmed failure STOPS', (sb) => {

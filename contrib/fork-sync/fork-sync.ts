@@ -704,25 +704,27 @@ export function nameList(files: string[], cap = NAME_CAP): string {
 }
 
 async function judge(cfg: Config, ours: SuiteResult, base: SuiteResult, touchedTests: string[], oursRoot: string, baseRoot: string, runDir: string): Promise<GateVerdict> {
-  // Isolate first, judge completeness second: a regression confirmed in
-  // isolation is definitive even when a shard wedged, and naming it is what
-  // makes the STOP actionable. An incomplete run with nothing confirmed can
-  // prove nothing either way, so it stays inconclusive.
+  // A regression confirmed in isolation is definitive even when a shard
+  // wedged, and naming it is what makes the STOP actionable, so isolation runs
+  // regardless of completeness and its verdict wins at the end. An incomplete
+  // run with nothing confirmed can prove nothing either way, so it stays
+  // inconclusive — and says which files that ignorance covers.
   const v: GateVerdict = { verdict: 'pass', regressions: [], flaky: [], baseline: [], unrun: [], vouched: [], reasons: [] };
   const isoLog = path.join(runDir, 'isolate.log');
 
   /**
    * The three-way isolated verdict on one file: ours passes => not ours to
-   * answer for; ours fails and base passes or lacks it => regression; both
-   * fail => baseline-red. Returns false when the file cannot be re-run here.
+   * answer for, into `passBucket` (`flaky` for a file seen failing, `vouched`
+   * for one that never reported); ours fails and base passes or lacks it =>
+   * regression; both fail => baseline-red. False when it cannot be re-run.
    */
-  const isolate = async (file: string, flakyBucket: string[]): Promise<boolean> => {
+  const isolate = async (file: string, passBucket: string[]): Promise<boolean> => {
     if (!fs.existsSync(path.join(oursRoot, file))) {
       // Attributed to a path this tree does not have: not a file we can re-run.
       v.reasons.push(`skipped ${file}: not a file in the rebased tree`);
       return false;
     }
-    if (await isolatedPasses(cfg, oursRoot, file, isoLog)) { flakyBucket.push(file); return true; }
+    if (await isolatedPasses(cfg, oursRoot, file, isoLog)) { passBucket.push(file); return true; }
     if (!fs.existsSync(path.join(baseRoot, file))) { v.regressions.push(`${file} (new on our side, fails)`); return true; }
     if (await isolatedPasses(cfg, baseRoot, file, isoLog)) v.regressions.push(file);
     else v.baseline.push(file);
@@ -780,6 +782,13 @@ async function judge(cfg: Config, ours: SuiteResult, base: SuiteResult, touchedT
   if (unvouched.unnamedShards.length > 0) {
     v.verdict = v.verdict === 'pass' ? 'inconclusive' : v.verdict;
     v.reasons.push(`shard(s) ${unvouched.unnamedShards.join(', ')} did not finish and never printed a plan line, so their files cannot be named`);
+  }
+  // No shard line at all: the runner died before it planned anything, so there
+  // is not even a shard count to enumerate. Distinct from a shard dying, and
+  // an empty unrun set here means "nothing is known", not "nothing is wrong".
+  if (ours.shardTotal === 0 && ours.plans.size === 0) {
+    v.verdict = v.verdict === 'pass' ? 'inconclusive' : v.verdict;
+    v.reasons.push('the rebased suite printed no shard line at all, so no unrun file can be named');
   }
   if (v.regressions.length > 0) v.verdict = 'regression';
   return v;
