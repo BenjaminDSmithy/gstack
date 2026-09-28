@@ -79,3 +79,70 @@ describe('terminal-agent owner lifecycle', () => {
     expect(fs.existsSync(path.join(stateDir, 'terminal-port'))).toBe(false);
   });
 });
+
+// A terminal-agent started without BROWSE_OWNER_PID arms no owner watchdog.
+// When the test runner dies before its afterAll (a per-test timeout, a killed
+// shard, a stray process.exit), launchd adopts the agent and it listens on
+// loopback until someone kills it by hand. Every test that spawns the agent
+// as a long-lived process must name an owner so the watchdog above reaps it.
+function testSources(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === 'node_modules' || entry.name === 'fixtures' || entry.isSymbolicLink()) continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...testSources(full));
+    else if (entry.name.endsWith('.ts')) out.push(full);
+  }
+  return out;
+}
+
+// Text of the call starting at `open` (the index of its `(`), with parens
+// inside string and template literals ignored.
+function callText(src: string, open: number): string {
+  let depth = 0;
+  let quote = '';
+  for (let i = open; i < src.length; i++) {
+    const ch = src[i];
+    if (quote) {
+      if (ch === '\\') i++;
+      else if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') quote = ch;
+    else if (ch === '(') depth++;
+    else if (ch === ')' && --depth === 0) return src.slice(open, i + 1);
+  }
+  return src.slice(open);
+}
+
+function agentSpawns(file: string): { where: string; owned: boolean }[] {
+  const src = fs.readFileSync(file, 'utf-8');
+  const agentConsts = new Set(
+    [...src.matchAll(/\bconst\s+(\w+)\s*=[^;\n]*terminal-agent\.ts/g)].map(m => m[1]),
+  );
+  const found: { where: string; owned: boolean }[] = [];
+  for (const m of src.matchAll(/\bBun\.spawn\(\s*\[([^\]]*)\]/g)) {
+    const argv = m[1];
+    const isAgent = /terminal-agent\.ts/.test(argv)
+      || [...agentConsts].some(name => new RegExp(`\\b${name}\\b`).test(argv));
+    if (!isAgent) continue;
+    const open = m.index! + m[0].indexOf('(');
+    const line = src.slice(0, m.index).split('\n').length;
+    found.push({
+      where: `${path.relative(path.join(import.meta.dir, '..', '..'), file)}:${line}`,
+      owned: callText(src, open).includes('BROWSE_OWNER_PID'),
+    });
+  }
+  return found;
+}
+
+describe('test-spawned terminal-agents are owned', () => {
+  test('every Bun.spawn of terminal-agent.ts in a test passes BROWSE_OWNER_PID', () => {
+    const roots = [import.meta.dir, path.join(import.meta.dir, '..', '..', 'test')];
+    const spawns = roots.filter(r => fs.existsSync(r)).flatMap(testSources).flatMap(agentSpawns);
+    // Self-check: the owned spawn in this file must be found, or the scan is
+    // matching nothing and the assertion below proves nothing.
+    expect(spawns.some(s => s.where.includes('terminal-agent-owner-watchdog.test.ts') && s.owned)).toBe(true);
+    expect(spawns.filter(s => !s.owned).map(s => s.where)).toEqual([]);
+  });
+});
