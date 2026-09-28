@@ -79,6 +79,10 @@ beforeAll(() => {
       BROWSE_TERMINAL_BINARY: terminalCli,
       GSTACK_STATE_ROOT: stateDir,
       BROWSE_EXTENSION_ID: ENV_EXTENSION_ID,
+      // This test process is the agent's owner. afterAll's SIGTERM is the
+      // normal teardown; if the runner dies before afterAll runs, the agent's
+      // owner watchdog sees this PID go and exits instead of outliving it.
+      BROWSE_OWNER_PID: String(process.pid),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
