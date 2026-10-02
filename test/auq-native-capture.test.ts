@@ -590,7 +590,10 @@ fs.writeFileSync(path.join(root,'results.json'),JSON.stringify({results,privateR
       expect(prompt).toContain(path.join(dir,result.kind,'plan-eng-review','SKILL.md'));
       expect(prompt).toContain('Review plan.md.');expect(prompt).toContain('Skip any system-audit / environment-setup / codebase-exploration steps.');
       expect(prompt).toContain('ask the user through the AskUserQuestion tool');
-      for(const absent of ['verbatim','would call','write the','ELI10','Pros / cons:','Net:','private','reasoning']) expect(prompt).not.toContain(absent);
+      // The banned words judge the prompt's wording, not the temp root it names:
+      // on macOS that root resolves under /private/var, which would trip 'private'.
+      const wording=[fs.realpathSync(dir),dir].reduce((text:string,root:string)=>text.split(root).join('<dir>'),prompt);
+      for(const absent of ['verbatim','would call','write the','ELI10','Pros / cons:','Net:','private','reasoning']) expect(wording).not.toContain(absent);
       if(result.kind.endsWith('artifact-error')){
         expect(result.receipt).toBeNull();expect(result.text).toBeUndefined();
         expect(result.error).toContain(result.kind==='artifact-error'?'fixture receipt disk full':'[reasoning_extraction]');
