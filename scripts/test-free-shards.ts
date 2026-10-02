@@ -2036,6 +2036,15 @@ export async function runFreeShard(
   if (status === 'passed' && zeroExecutionVerdict(reporter.report().testsRan, FREE_LANE_POLICY, { promisedAll: true }) === 'passed-empty') {
     status = 'failed';
   }
+  // A lost stream can drop failure lines, and neither branch above speaks for an
+  // exit-0 shard that lost one. contrib/fork-sync reads this line: such a shard
+  // is abnormal, and its files are never vouched for from the accounting.
+  if (status !== 'timed-out' && captureFailures.size > 0) {
+    console.error(
+      `${label} output capture was incomplete (${[...captureFailures.keys()].join(', ')}), `
+      + `so its failure list may be short. Treating as FAILED. ${accounting}`,
+    );
+  }
 
   explainFreeVerdict(label, status, {
     cleanupError, stateDir, exitCode, summary, expectedFiles: files.length, wallTimeoutMs,
