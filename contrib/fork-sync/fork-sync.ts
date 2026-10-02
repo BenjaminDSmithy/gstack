@@ -258,6 +258,9 @@ const CRASH_LINE = /^ {2}⚠ crashed\+retried: (.+)$/;
 // prints its full summary and exits 1. This line is then the only trace, and
 // it must count as a failure or an ours-only one would let the gate pass.
 const UNHANDLED_LINE = /^ {2}⚠ unhandled error between tests \(around (.+)\)$/;
+// `  ⚠ N failure(s) reported without named result lines`: bun counted failures
+// the runner could not tie to a test name. Same treatment: unattributed.
+const UNREPORTED_LINE = /^ {2}⚠ (\d+) failure\(s\) reported without named result lines$/;
 const SHARD_LINE = /^\[test:free\] shard (\d+)\/(\d+): \d+ files, \d+s, (pass|fail|timed-out)$/;
 // Printed by runFreeShard BEFORE the shard runs anything, so it survives a
 // wedge: the set of files that shard was told to run.
@@ -319,6 +322,15 @@ export function parseSuiteLog(text: string): SuiteResult {
     // Unattributed on purpose: "around" names the file bun was in when the error
     // surfaced, not the one that leaked it. An ours-only key makes the verdict
     // INCONCLUSIVE through oursOnlyUnattributed; one the base shares cancels out.
+    const unreported = UNREPORTED_LINE.exec(line);
+    if (unreported) {
+      const key = `(unattributed) — ${unreported[1]} failure(s) reported without named result lines`;
+      let numbered = key;
+      for (let n = 2; result.failures.has(numbered); n += 1) numbered = `${key} #${n}`;
+      result.failures.add(numbered);
+      result.unattributed += Number(unreported[1]);
+      continue;
+    }
     const unhandled = UNHANDLED_LINE.exec(line);
     if (unhandled) {
       // Numbered, because failures is a Set: two leaks around one file on our
