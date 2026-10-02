@@ -79,12 +79,26 @@ directory). It hands off to this job and skips its own pull and discard.
      100-190 for hours that is hours of wall clock to re-derive a baseline the
      next scheduled run re-measures for free.
 
-   The set errs toward naming too much, not too little. The runner picks its
-   abnormal-shard message from an ordered list, and a shard with failing tests
-   or an unhandled error never reaches the branches that say whether bun's
-   summary accounted for every file — so that shard is surrendered whole even
-   when it probably ran everything and only got its exit code wrong. A gate
-   must not claim knowledge it lacks, so the extra names stay.
+   The set errs toward naming too much, not too little — but it no longer
+   names files a shard demonstrably ran. Every abnormal shard line states the
+   file accounting bun's terminal summary reached: `(summary: 178/178 files)`,
+   or `(summary: none/178 files)` when there was no summary at all. A shard
+   whose accounting covered its full planned count ran those files, on exactly
+   the evidence a PASSING shard is graded on, whatever its exit code said — so
+   they are vouched for. That matters because the runner picks its
+   abnormal-shard reason from an ordered list: a shard with failing tests or an
+   unhandled error reports only "reported N failing test(s) and M unhandled
+   error(s)", and before the accounting rode alongside it, a 2123s run of all
+   178 files that merely exited 0 was indistinguishable from a 118s truncation
+   and both were surrendered whole (343 files named where ~178 were genuinely
+   unknown).
+
+   Everything short of a full accounting still surrenders the whole planned
+   set: a short count, no summary at all, an accounting that disagrees with the
+   plan line it is paired with, a line from an older runner carrying no
+   accounting, and any wall-clock timeout (the runner refuses to grade a
+   timed-out shard, and neither does this). A gate must not claim knowledge it
+   lacks, so a parsing miss never vouches for anything.
 
    Two cases cannot be named at all, and the verdict says which: a shard that
    died before printing its plan (`gate.ours.unnamedShards`), and a suite that

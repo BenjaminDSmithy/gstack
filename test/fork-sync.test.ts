@@ -136,6 +136,94 @@ describe('suite log parsing', () => {
     expect(unvouchedFiles(noPlan)).toEqual({ files: [], shards: [2], unnamedShards: [2] });
   });
 
+  // Sharpened 2026-09-28 (TODOS P3). The runner now states its terminal
+  // summary's file accounting on EVERY abnormal line, so the ambiguity that
+  // forced this set to surrender a whole shard on any abnormal verdict is
+  // gone: a shard whose summary accounted for its full planned count DID run
+  // its files, whatever its exit code claimed. The run stays incomplete
+  // either way — only the FILE surrender narrows.
+  const abnormalShard = (line: string, plan = 'test/x.test.ts test/y.test.ts', epilogue = '[test:free] shard 2/2: 2 files, 30s, fail') => parseSuiteLog([
+    '[test:free] shard 1/2 plan: test/a.test.ts',
+    `[test:free] shard 2/2 plan: ${plan}`,
+    '[test:free] shard 1/2: 1 files, 5s, pass',
+    line,
+    epilogue,
+  ].join('\n'));
+  const NOTHING_UNVOUCHED = { files: [], shards: [], unnamedShards: [] };
+  const SURRENDERED = { files: ['test/x.test.ts', 'test/y.test.ts'], shards: [2], unnamedShards: [] };
+
+  test('a full accounting vouches for the files of a shard that only lied about its exit code', () => {
+    // The measured shard-4 shape: 2123s, 178 files, 101 failing tests, exit 0.
+    const r = abnormalShard("[test:free] shard 2/2 exited 0 but reported 3 failing test(s) and 0 unhandled error(s) between tests. Treating as FAILED. (summary: 2/2 files)");
+    expect(unvouchedFiles(r)).toEqual(NOTHING_UNVOUCHED);
+    // Naming fewer files must not turn an incomplete run into a complete one.
+    expect(suiteComplete(r)).toBe(false);
+  });
+
+  test('a full accounting on a signal-killed shard vouches for it too', () => {
+    const r = abnormalShard('[test:free] shard 2/2 failed with exit code signal (summary: 2/2 files)');
+    expect(unvouchedFiles(r)).toEqual(NOTHING_UNVOUCHED);
+    expect(suiteComplete(r)).toBe(false);
+  });
+
+  test("a nested run's extra summary does not spoil the accounting: any count matching the plan vouches", () => {
+    const r = abnormalShard('[test:free] shard 2/2 failed with exit code signal (summary: 1,2/2 files)');
+    expect(unvouchedFiles(r)).toEqual(NOTHING_UNVOUCHED);
+  });
+
+  test('a SHORT accounting stays unvouched — the shard stopped early', () => {
+    const r = abnormalShard("[test:free] shard 2/2 exited 0 but reported 1 failing test(s) and 0 unhandled error(s) between tests. Treating as FAILED. (summary: 1/2 files)");
+    expect(unvouchedFiles(r)).toEqual(SURRENDERED);
+  });
+
+  test('an ABSENT accounting stays unvouched — no summary is not a count of zero', () => {
+    const r = abnormalShard("[test:free] shard 2/2 exited 0 but never printed bun's terminal summary — the run was truncated (a process.exit fired mid-suite). Treating as FAILED. (summary: none/2 files)");
+    expect(unvouchedFiles(r)).toEqual(SURRENDERED);
+  });
+
+  test('a line with NO accounting at all stays unvouched (an older runner, or a truncated line)', () => {
+    const r = abnormalShard("[test:free] shard 2/2 exited 0 but reported 1 failing test(s) and 0 unhandled error(s) between tests. Treating as FAILED.");
+    expect(unvouchedFiles(r)).toEqual(SURRENDERED);
+  });
+
+  test('an UNPARSEABLE accounting stays unvouched — a parsing miss must never vouch', () => {
+    for (const token of ['(summary: ?/2 files)', '(summary: 2/2)', '(summary: two/2 files)', '(summary: 2 of 2 files)', '(summary: /2 files)']) {
+      const r = abnormalShard(`[test:free] shard 2/2 failed with exit code signal ${token}`);
+      expect(unvouchedFiles(r)).toEqual(SURRENDERED);
+    }
+  });
+
+  test('an accounting that disagrees with the plan it is paired with is distrusted', () => {
+    // The line claims 3 planned files, the plan line names 2. One of the two
+    // is a log we do not understand, so neither is trusted.
+    const r = abnormalShard('[test:free] shard 2/2 failed with exit code signal (summary: 3/3 files)');
+    expect(unvouchedFiles(r)).toEqual(SURRENDERED);
+  });
+
+  test('a timed-out shard is never vouched for, however full its accounting', () => {
+    // A wall-clock kill is not a run that reported itself finished: the
+    // runner refuses to grade it, and so does this.
+    const r = abnormalShard(
+      '[test:free] shard 2/2 exceeded the 3600s wall-clock deadline — killed the process group. Reporting as TIMED-OUT (distinct from failed). (summary: 2/2 files)',
+      'test/x.test.ts test/y.test.ts',
+      '[test:free] shard 2/2: 2 files, 3600s, timed-out',
+    );
+    expect(unvouchedFiles(r)).toEqual(SURRENDERED);
+  });
+
+  test('a vouched shard still surrenders nothing while an unvouched sibling surrenders its own', () => {
+    const r = parseSuiteLog([
+      '[test:free] shard 1/2 plan: test/a.test.ts test/b.test.ts',
+      '[test:free] shard 2/2 plan: test/x.test.ts test/y.test.ts',
+      '[test:free] shard 1/2 exited 0 but reported 2 failing test(s) and 0 unhandled error(s) between tests. Treating as FAILED. (summary: 2/2 files)',
+      '[test:free] shard 1/2: 2 files, 30s, fail',
+      '  ✗ test/a.test.ts — red',
+      "[test:free] shard 2/2 exited 0 but never printed bun's terminal summary. Treating as FAILED. (summary: none/2 files)",
+      '[test:free] shard 2/2: 2 files, 10s, fail',
+    ].join('\n'));
+    expect(unvouchedFiles(r)).toEqual(SURRENDERED);
+  });
+
   test('a suite that printed no shard line at all names no shard and no file', () => {
     const r = parseSuiteLog('bun: command not found');
     expect(suiteComplete(r)).toBe(false);
@@ -453,18 +541,24 @@ function makeSandbox(opts: { pushCarried?: boolean } = {}): Sandbox {
   // Fake free suite: fails every `file — test` line listed in .fake-failures.
   // .fake-plan names the files the shard was TOLD to run (the real runner's
   // `plan:` line); .fake-truncate makes the shard exit without bun's summary,
-  // so those files ran without ever reporting.
+  // so those files ran without ever reporting; .fake-account makes the shard
+  // abnormal but with a FULL `(summary: N/N files)` accounting — the shard
+  // that ran everything and only got its exit code wrong.
   write(path.join(bin, 'suite'), [
     `#!${BASH}`,
     'n=0; [ -f .fake-failures ] && n=$(grep -c . .fake-failures)',
     'st=pass',
     '[ "$n" -gt 0 ] && st=fail',
     '[ -f .fake-truncate ] && st=fail',
+    '[ -f .fake-account ] && st=fail',
     '[ -f .fake-wedge ] && st=timed-out',
+    'planned=0; [ -f .fake-plan ] && planned=$(grep -c . .fake-plan)',
     'echo "[test:free] full suite: 3 files across 1 shard processes"',
     `[ -f .fake-plan ] && echo "[test:free] shard 1/1 plan: $(tr '\\n' ' ' < .fake-plan)"`,
     'if [ -f .fake-truncate ]; then',
-    '  echo "[test:free] shard 1/1 exited 0 but never printed bun\'s terminal summary — the run was truncated (a process.exit fired mid-suite). Treating as FAILED."',
+    '  echo "[test:free] shard 1/1 exited 0 but never printed bun\'s terminal summary — the run was truncated (a process.exit fired mid-suite). Treating as FAILED. (summary: none/$planned files)"',
+    'elif [ -f .fake-account ]; then',
+    '  echo "[test:free] shard 1/1 exited 0 but reported 2 failing test(s) and 0 unhandled error(s) between tests. Treating as FAILED. (summary: $planned/$planned files)"',
     'fi',
     'echo "[test:free] shard 1/1: 3 files, 1s, $st"',
     'if [ "$n" -gt 0 ]; then',
@@ -473,6 +567,7 @@ function makeSandbox(opts: { pushCarried?: boolean } = {}): Sandbox {
     '  exit 1',
     'fi',
     '[ -f .fake-truncate ] && exit 1',
+    '[ -f .fake-account ] && exit 1',
     'exit 0',
     '',
   ].join('\n'), 0o755);
@@ -702,6 +797,33 @@ describe('fork-sync run (sandbox repos)', () => {
     // Inconclusive stays inconclusive: naming files must not turn a truncated
     // run into a pass.
     expect(gate.verdict.verdict).toBe('inconclusive');
+  });
+
+  e2e('an abnormal shard whose summary accounted for every planned file surrenders nothing', (sb) => {
+    // The measured shard-4 case end to end: the shard ran all its files, a
+    // test failed, and it exited 0. Before the accounting rode on the
+    // abnormal line this shard was indistinguishable from a truncation and
+    // its whole planned set was named as unrun.
+    commit(sb.durable, sb.env, 'feat: ours makes a shard lie about its exit code', {
+      '.fake-account': 'x\n',
+      '.fake-plan': 'test/ran-fine.test.ts\ntest/also-ran.test.ts\n',
+    });
+    git(sb.durable, sb.env, 'push', '-q', 'origin', 'feat/x-1.0.0');
+    upstreamShips(sb, '1.1.0.0', { 'up.txt': 'up\n' });
+    const before = liveState(sb);
+
+    const r = runSync(sb);
+    // The RUN is still incomplete — an abnormal shard is an abnormal shard —
+    // so nothing lands and the verdict stays inconclusive.
+    expect(r.code).toBe(2);
+    expect(r.out).toContain('INCONCLUSIVE');
+    expect(liveState(sb)).toEqual(before);
+    const gate = stateJson(sb).lastRun.gate;
+    expect(gate.verdict.verdict).toBe('inconclusive');
+    // What changed: those two files are no longer named as unrun.
+    expect(gate.verdict.unrun).toEqual([]);
+    expect(gate.ours.unvouchedShards).toEqual([]);
+    expect(gate.ours.unvouchedFiles).toBe(0);
   });
 
   e2e('a suite that never reported a shard says so, rather than naming an empty unrun set', (sb) => {

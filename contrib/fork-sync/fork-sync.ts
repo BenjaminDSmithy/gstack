@@ -114,6 +114,17 @@ export interface Config {
   deferNotifyAfter: number;
 }
 
+/**
+ * What bun's terminal summary accounted for in one shard, as the runner's
+ * abnormal line states it: `(summary: <reported>/<expected> files)`.
+ * `reported` is null when there was no terminal summary at all — distinct from
+ * a summary reporting zero files, which is a number.
+ */
+export interface ShardAccounting {
+  reported: number[] | null;
+  expected: number;
+}
+
 export interface SuiteResult {
   /** `file — test name` keys, from the runner epilogue's `  ✗ ` lines. */
   failures: Set<string>;
@@ -126,6 +137,8 @@ export interface SuiteResult {
   abnormal: Set<number>;
   /** Shard -> the files it was TOLD to run, from the runner's `plan:` line. */
   plans: Map<number, string[]>;
+  /** Shard -> the `(summary: N/M files)` accounting its abnormal line stated, when it stated one. */
+  accounting: Map<number, ShardAccounting>;
   /** Shards whose epilogue said `timed-out`; the whole-suite wall sets `timedOut` instead. */
   timedOutShards: Set<number>;
   timedOut: boolean;
@@ -244,20 +257,26 @@ const SHARD_PLAN = /^\[test:free\] shard (\d+)\/(\d+) plan:(.*)$/;
 // The runner's own verdicts on a shard that did not run all its files:
 // `failed with exit code signal|<n>` (1 is an ordinary test failure) and
 // `exited 0 but … Treating as FAILED.` (a truncated run).
-//
-// PRECISION LIMIT, measured 2026-09-28. The runner picks that `exited 0 but …`
-// reason from an ORDERED list (scripts/test-free-shards.ts, the `reason`
-// ternary): a shard with failing tests or an unhandled error reports
-// "reported N failing test(s) and M unhandled error(s)" and NEVER reaches the
-// two branches that say whether bun's summary accounted for every file. So
-// that message is ambiguous about completeness, and such a shard is treated
-// here as unvouched-for even when it may have run every file and only lied
-// about its exit code (observed: shard 4 of 6 ran 2123s and reported 101
-// failures, almost certainly complete, yet its 178 files are surrendered).
-// Conservative on purpose — a gate must not claim knowledge it lacks — but it
-// inflates the named set. Making the runner state its summary's file
-// accounting on every abnormal line would sharpen it; see TODOS.md.
 const SHARD_ABNORMAL = /^\[test:free\] shard (\d+)\/\d+ (?:failed with exit code (signal|\d+)|exited 0 but .*Treating as FAILED\.)/;
+// The file accounting the runner states on EVERY abnormal shard line
+// (`shardAccounting` in scripts/test-free-shards.ts): what bun's terminal
+// summary reported over what the shard was told to run.
+//
+// This is what makes an abnormal verdict readable. The runner picks its
+// `exited 0 but …` reason from an ORDERED list, so a shard with failing tests
+// or an unhandled error reports "reported N failing test(s) and M unhandled
+// error(s)" and never reaches the branches that speak about file counts —
+// measured 2026-09-28, shard 4 of 6 (2123s, 178 files, 101 failing tests, a
+// complete run that only got its exit code wrong) and shard 3 (118s, one
+// unhandled error, a truncation) printed the same message. The accounting is
+// the fact that separates them, so `unvouchedFiles` can surrender only the
+// genuinely short shards.
+//
+// `none` is the absent-summary rendering, deliberately not `0`. An accounting
+// that is missing, short, or in any way unparseable leaves the shard
+// surrendered: a gate must not claim knowledge it lacks, and a parsing miss
+// must never be the thing that vouches for a file.
+const SHARD_ACCOUNTING = /^\[test:free\] shard (\d+)\/\d+ .*\(summary: (none|\d+(?:,\d+)*)\/(\d+) files\)$/;
 
 /**
  * Parse the free runner's output (scripts/test-free-shards.ts). Each shard
@@ -268,7 +287,7 @@ export function parseSuiteLog(text: string): SuiteResult {
   const result: SuiteResult = {
     failures: new Set(), failingFiles: new Set(), crashed: new Set(), unattributed: 0,
     shardsSeen: new Set(), shardTotal: 0, abnormal: new Set(), plans: new Map(),
-    timedOutShards: new Set(), timedOut: false, passedWhole: false,
+    accounting: new Map(), timedOutShards: new Set(), timedOut: false, passedWhole: false,
   };
   for (const raw of text.split('\n')) {
     const line = raw.replace(/\r$/, '');
@@ -285,6 +304,15 @@ export function parseSuiteLog(text: string): SuiteResult {
       const file = normaliseTestPath(crash[1].trim());
       if (!file.startsWith('(nested)/')) result.crashed.add(file);
       continue;
+    }
+    // Recorded off ANY shard line carrying the token — the timeout line does
+    // too — and does not consume the line: the abnormal match still runs.
+    const acct = SHARD_ACCOUNTING.exec(line);
+    if (acct) {
+      result.accounting.set(Number(acct[1]), {
+        reported: acct[2] === 'none' ? null : acct[2].split(',').map(Number),
+        expected: Number(acct[3]),
+      });
     }
     const abnormal = SHARD_ABNORMAL.exec(line);
     if (abnormal && abnormal[2] !== '1') { result.abnormal.add(Number(abnormal[1])); continue; }
@@ -312,6 +340,24 @@ export function suiteComplete(r: SuiteResult): boolean {
 }
 
 /**
+ * Did this shard's stated accounting cover every file it was planned?
+ *
+ * False for every uncertainty, without exception: no accounting on the line
+ * (an older runner, or a line cut short), no terminal summary at all
+ * (`reported === null`), an accounting whose expected total disagrees with the
+ * plan line it is paired with (one of the two is a log we do not understand,
+ * so neither is trusted), no plan to compare against, or a reported count that
+ * never reaches the planned one. The equality test mirrors
+ * `strictTestExitCode`: ANY of bun's counts matching the planned total is the
+ * evidence a shard passes on, nested runs' own summaries included.
+ */
+function fullyAccounted(a: ShardAccounting | undefined, plan: string[] | undefined): boolean {
+  if (!a || a.reported === null || !plan) return false;
+  if (a.expected !== plan.length) return false;
+  return a.reported.includes(a.expected);
+}
+
+/**
  * The files an incomplete run reached no verdict on.
  *
  * `regressions=0` over a comparative diff of FAILURE LISTS silently excludes
@@ -324,9 +370,19 @@ export function suiteComplete(r: SuiteResult): boolean {
  *
  * A shard is vouched for only by its own terminal summary, which the runner
  * requires to report EXACTLY the planned file count. So an unvouched shard
- * (never finished, abnormal, or timed out) leaks its whole planned set, minus
- * the files that did produce a failure or crash line — those the comparative
- * verdict and the isolated re-runs already cover in their own right.
+ * (never finished, timed out, or abnormal without a full accounting) leaks its
+ * whole planned set, minus the files that did produce a failure or crash line
+ * — those the comparative verdict and the isolated re-runs already cover in
+ * their own right.
+ *
+ * An abnormal shard whose `(summary: N/M files)` accounting reached its full
+ * planned count is the exception: that summary is the same evidence the runner
+ * grades a PASSING shard on, so those files ran and are vouched for even
+ * though the shard's verdict is abnormal. It does not make the RUN complete —
+ * `suiteComplete` is untouched — it only stops naming files that did run.
+ * Before this, the ambiguity of the runner's ordered reason list surrendered
+ * 343 files across two shards of one measured run where ~178 were genuinely
+ * unknown.
  */
 export function unvouchedFiles(r: SuiteResult): UnvouchedSet {
   const shards: number[] = [];
@@ -337,6 +393,9 @@ export function unvouchedFiles(r: SuiteResult): UnvouchedSet {
   const total = Math.max(r.shardTotal, ...[0, ...r.plans.keys()]);
   for (let i = 1; i <= total; i += 1) {
     if (r.shardsSeen.has(i) && !r.abnormal.has(i) && !r.timedOutShards.has(i)) continue;
+    // A wall-clock kill is excluded on purpose: the runner refuses to grade a
+    // timed-out shard at all, and nothing here should grade it either.
+    if (!r.timedOutShards.has(i) && fullyAccounted(r.accounting.get(i), r.plans.get(i))) continue;
     shards.push(i);
     const plan = r.plans.get(i);
     if (!plan) { unnamedShards.push(i); continue; }
