@@ -1374,3 +1374,71 @@ describe('test-free-shards: duration-aware packing (full-suite LPT)', () => {
     expect(wallTimeoutForPackedShard(600_000, WALL_BASE_MS, 10)).toBe(1_800_000);
   });
 });
+
+describe('test-free-shards: abnormal-shard lines state bun\'s file accounting', () => {
+  // Measured 2026-09-28: shard 4 of 6 ran 2123s and reported 101 failing
+  // tests, shard 3 reported a single unhandled error after 118s. Both printed
+  // `exited 0 but reported N failing test(s) and M unhandled error(s)`, and
+  // from the log they were indistinguishable — one was a complete run that
+  // only lied about its exit code, the other a truncation. The accounting
+  // suffix is the fact that tells them apart, so it rides on EVERY abnormal
+  // line regardless of which reason the runner chose.
+  const SUMMARY_1 = 'Ran 3 tests across 1 files. [12.00ms]';
+  const FAIL_LINE = '(fa' + 'il) planted failure [0.10ms]'; // never a raw bun fail line in this source
+  const BUSY_LOOP = 'const end = Date.now() + 600000; while (Date.now() < end) {}';
+
+  const commandFor = (files: string[]) => {
+    const mode = files[0];
+    if (mode === 'complete-but-exit-zero') {
+      // The shard-4 shape: every planned file ran, a test failed, exit 0.
+      return { command: process.execPath, args: ['-e', `console.log(${JSON.stringify(FAIL_LINE)}); console.log(${JSON.stringify(SUMMARY_1)})`] };
+    }
+    if (mode === 'truncated') return { command: process.execPath, args: ['-e', `console.log(${JSON.stringify(FAIL_LINE)})`] };
+    if (mode === 'short-summary') return { command: process.execPath, args: ['-e', 'console.log("Ran 3 tests across 4 files. [12.00ms]")'] };
+    if (mode === 'nonzero-exit') return { command: process.execPath, args: ['-e', `console.log(${JSON.stringify(SUMMARY_1)}); process.exit(3)`] };
+    if (mode === 'spin') return { command: process.execPath, args: ['-e', BUSY_LOOP] };
+    throw new Error(`unknown mode ${mode}`);
+  };
+
+  /** Run one shard, returning every console.error line it emitted. */
+  async function stderrOf(mode: string, extra: Record<string, unknown> = {}): Promise<string[]> {
+    const lines: string[] = [];
+    const spy = spyOn(console, 'error').mockImplementation((...args: unknown[]) => { lines.push(args.map(String).join(' ')); });
+    try {
+      await runFreeShard([mode], 1, 1, { commandFor, quiet: true, log: () => {}, ...extra });
+    } finally {
+      spy.mockRestore();
+    }
+    return lines;
+  }
+
+  const abnormal = (lines: string[]) => lines.find((l) => l.startsWith('[test:free] shard 1/1 ')) ?? '';
+
+  test('a shard that ran everything and only got its exit code wrong says so: (summary: 1/1 files)', async () => {
+    const line = abnormal(await stderrOf('complete-but-exit-zero'));
+    expect(line).toContain('exited 0 but reported 1 failing test(s)');
+    expect(line).toContain('(summary: 1/1 files)');
+  });
+
+  test('a truncated shard renders an ABSENT summary as none, never as 0 (different facts)', async () => {
+    const line = abnormal(await stderrOf('truncated'));
+    expect(line).toContain('(summary: none/1 files)');
+    expect(line).not.toContain('(summary: 0/1 files)');
+  });
+
+  test('a summary short of the planned count states both numbers', async () => {
+    expect(abnormal(await stderrOf('short-summary'))).toContain('(summary: 4/1 files)');
+  });
+
+  test('a non-zero exit carries the accounting too', async () => {
+    const line = abnormal(await stderrOf('nonzero-exit'));
+    expect(line).toContain('failed with exit code 3');
+    expect(line).toContain('(summary: 1/1 files)');
+  });
+
+  test('the wall-clock timeout line carries it as well', async () => {
+    const line = abnormal(await stderrOf('spin', { wallTimeoutMs: 1_200 }));
+    expect(line).toContain('TIMED-OUT');
+    expect(line).toContain('(summary: none/1 files)');
+  }, 30_000);
+});

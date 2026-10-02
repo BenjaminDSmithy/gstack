@@ -1817,11 +1817,12 @@ function explainFreeVerdict(label: string, status: FreeShardStatus, facts: {
   summary: ReturnType<BunTestOutputClassifier['end']>; expectedFiles: number; wallTimeoutMs: number;
 }): void {
   const { summary, exitCode } = facts;
+  const accounting = shardAccounting(summary.terminalFileCounts, facts.expectedFiles);
   if (facts.cleanupError) console.error(`${label} shard cleanup or home containment failed: ${facts.cleanupError}; retained ${facts.stateDir}`);
   if (status === 'timed-out') {
     console.error(
       `${label} exceeded the ${Math.round(facts.wallTimeoutMs / 1000)}s wall-clock deadline — `
-      + 'killed the process group. Reporting as TIMED-OUT (distinct from failed).',
+      + `killed the process group. Reporting as TIMED-OUT (distinct from failed). ${accounting}`,
     );
   } else if (status === 'failed' && facts.evidenceComplete && (exitCode ?? 1) === 0) {
     const reason = summary.failedTests > 0 || summary.unhandledBetweenTests > 0
@@ -1829,9 +1830,9 @@ function explainFreeVerdict(label: string, status: FreeShardStatus, facts: {
       : summary.terminalFileCounts.length === 0
         ? "never printed bun's terminal summary — the run was truncated (a process.exit fired mid-suite)"
         : `bun's summary reported ${summary.terminalFileCounts.join(', ')} file(s), expected ${facts.expectedFiles}`;
-    console.error(`${label} exited 0 but ${reason}. Treating as FAILED.`);
+    console.error(`${label} exited 0 but ${reason}. Treating as FAILED. ${accounting}`);
   } else if (status === 'failed' && (exitCode ?? 1) !== 0) {
-    console.error(`${label} failed with exit code ${exitCode ?? 'signal'}`);
+    console.error(`${label} failed with exit code ${exitCode ?? 'signal'} ${accounting}`);
   }
 }
 
@@ -1857,6 +1858,31 @@ function logFreeRecovery(log: (line: string) => void, outcome: FreeShardOutcome,
 function shardEpilogue(outcome: FreeShardOutcome, totalShards: number): string {
   return `[test:free] shard ${outcome.shard}/${totalShards}: ${outcome.files.length} files, `
     + `${Math.round(outcome.elapsedMs / 1000)}s, ${EPILOGUE_WORD[outcome.status]}`;
+}
+
+/**
+ * The file accounting bun's terminal summary reached for one shard, rendered
+ * as `(summary: <reported>/<planned> files)`.
+ *
+ * Stated on EVERY abnormal shard line, whatever reason the runner chose for
+ * it, because the reason alone cannot answer the only question a downstream
+ * gate actually has: did this shard run all its files? Measured 2026-09-28,
+ * two shards of one run printed the same `exited 0 but reported N failing
+ * test(s) and M unhandled error(s)` message — shard 4 after 2123s over 178
+ * files (a complete run that merely got its exit code wrong) and shard 3
+ * after 118s (a truncation). Indistinguishable from the log, so
+ * `contrib/fork-sync` had to surrender both shards' whole planned sets.
+ *
+ * An ABSENT summary renders as `none`, never `0`: "bun printed no terminal
+ * summary at all" and "bun's summary claimed zero files" are different facts,
+ * and only the second is a number. Several counts (nested bun runs print
+ * their own summary) are listed comma-separated, matching what
+ * strictTestExitCode judges — it asks whether ANY of them equals the planned
+ * count.
+ */
+export function shardAccounting(terminalFileCounts: number[], plannedFiles: number): string {
+  const reported = terminalFileCounts.length === 0 ? 'none' : terminalFileCounts.join(',');
+  return `(summary: ${reported}/${plannedFiles} files)`;
 }
 
 /**
