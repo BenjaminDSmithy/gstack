@@ -321,7 +321,12 @@ export function parseSuiteLog(text: string): SuiteResult {
     // INCONCLUSIVE through oursOnlyUnattributed; one the base shares cancels out.
     const unhandled = UNHANDLED_LINE.exec(line);
     if (unhandled) {
-      result.failures.add(`(unattributed) — unhandled error between tests (around ${normaliseTestPath(unhandled[1].trim())})`);
+      // Numbered, because failures is a Set: two leaks around one file on our
+      // side and one on the base would otherwise collapse into a shared key.
+      const key = `(unattributed) — unhandled error between tests (around ${normaliseTestPath(unhandled[1].trim())})`;
+      let numbered = key;
+      for (let n = 2; result.failures.has(numbered); n += 1) numbered = `${key} #${n}`;
+      result.failures.add(numbered);
       result.unattributed += 1;
       continue;
     }
