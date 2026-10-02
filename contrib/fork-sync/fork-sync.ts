@@ -141,6 +141,8 @@ export interface SuiteResult {
   accounting: Map<number, ShardAccounting>;
   /** Shards whose epilogue said `timed-out`; the whole-suite wall sets `timedOut` instead. */
   timedOutShards: Set<number>;
+  /** Shards whose output capture was incomplete: failure lines may be missing. */
+  captureLost: Set<number>;
   timedOut: boolean;
   passedWhole: boolean;
 }
@@ -263,7 +265,10 @@ const SHARD_PLAN = /^\[test:free\] shard (\d+)\/(\d+) plan:(.*)$/;
 // The runner's own verdicts on a shard that did not run all its files:
 // `failed with exit code signal|<n>` (1 is an ordinary test failure) and
 // `exited 0 but … Treating as FAILED.` (a truncated run).
-const SHARD_ABNORMAL = /^\[test:free\] shard (\d+)\/\d+ (?:failed with exit code (signal|\d+)|exited 0 but .*Treating as FAILED\.)/;
+const SHARD_ABNORMAL = /^\[test:free\] shard (\d+)\/\d+ (?:failed with exit code (signal|\d+)|exited 0 but .*Treating as FAILED\.|output capture was incomplete .*Treating as FAILED\.)/;
+// A shard whose stdout or stderr was lost may be missing failure lines, so its
+// accounting cannot vouch for its files even when it counted all of them.
+const SHARD_CAPTURE_LOST = /^\[test:free\] shard (\d+)\/\d+ output capture was incomplete /;
 // The file accounting the runner states on EVERY abnormal shard line
 // (`shardAccounting` in scripts/test-free-shards.ts): what bun's terminal
 // summary reported over what the shard was told to run.
@@ -293,7 +298,7 @@ export function parseSuiteLog(text: string): SuiteResult {
   const result: SuiteResult = {
     failures: new Set(), failingFiles: new Set(), crashed: new Set(), unattributed: 0,
     shardsSeen: new Set(), shardTotal: 0, abnormal: new Set(), plans: new Map(),
-    accounting: new Map(), timedOutShards: new Set(), timedOut: false, passedWhole: false,
+    accounting: new Map(), timedOutShards: new Set(), captureLost: new Set(), timedOut: false, passedWhole: false,
   };
   for (const raw of text.split('\n')) {
     const line = raw.replace(/\r$/, '');
@@ -329,6 +334,8 @@ export function parseSuiteLog(text: string): SuiteResult {
         expected: Number(acct[3]),
       });
     }
+    const lost = SHARD_CAPTURE_LOST.exec(line);
+    if (lost) result.captureLost.add(Number(lost[1]));
     const abnormal = SHARD_ABNORMAL.exec(line);
     if (abnormal && abnormal[2] !== '1') { result.abnormal.add(Number(abnormal[1])); continue; }
     const plan = SHARD_PLAN.exec(line);
@@ -410,7 +417,7 @@ export function unvouchedFiles(r: SuiteResult): UnvouchedSet {
     if (r.shardsSeen.has(i) && !r.abnormal.has(i) && !r.timedOutShards.has(i)) continue;
     // A wall-clock kill is excluded on purpose: the runner refuses to grade a
     // timed-out shard at all, and nothing here should grade it either.
-    if (!r.timedOutShards.has(i) && fullyAccounted(r.accounting.get(i), r.plans.get(i))) continue;
+    if (!r.timedOutShards.has(i) && !r.captureLost.has(i) && fullyAccounted(r.accounting.get(i), r.plans.get(i))) continue;
     shards.push(i);
     const plan = r.plans.get(i);
     if (!plan) { unnamedShards.push(i); continue; }
