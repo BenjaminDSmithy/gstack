@@ -4870,35 +4870,6 @@ skills were told is fenced.
 
 **Priority:** P3. **Depends on:** none.
 
-### P3: the free runner's abnormal-shard message hides its summary's file accounting
-
-`runFreeShard` picks its `exited 0 but …` reason from an ordered ternary
-(`scripts/test-free-shards.ts`, near the `strictTestExitCode` call). The first
-branch fires whenever the shard had failing tests or an unhandled error between
-tests, so it reports `reported N failing test(s) and M unhandled error(s)` and
-never reaches the two branches that would say whether bun's terminal summary
-accounted for every planned file — `never printed bun's terminal summary` or
-`bun's summary reported X file(s), expected Y`.
-
-The message is therefore ambiguous about completeness, and any reader has to
-assume the worst. `contrib/fork-sync`'s gate does exactly that: it surrenders
-such a shard's whole planned set as files it cannot vouch for. Measured
-2026-09-28 on a full local run, shard 4 of 6 ran 2123s and reported 101 failing
-tests — almost certainly a complete run that merely exited 0 — yet its 178
-files were named as unrun. Shard 3 the same run hit the same branch via a
-single unhandled error after 118s, where truncation is the likely truth. The
-two are indistinguishable from the log.
-
-Fix: state the accounting on EVERY abnormal line (for example a trailing
-`(summary: N/M files)`), independent of which reason was chosen, so a shard that
-ran everything and only lied about its exit code can be told apart from one that
-stopped early. Then `unvouchedFiles()` in `contrib/fork-sync/fork-sync.ts` can
-surrender only the genuinely short shards and stop inflating the named set.
-Keep the conservative default: an unparseable or absent accounting must stay
-unvouched, because a gate must not claim knowledge it lacks.
-
-**Priority:** P3. **Depends on:** none. **Effort:** S.
-
 ### P2: fork-sync preconditions that assert repo facts from evidence they never gathered (measured 2026-09-28)
 
 The 2026-09-27 report was one test — `test/fork-sync.test.ts`'s
