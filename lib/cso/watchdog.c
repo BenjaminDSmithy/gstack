@@ -198,10 +198,13 @@ int main(int argc,char **argv){
     if(access(terminal,F_OK)==0){marker(run_dir,"watchdog.stopped","normal cleanup acknowledged\n");return 0;}
     time_t now=time(NULL);
     int alive=same_owner((pid_t)owner_l,owner_start);if(!alive||(long long)now>=deadline){
-      if(lstat(socket_path,&st)||!S_ISSOCK(st.st_mode)||(unsigned long long)st.st_dev!=socket_device||(unsigned long long)st.st_ino!=socket_inode){marker(run_dir,"watchdog.event","Docker socket identity changed; cleanup and lease release blocked\n");continue;}
-      int cleaned=cleanup(run_dir,docker,endpoint,label);
-      if(cleaned>=0&&(!lstat(socket_path,&st)&&S_ISSOCK(st.st_mode)&&(unsigned long long)st.st_dev==socket_device&&(unsigned long long)st.st_ino==socket_inode)&&release_lease(lease_path,lease_token)==0){if(cleaned>0)marker(run_dir,"watchdog.event",!alive?"supervisor-death cleanup complete; malformed journal ignored after two exact label sweeps\n":"deadline cleanup complete; malformed journal ignored after two exact label sweeps\n");else marker(run_dir,"watchdog.event",!alive?"supervisor-death cleanup complete\n":"deadline cleanup complete\n");return 0;}
-      marker(run_dir,"watchdog.event","cleanup incomplete; retrying exact journaled resources\n");
+      /* A changed socket keeps cleanup blocked but still takes the pause below; skipping it spun a core until SIGKILL. */
+      if(lstat(socket_path,&st)||!S_ISSOCK(st.st_mode)||(unsigned long long)st.st_dev!=socket_device||(unsigned long long)st.st_ino!=socket_inode)marker(run_dir,"watchdog.event","Docker socket identity changed; cleanup and lease release blocked\n");
+      else{
+        int cleaned=cleanup(run_dir,docker,endpoint,label);
+        if(cleaned>=0&&(!lstat(socket_path,&st)&&S_ISSOCK(st.st_mode)&&(unsigned long long)st.st_dev==socket_device&&(unsigned long long)st.st_ino==socket_inode)&&release_lease(lease_path,lease_token)==0){if(cleaned>0)marker(run_dir,"watchdog.event",!alive?"supervisor-death cleanup complete; malformed journal ignored after two exact label sweeps\n":"deadline cleanup complete; malformed journal ignored after two exact label sweeps\n");else marker(run_dir,"watchdog.event",!alive?"supervisor-death cleanup complete\n":"deadline cleanup complete\n");return 0;}
+        marker(run_dir,"watchdog.event","cleanup incomplete; retrying exact journaled resources\n");
+      }
     }
     struct timespec delay={0,100000000};while(nanosleep(&delay,&delay)&&errno==EINTR){}
   }
