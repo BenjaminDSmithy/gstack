@@ -979,6 +979,17 @@ describe('fork-sync run (sandbox repos)', () => {
     expect(liveState(sb)).toEqual(before);
   });
 
+  e2e('a hook checker that never reaches a verdict is INCONCLUSIVE, not a STOP', (sb) => {
+    // Exit 2 is not one of the checker's verdicts: retry next slot, page nothing as broken.
+    upstreamShips(sb, '1.1.0.0', { 'scripts/hook-syntax.sh': '#!/bin/bash\nexit 2\n' });
+    const before = liveState(sb);
+    const r = runSync(sb);
+    expect(r.out).toContain('INCONCLUSIVE');
+    expect(r.out).not.toContain('BLOCKED_HOOK_SYNTAX');
+    expect(r.code).toBe(2);
+    expect(liveState(sb)).toEqual(before);
+  });
+
   e2e('a dirty live checkout STOPS without discarding anything, and re-arms once cleaned', (sb) => {
     upstreamShips(sb, '1.1.0.0', { 'up.txt': 'up\n' });
     write(path.join(sb.durable, 'ours1.txt'), 'uncommitted edit\n');
