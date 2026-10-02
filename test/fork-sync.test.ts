@@ -104,6 +104,9 @@ describe('suite log parsing', () => {
     // Ours-only: the gate cannot vouch for it. Shared with the base: it cancels out.
     expect(oursOnlyUnattributed(ours, parseSuiteLog(log))).toBe(1);
     expect(oursOnlyUnattributed(ours, ours)).toBe(0);
+    // Two around the same file on our side against one on the base: one is ours.
+    const twice = parseSuiteLog(`${log}\n${line}\n${line}`);
+    expect(oursOnlyUnattributed(twice, ours)).toBe(1);
     const nested = parseSuiteLog('  ⚠ unhandled error between tests (around private/var/folders/qh/x/T/gstack-free-shard-AB/tmp/q-1/r.test.ts)');
     expect([...nested.failures]).toEqual(['(unattributed) — unhandled error between tests (around (nested)/r.test.ts)']);
   });
