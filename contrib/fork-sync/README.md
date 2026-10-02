@@ -37,6 +37,10 @@ directory). It hands off to this job and skips its own pull and discard.
 4. **Freshness.** `bun run gen:skill-docs --host all` must leave the tree
    clean, the same check CI runs. If it doesn't, the run STOPS; it never
    regenerates for you.
+   Then `scripts/hook-syntax.sh` runs on the rebased tree, absolutely: a
+   hook that does not parse STOPS the run (`BLOCKED_HOOK_SYNTAX`) even when
+   pristine upstream has the same fault, because the live link is this tree
+   and a broken PreToolUse hook fails every tool call the moment it lands.
 5. **Gate.** Both trees get built. The free suite then runs on the rebased
    tree and on pristine upstream, one after the other, with
    `--wall-timeout 3600`. Upstream's suite is not green on every machine, so
@@ -225,6 +229,7 @@ repository. `status` shows whether all four hooks are installed, and
 | `DEFERRED_LOAD`, `DEFERRED_BUSY`, `DEFERRED_FETCH`, `INCONCLUSIVE`, `ABORTED_MOVED` | 2 | loud after 6 in a row | usually nothing; retries next slot. `INCONCLUSIVE` names the files it could not vouch for |
 | `BLOCKED_CONFLICT` | 3 | loud, once per pair | rekey the named commit by hand (below) |
 | `BLOCKED_STALE` | 3 | loud, once per pair | regenerate and commit on the branch |
+| `BLOCKED_HOOK_SYNTAX` | 3 | loud, once per pair | fix the file `runs/<stamp>/hook-syntax.log` names, on the branch or upstream |
 | `BLOCKED_REGRESSION` | 3 | loud, once per pair | the rebased tip is at `refs/fork-sync/attempt`; fix on the branch |
 | `BLOCKED_DIRTY` | 3 | loud, once | commit or move the live checkout's changes |
 | `BLOCKED_COLLISION` | 3 | loud, once | someone else is landing that version; switch to their branch or delete it |
@@ -233,7 +238,8 @@ repository. `status` shows whether all four hooks are installed, and
 | `ERROR` | 1 | loud | read `fork-sync.log` |
 
 A STOP is remembered per (reason, upstream sha, branch tip). A deterministic
-stop (conflict, stale docs, regression, rollback) is skipped until upstream or
+stop (conflict, stale docs, a hook that does not parse, regression, rollback)
+is skipped until upstream or
 the branch moves. A transient one (dirty tree, push, collision) retries every
 run but pages only once.
 
