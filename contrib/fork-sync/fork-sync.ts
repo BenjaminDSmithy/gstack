@@ -1224,13 +1224,23 @@ export async function run(cfg: Config): Promise<RunResult> {
     // reports the whole-tree sweep as one test. A hook that does not parse is
     // live the moment the checkout switches (the live link IS this tree) and
     // fails every tool call, so it must stop the run whoever introduced it.
-    if (fs.existsSync(path.join(oursDir, 'scripts', 'hook-syntax.sh'))) {
+    if (!fs.existsSync(path.join(oursDir, 'scripts', 'hook-syntax.sh'))) {
+      // ./setup refuses a tree that carries its gate block without the checker,
+      // so such a landing would roll back; say here that nothing was checked.
+      logLine(cfg, 'hook-syntax: scripts/hook-syntax.sh is absent from the rebased tree; hooks NOT checked before the gate');
+    } else {
       const hookLog = path.join(runDir, 'hook-syntax.log');
       const hooks = await runLogged('/bin/bash scripts/hook-syntax.sh .', oursDir, hookLog, cfg.stepTimeoutMs);
-      if (hooks.code !== 0) {
+      // The checker exits 0 or 1. A timeout or any other code means it never
+      // reached a verdict (load, a spawn failure): retry next slot rather than
+      // memoise a STOP that blames a file nobody showed was broken.
+      if (hooks.timedOut || (hooks.code !== 0 && hooks.code !== 1)) {
+        return finish('INCONCLUSIVE', `scripts/hook-syntax.sh did not reach a verdict on the rebased tree (${hooks.timedOut ? 'timed out' : `exit ${hooks.code}`}; see ${hookLog})`);
+      }
+      if (hooks.code === 1) {
         return stop('BLOCKED_HOOK_SYNTAX', 'gstack fork-sync: a hook in the rebased tree does not parse',
           `The rebase onto v${upVersion} is clean, but scripts/hook-syntax.sh refused the rebased tree `
-          + `(${hooks.timedOut ? 'timed out' : `exit ${hooks.code}`}; see ${hookLog}). Landing it would break every tool call. `
+          + `(see ${hookLog}). Landing it would break every tool call. `
           + 'Nothing landed. Fix the file it names, on the branch or upstream.');
       }
     }
