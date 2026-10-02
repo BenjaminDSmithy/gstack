@@ -966,6 +966,19 @@ describe('fork-sync run (sandbox repos)', () => {
     expect(notes(sb)[0]).toContain('a.txt');
   });
 
+  e2e('a hook that does not parse STOPS the run even when upstream ships it', (sb) => {
+    // The suite gate is comparative and would call a shared failure baseline.
+    // The hook check is absolute: the live link is this tree.
+    upstreamShips(sb, '1.1.0.0', {
+      'scripts/hook-syntax.sh': '#!/bin/bash\necho "hook-syntax: FAILS TO PARSE hosts/claude/hooks/x" >&2\nexit 1\n',
+    });
+    const before = liveState(sb);
+    const r = runSync(sb);
+    expect(r.out).toContain('BLOCKED_HOOK_SYNTAX');
+    expect(r.code).toBe(3);
+    expect(liveState(sb)).toEqual(before);
+  });
+
   e2e('a dirty live checkout STOPS without discarding anything, and re-arms once cleaned', (sb) => {
     upstreamShips(sb, '1.1.0.0', { 'up.txt': 'up\n' });
     write(path.join(sb.durable, 'ours1.txt'), 'uncommitted edit\n');
