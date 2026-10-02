@@ -12,7 +12,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   compareVersions, droppedSubjects, fill, gateCandidates, landingBranchName, nameList,
-  fsResolve, parseSuiteLog, renderPlist, samePath, suiteComplete, unvouchedFiles, worktreeKind, defaultConfig,
+  fsResolve, oursOnlyUnattributed, parseSuiteLog, renderPlist, samePath, suiteComplete, unvouchedFiles, worktreeKind, defaultConfig,
   RENDER_HOOKS, RENDER_HOOK_MARKER, renderHookShim, renderHookSkip,
 } from '../contrib/fork-sync/fork-sync';
 
@@ -69,6 +69,22 @@ describe('suite log parsing', () => {
     expect(suiteComplete(parseSuiteLog(`[test:free] shard 2/2 exited 0 but never printed the summary. Treating as FAILED.\n${log}`))).toBe(false);
     // An ordinary failing shard (exit 1) is complete.
     expect(suiteComplete(parseSuiteLog(`[test:free] shard 1/2 failed with exit code 1\n${log}`))).toBe(true);
+  });
+
+  test('an unhandled error between tests counts as an unattributed failure', () => {
+    // The preload's exit guard makes a leaked process.exit an unhandled error: the
+    // shard finishes, exits 1 and stays complete, so this line is all that is left.
+    const line = '  ⚠ unhandled error between tests (around test/b.test.ts)';
+    const ours = parseSuiteLog(`${log}\n${line}`);
+    expect(ours.failures.has('(unattributed) — unhandled error between tests (around test/b.test.ts)')).toBe(true);
+    expect(ours.unattributed).toBe(2);
+    expect([...ours.failingFiles]).toEqual(['test/a.test.ts']);
+    expect(suiteComplete(ours)).toBe(true);
+    // Ours-only: the gate cannot vouch for it. Shared with the base: it cancels out.
+    expect(oursOnlyUnattributed(ours, parseSuiteLog(log))).toBe(1);
+    expect(oursOnlyUnattributed(ours, ours)).toBe(0);
+    const nested = parseSuiteLog('  ⚠ unhandled error between tests (around private/var/folders/qh/x/T/gstack-free-shard-AB/tmp/q-1/r.test.ts)');
+    expect([...nested.failures]).toEqual(['(unattributed) — unhandled error between tests (around (nested)/r.test.ts)']);
   });
 
   test('nested fixture runs report temp paths; those compare by basename and are never isolated', () => {

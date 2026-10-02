@@ -250,6 +250,12 @@ export function normaliseTestPath(file: string): string {
   return NESTED_PATH.test(file) ? `(nested)/${file.split('/').pop()}` : file;
 }
 const CRASH_LINE = /^ {2}⚠ crashed\+retried: (.+)$/;
+// `  ⚠ unhandled error between tests (around <file>)`, from the runner's epilogue.
+// test-setup.ts turns a stray process.exit() into a thrown error, so a leaked
+// shutdown no longer truncates the shard (which read INCONCLUSIVE): bun runs on,
+// prints its full summary and exits 1. This line is then the only trace, and
+// it must count as a failure or an ours-only one would let the gate pass.
+const UNHANDLED_LINE = /^ {2}⚠ unhandled error between tests \(around (.+)\)$/;
 const SHARD_LINE = /^\[test:free\] shard (\d+)\/(\d+): \d+ files, \d+s, (pass|fail|timed-out)$/;
 // Printed by runFreeShard BEFORE the shard runs anything, so it survives a
 // wedge: the set of files that shard was told to run.
@@ -303,6 +309,15 @@ export function parseSuiteLog(text: string): SuiteResult {
     if (crash) {
       const file = normaliseTestPath(crash[1].trim());
       if (!file.startsWith('(nested)/')) result.crashed.add(file);
+      continue;
+    }
+    // Unattributed on purpose: "around" names the file bun was in when the error
+    // surfaced, not the one that leaked it. An ours-only key makes the verdict
+    // INCONCLUSIVE through oursOnlyUnattributed; one the base shares cancels out.
+    const unhandled = UNHANDLED_LINE.exec(line);
+    if (unhandled) {
+      result.failures.add(`(unattributed) — unhandled error between tests (around ${normaliseTestPath(unhandled[1].trim())})`);
+      result.unattributed += 1;
       continue;
     }
     // Recorded off ANY shard line carrying the token — the timeout line does
