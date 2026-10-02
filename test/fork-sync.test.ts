@@ -71,6 +71,16 @@ describe('suite log parsing', () => {
     expect(suiteComplete(parseSuiteLog(`[test:free] shard 1/2 failed with exit code 1\n${log}`))).toBe(true);
   });
 
+  test('failures reported without named result lines count as unattributed failures', () => {
+    const line = '  ⚠ 3 failure(s) reported without named result lines';
+    const ours = parseSuiteLog(`${log}\n${line}`);
+    expect(ours.failures.has('(unattributed) — 3 failure(s) reported without named result lines')).toBe(true);
+    expect(ours.unattributed).toBe(4);
+    expect(suiteComplete(ours)).toBe(true);
+    expect(oursOnlyUnattributed(ours, parseSuiteLog(log))).toBe(1);
+    expect(oursOnlyUnattributed(ours, ours)).toBe(0);
+  });
+
   test('a shard that lost output capture is abnormal and never vouched from its accounting', () => {
     // The runner line for an exit-0 shard whose stdout pipe closed before end.
     // Its summary counted every file, but failure lines may be what was lost.
