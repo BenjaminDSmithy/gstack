@@ -71,6 +71,27 @@ describe('suite log parsing', () => {
     expect(suiteComplete(parseSuiteLog(`[test:free] shard 1/2 failed with exit code 1\n${log}`))).toBe(true);
   });
 
+  test('a shard that lost output capture is abnormal and never vouched from its accounting', () => {
+    // The runner line for an exit-0 shard whose stdout pipe closed before end.
+    // Its summary counted every file, but failure lines may be what was lost.
+    const r = parseSuiteLog([
+      '[test:free] shard 1/1 plan: test/x.test.ts test/y.test.ts',
+      '[test:free] shard 1/1 output capture was incomplete (stdout), so its failure list may be short. Treating as FAILED. (summary: 2/2 files)',
+      '[test:free] shard 1/1: 2 files, 30s, fail',
+    ].join('\n'));
+    expect([...r.captureLost]).toEqual([1]);
+    expect([...r.abnormal]).toEqual([1]);
+    expect(suiteComplete(r)).toBe(false);
+    expect(unvouchedFiles(r).files).toEqual(['test/x.test.ts', 'test/y.test.ts']);
+    // The same shard without the capture line is vouched by its accounting.
+    const fine = parseSuiteLog([
+      '[test:free] shard 1/1 plan: test/x.test.ts test/y.test.ts',
+      '[test:free] shard 1/1 exited 0 but reported 1 failing test(s) and 0 unhandled error(s) between tests. Treating as FAILED. (summary: 2/2 files)',
+      '[test:free] shard 1/1: 2 files, 30s, fail',
+    ].join('\n'));
+    expect(unvouchedFiles(fine).files).toEqual([]);
+  });
+
   test('an unhandled error between tests counts as an unattributed failure', () => {
     // The preload's exit guard makes a leaked process.exit an unhandled error: the
     // shard finishes, exits 1 and stays complete, so this line is all that is left.
