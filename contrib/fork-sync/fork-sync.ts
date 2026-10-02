@@ -72,7 +72,7 @@ export type Outcome =
   | 'UP_TO_DATE' | 'LANDED' | 'REHEARSED' | 'DRY_RUN' | 'SKIPPED_BLOCKED'
   | 'DEFERRED_LOAD' | 'DEFERRED_BUSY' | 'DEFERRED_FETCH' | 'INCONCLUSIVE' | 'ABORTED_MOVED'
   | 'BLOCKED_PRECONDITION' | 'BLOCKED_DIRTY' | 'BLOCKED_CONFLICT' | 'BLOCKED_STALE'
-  | 'BLOCKED_REGRESSION' | 'BLOCKED_COLLISION' | 'BLOCKED_PUSH' | 'BLOCKED_SWITCH'
+  | 'BLOCKED_REGRESSION' | 'BLOCKED_COLLISION' | 'BLOCKED_PUSH' | 'BLOCKED_SWITCH' | 'BLOCKED_HOOK_SYNTAX'
   | 'ROLLED_BACK' | 'ERROR';
 
 export interface Config {
@@ -1020,7 +1020,7 @@ const EXIT: Record<Outcome, number> = {
   UP_TO_DATE: 0, LANDED: 0, REHEARSED: 0, DRY_RUN: 0, SKIPPED_BLOCKED: 0,
   DEFERRED_LOAD: 2, DEFERRED_BUSY: 2, DEFERRED_FETCH: 2, INCONCLUSIVE: 2, ABORTED_MOVED: 2,
   BLOCKED_PRECONDITION: 3, BLOCKED_DIRTY: 3, BLOCKED_CONFLICT: 3, BLOCKED_STALE: 3,
-  BLOCKED_REGRESSION: 3, BLOCKED_COLLISION: 3, BLOCKED_PUSH: 3, BLOCKED_SWITCH: 3,
+  BLOCKED_REGRESSION: 3, BLOCKED_COLLISION: 3, BLOCKED_PUSH: 3, BLOCKED_SWITCH: 3, BLOCKED_HOOK_SYNTAX: 3,
   ROLLED_BACK: 4, ERROR: 1,
 };
 
@@ -1217,6 +1217,22 @@ export async function run(cfg: Config): Promise<RunResult> {
       return stop('BLOCKED_STALE', 'gstack fork-sync: generated docs stale after rebase',
         `The rebase onto v${upVersion} is clean, but ${fresh.code !== 0 ? 'the generator failed' : `${stale.length} generated file(s) no longer match their templates (${stale.slice(0, 4).map((l) => l.slice(3)).join(', ')})`}. `
         + 'Nothing landed. Regenerate and commit on the branch by hand.');
+    }
+
+    // 4b. Hook parse gate, ABSOLUTE. The suite gate below is comparative: a
+    // failure pristine upstream shares does not block, and test/hook-syntax
+    // reports the whole-tree sweep as one test. A hook that does not parse is
+    // live the moment the checkout switches (the live link IS this tree) and
+    // fails every tool call, so it must stop the run whoever introduced it.
+    if (fs.existsSync(path.join(oursDir, 'scripts', 'hook-syntax.sh'))) {
+      const hookLog = path.join(runDir, 'hook-syntax.log');
+      const hooks = await runLogged('/bin/bash scripts/hook-syntax.sh .', oursDir, hookLog, cfg.stepTimeoutMs);
+      if (hooks.code !== 0) {
+        return stop('BLOCKED_HOOK_SYNTAX', 'gstack fork-sync: a hook in the rebased tree does not parse',
+          `The rebase onto v${upVersion} is clean, but scripts/hook-syntax.sh refused the rebased tree `
+          + `(${hooks.timedOut ? 'timed out' : `exit ${hooks.code}`}; see ${hookLog}). Landing it would break every tool call. `
+          + 'Nothing landed. Fix the file it names, on the branch or upstream.');
+      }
     }
 
     // 5. Gate: build both trees, suite on both, compare.
