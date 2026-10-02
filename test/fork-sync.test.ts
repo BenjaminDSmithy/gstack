@@ -979,14 +979,30 @@ describe('fork-sync run (sandbox repos)', () => {
     expect(liveState(sb)).toEqual(before);
   });
 
-  e2e('a hook checker that never reaches a verdict is INCONCLUSIVE, not a STOP', (sb) => {
-    // Exit 2 is not one of the checker's verdicts: retry next slot, page nothing as broken.
-    upstreamShips(sb, '1.1.0.0', { 'scripts/hook-syntax.sh': '#!/bin/bash\nexit 2\n' });
+  e2e('a hook checker killed by a signal is INCONCLUSIVE, not a STOP', (sb) => {
+    // A signal death is transient (load, memory pressure): retry next slot, page nothing as broken.
+    upstreamShips(sb, '1.1.0.0', { 'scripts/hook-syntax.sh': '#!/bin/bash\nkill -9 $$\n' });
     const before = liveState(sb);
     const r = runSync(sb);
     expect(r.out).toContain('INCONCLUSIVE');
     expect(r.out).not.toContain('BLOCKED_HOOK_SYNTAX');
     expect(r.code).toBe(2);
+    expect(liveState(sb)).toEqual(before);
+  });
+
+  e2e('a hook checker that does not parse itself STOPS: it would fail every run', (sb) => {
+    // bash refuses a half-merged checker with exit 2. That is deterministic, so
+    // it must stop (memoised) rather than retry forever as INCONCLUSIVE.
+    const LT = '<'.repeat(7);
+    const GT = '>'.repeat(7);
+    upstreamShips(sb, '1.1.0.0', {
+      'scripts/hook-syntax.sh': `#!/bin/bash\n${LT} HEAD\nexit 0\n${'='.repeat(7)}\nexit 1\n${GT} up\n`,
+    });
+    const before = liveState(sb);
+    const r = runSync(sb);
+    expect(r.out).toContain('BLOCKED_HOOK_SYNTAX');
+    expect(r.out).toContain('checker itself');
+    expect(r.code).toBe(3);
     expect(liveState(sb)).toEqual(before);
   });
 
