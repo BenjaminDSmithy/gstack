@@ -616,10 +616,12 @@ async function runLogged(cmd: string, cwd: string, logFile: string, timeoutMs: n
         try { process.kill(-(child.pid as number), 'SIGKILL'); } catch { /* group already gone */ }
       }, 10_000);
     }, timeoutMs);
-    child.on('exit', (code) => {
+    child.on('exit', (code, signal) => {
       clearTimeout(timer);
       if (killer) clearTimeout(killer);
-      resolve({ code: code ?? 1, timedOut });
+      // A signal death is not an ordinary failure: report it as 128 (the shell
+      // convention's floor), never as 1, so a caller can tell the two apart.
+      resolve({ code: code ?? (signal ? 128 : 1), timedOut });
     });
     child.on('error', () => { clearTimeout(timer); resolve({ code: 127, timedOut }); });
   });
@@ -1231,11 +1233,19 @@ export async function run(cfg: Config): Promise<RunResult> {
     } else {
       const hookLog = path.join(runDir, 'hook-syntax.log');
       const hooks = await runLogged('/bin/bash scripts/hook-syntax.sh .', oursDir, hookLog, cfg.stepTimeoutMs);
-      // The checker exits 0 or 1. A timeout or any other code means it never
-      // reached a verdict (load, a spawn failure): retry next slot rather than
-      // memoise a STOP that blames a file nobody showed was broken.
-      if (hooks.timedOut || (hooks.code !== 0 && hooks.code !== 1)) {
+      // The checker exits 0 or 1. A timeout, 126/127 (could not exec) or a
+      // signal death (128+) means it never reached a verdict, transiently:
+      // retry next slot rather than memoise a STOP blaming a file nobody
+      // showed was broken. Any other code is the checker itself failing (exit
+      // 2 is bash refusing to parse it) and repeats every run: STOP on it.
+      const noVerdict = hooks.timedOut || hooks.code === 126 || hooks.code === 127 || hooks.code >= 128;
+      if (noVerdict) {
         return finish('INCONCLUSIVE', `scripts/hook-syntax.sh did not reach a verdict on the rebased tree (${hooks.timedOut ? 'timed out' : `exit ${hooks.code}`}; see ${hookLog})`);
+      }
+      if (hooks.code !== 0 && hooks.code !== 1) {
+        return stop('BLOCKED_HOOK_SYNTAX', 'gstack fork-sync: the hook checker itself fails on the rebased tree',
+          `The rebase onto v${upVersion} is clean, but scripts/hook-syntax.sh exited ${hooks.code} instead of giving a verdict `
+          + `(see ${hookLog}); the checker itself is broken there. Nothing landed. Fix scripts/hook-syntax.sh on the branch or upstream.`);
       }
       if (hooks.code === 1) {
         return stop('BLOCKED_HOOK_SYNTAX', 'gstack fork-sync: a hook in the rebased tree does not parse',
