@@ -394,10 +394,19 @@ describe("sourceStrategy", () => {
     fake.cleanup();
   });
 
-  it("returns unsupported when the row has no strategy key or the source is absent", () => {
+  it("returns unsupported when the row has no strategy key", () => {
     const fake = makeFakeGbrain({ sources: [{ id: "old-gbrain", local_path: "/x", page_count: 3 }] });
     expect(sourceStrategy("old-gbrain", fake.env)).toBe("unsupported");
-    expect(sourceStrategy("missing", fake.env)).toBe("unsupported");
+    fake.cleanup();
+  });
+
+  // "unsupported" makes the walk pass --strategy code, which would override a
+  // persisted `auto`; a failed read must not look like an old gbrain.
+  it("returns unreadable when the source is absent or the list call fails", () => {
+    const fake = makeFakeGbrain({ sources: [{ id: "src", local_path: "/x", strategy: "auto" }] });
+    expect(sourceStrategy("missing", fake.env)).toBe("unreadable");
+    writeFileSync(join(fake.bindir, "gbrain"), "#!/bin/sh\necho 'Error: connection refused' >&2\nexit 1\n");
+    expect(sourceStrategy("src", fake.env)).toBe("unreadable");
     fake.cleanup();
   });
 });

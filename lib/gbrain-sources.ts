@@ -312,15 +312,19 @@ export type SourceStrategy = "markdown" | "code" | "auto";
  *     `--strategy` uses it.
  *   - "unset"       — nothing persisted (or a value gbrain ignores). A sync
  *     without `--strategy` then falls back to markdown.
- *   - "unsupported" — the row carries no `strategy` key (a gbrain without
- *     `sources set-strategy`), or the list call failed, or the source is not
- *     listed. The persisted value can be neither read nor written.
+ *   - "unsupported" — the source's row carries no `strategy` key: a gbrain
+ *     without `sources set-strategy`. The persisted value can be neither read
+ *     nor written.
+ *   - "unreadable"  — the list call failed, its output was not JSON, or the
+ *     source is not listed. Nothing is known about the persisted value, not
+ *     even whether this gbrain has one.
  */
-export type StrategyReading = SourceStrategy | "unset" | "unsupported";
+export type StrategyReading = SourceStrategy | "unset" | "unsupported" | "unreadable";
 
 export function sourceStrategy(id: string, env?: NodeJS.ProcessEnv): StrategyReading {
   const match = listedSource(id, env);
-  if (!match || !Object.prototype.hasOwnProperty.call(match, "strategy")) return "unsupported";
+  if (!match) return "unreadable";
+  if (!Object.prototype.hasOwnProperty.call(match, "strategy")) return "unsupported";
   const s = match.strategy;
   return s === "markdown" || s === "code" || s === "auto" ? s : "unset";
 }
