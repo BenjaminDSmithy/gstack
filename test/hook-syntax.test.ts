@@ -26,6 +26,7 @@ import { spawnSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import { cleanupFixtures, makeFixture, makeSource, put, type Fixture } from './helpers/install-fixture';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const GATE = path.join(ROOT, 'scripts', 'hook-syntax.sh');
@@ -57,12 +58,12 @@ type Captured = { status: number | null; signal: string | null; stdout: string; 
 // spawn in 2,400 in a churn loop, against 0 in 2,400 through file
 // descriptors), and every verdict this file checks is printed on stderr: a lost
 // pipe reads as a silent gate. Status-only spawns keep spawnSync.
-function spawnCaptured(cmd: string, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Captured {
+function spawnCaptured(cmd: string, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv; timeout?: number } = {}): Captured {
   const io = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-hook-syntax-io-'));
   const outFd = fs.openSync(path.join(io, 'out'), 'w');
   const errFd = fs.openSync(path.join(io, 'err'), 'w');
   try {
-    const r = spawnSync(cmd, args, { ...opts, stdio: ['ignore', outFd, errFd], timeout: SPAWN_TIMEOUT_MS });
+    const r = spawnSync(cmd, args, { cwd: opts.cwd, env: opts.env, stdio: ['ignore', outFd, errFd], timeout: opts.timeout ?? SPAWN_TIMEOUT_MS });
     return {
       status: r.status,
       signal: r.signal ?? null,
@@ -1135,6 +1136,56 @@ describe('hook-syntax: bun payloads', () => {
 });
 
 // ── house rules ────────────────────────────────────────────────────────────
+
+describe.skipIf(process.platform === 'win32')('setup: the canonical tree hooks are registered from', () => {
+  // Hooks are registered under ~/.claude/skills/gstack, which can resolve into
+  // a checkout other than the one setup runs from. That tree is gated too.
+  // Each fixture is a full checkout; removing several took over Bun's 5 s
+  // default hook timeout at a load average near 300.
+  afterAll(cleanupFixtures, 120_000);
+
+  // A whole install, not one gate run: about 20-30 s on this Mac at a load
+  // average near 100, and past 120 s near 350. The bound only catches a hang.
+  const SETUP_RUN_TIMEOUT_MS = 480_000;
+  const setupIn = (f: Fixture, setup: string, args: string[] = []) =>
+    spawnCaptured('bash', [setup, '--no-plan-tune-hooks', ...args], { cwd: f.home, env: f.env, timeout: SETUP_RUN_TIMEOUT_MS });
+  const settings = (f: Fixture) => {
+    const p = path.join(f.home, '.claude', 'settings.json');
+    return fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : '';
+  };
+
+  test('a broken global checkout gets no hook registered from a clean second checkout', () => {
+    const f = makeFixture();
+    const a = makeSource(f, path.join(f.home, 'src-a/gstack'));
+    const b = makeSource(f, path.join(f.home, 'src-b/gstack'));
+    // A owns the global link, installed without the Stop hook.
+    const first = setupIn(f, path.join(a, 'setup'), ['--no-timeline-stop-hook']);
+    expect(first.status, first.stderr).toBe(0);
+    expect(fs.realpathSync(path.join(f.home, '.claude/skills/gstack'))).toBe(fs.realpathSync(a));
+    expect(settings(f)).not.toContain('timeline-stop-hook');
+    // A goes mid-merge; B is clean and asks for the Stop hook. A's opt-out is
+    // saved in config, so B must ask explicitly for there to be a hook at all.
+    const hook = path.join(a, 'hosts/claude/hooks/timeline-stop-hook');
+    put(hook, `${fs.readFileSync(hook, 'utf-8')}\n${CONFLICT_HEREDOC}`, 0o755);
+    const r = setupIn(f, path.join(b, 'setup'), ['--timeline-stop-hook']);
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stderr).toContain('REFUSING TO REGISTER HOOKS');
+    expect(r.stderr).toContain('UNRESOLVED CONFLICT MARKERS');
+    expect(r.stderr).toContain('setup finished WITHOUT registering hooks');
+    expect(settings(f)).not.toContain('timeline-stop-hook');
+  }, 2 * SETUP_RUN_TIMEOUT_MS + 60_000);
+
+  test('control: a healthy global checkout still gets its hooks from a second checkout', () => {
+    const f = makeFixture();
+    const a = makeSource(f, path.join(f.home, 'src-a/gstack'));
+    const b = makeSource(f, path.join(f.home, 'src-b/gstack'));
+    expect(setupIn(f, path.join(a, 'setup'), ['--no-timeline-stop-hook']).status).toBe(0);
+    const r = setupIn(f, path.join(b, 'setup'), ['--timeline-stop-hook']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stderr).not.toContain('REFUSING TO REGISTER HOOKS');
+    expect(settings(f)).toContain(path.join(f.home, '.claude/skills/gstack/hosts/claude/hooks/timeline-stop-hook'));
+  }, 2 * SETUP_RUN_TIMEOUT_MS + 60_000);
+});
 
 describe('hook-syntax: house rules', () => {
   test('the harness reads a killed gate as killed, never as exit 1', () => {

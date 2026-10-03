@@ -3751,9 +3751,40 @@ if [ ! -x "$CANONICAL_GSTACK_ROOT/bin/gstack-session-update" ] \
   CANONICAL_GSTACK_ROOT="$HOME/.claude/skills/gstack"
 fi
 
+# The canonical install is the tree every hook below is registered from, and it
+# is not always the tree the hook parse gate at the top of this file swept. Run
+# from a second checkout or a worktree, setup leaves a global link that points
+# at another checkout alone, and never replaces a real directory there, so
+# ~/.claude/skills/gstack can still resolve into a tree this run never checked.
+# Gate that tree too, with this run's checker, before a single hook path into
+# it is registered or re-pointed; nothing is written to it. If it fails, no
+# hook is registered or re-pointed in this run, the rest of setup completes,
+# and setup exits 1 at the end.
+_CANONICAL_HOOKS_REFUSED=0
+_CANONICAL_REAL=""
+if [ -x "$SETTINGS_HOOK" ]; then
+  _CANONICAL_REAL="$(cd "$CANONICAL_GSTACK_ROOT" 2>/dev/null && pwd -P || true)"
+fi
+if [ -n "$_CANONICAL_REAL" ] && [ "$_CANONICAL_REAL" != "$SOURCE_GSTACK_DIR" ]; then
+  _canonical_rc=0
+  "$_HOOK_SYNTAX_BASH" "$SOURCE_GSTACK_DIR/scripts/hook-syntax.sh" "$_CANONICAL_REAL" || _canonical_rc=$?
+  if [ "$_canonical_rc" -ne 0 ]; then
+    _CANONICAL_HOOKS_REFUSED=1
+    echo "" >&2
+    echo "REFUSING TO REGISTER HOOKS: $CANONICAL_GSTACK_ROOT resolves to $_CANONICAL_REAL," >&2
+    echo "a different checkout from this one, and the hook parse gate failed on it" >&2
+    echo "(exit $_canonical_rc, details above). Every gstack hook is registered from that" >&2
+    echo "tree, so this run registered and re-pointed none." >&2
+    echo "Fix that checkout, or make this one the global install (./setup --global)," >&2
+    echo "then re-run ./setup." >&2
+  fi
+fi
+
 # Echo the canonical path for a hook (repo-relative arg); fails when the hook
-# is not executable at the canonical install — callers must skip + log.
+# is not executable at the canonical install, or when that install failed the
+# parse gate above — callers must skip + log.
 _hook_command_path() {
+  [ "${_CANONICAL_HOOKS_REFUSED:-0}" -eq 0 ] || return 1
   if [ -x "$CANONICAL_GSTACK_ROOT/$1" ]; then
     printf '%s\n' "$CANONICAL_GSTACK_ROOT/$1"
     return 0
@@ -3768,7 +3799,7 @@ _hook_command_path() {
 # without migrations. One log line only when something actually changed; stderr
 # passes through uncaptured (zero silent failures).
 if [ -x "$SETTINGS_HOOK" ]; then
-  if [ -d "$CANONICAL_GSTACK_ROOT" ]; then
+  if [ -d "$CANONICAL_GSTACK_ROOT" ] && [ "${_CANONICAL_HOOKS_REFUSED:-0}" -eq 0 ]; then
     _HEAL_OUT=$("$SETTINGS_HOOK" prune-stale --repoint "$CANONICAL_GSTACK_ROOT" || true)
   else
     _HEAL_OUT=$("$SETTINGS_HOOK" prune-stale || true)
@@ -3821,7 +3852,7 @@ if [ "$TEAM_MODE" -eq 1 ]; then
   # parse error or lock give-up must reach the user).
   if [ -x "$SETTINGS_HOOK" ] && [ -n "$HOOK_CMD" ]; then
     "$SETTINGS_HOOK" add-event --event SessionStart --command "$HOOK_CMD" --source gstack-session-update >/dev/null || true
-  elif [ -z "$HOOK_CMD" ]; then
+  elif [ -z "$HOOK_CMD" ] && [ "${_CANONICAL_HOOKS_REFUSED:-0}" -eq 0 ]; then
     log "  SessionStart hook not registered: bin/gstack-session-update missing at $CANONICAL_GSTACK_ROOT (no stable install)"
   fi
 
@@ -4021,7 +4052,7 @@ PLAN_TUNE_INSTALL_MARKER="$HOME/.gstack/.plan-tune-hooks-prompted"
 
 # Canonical-only: an ephemeral tree with no stable install gets a visible skip,
 # never a baked worktree path.
-if [ "$NO_TEAM_MODE" -ne 1 ] && [ -x "$SETTINGS_HOOK" ] \
+if [ "$NO_TEAM_MODE" -ne 1 ] && [ -x "$SETTINGS_HOOK" ] && [ "${_CANONICAL_HOOKS_REFUSED:-0}" -eq 0 ] \
    && { [ -z "$PLAN_TUNE_LOG_HOOK" ] || [ -z "$PLAN_TUNE_PREF_HOOK" ]; }; then
   log "  AskUserQuestion hooks not registered: hooks missing at $CANONICAL_GSTACK_ROOT (no stable install)"
 fi
@@ -4447,4 +4478,12 @@ if [ ${#_BACKED_UP_SKILL_MDS[@]} -gt 0 ]; then
   log ""
   log "Moved ${#_BACKED_UP_SKILL_MDS[@]} customized SKILL.md file(s) to $_SKILL_BACKUP_ROOT before installing gstack's: ${_BACKED_UP_SKILL_MDS[*]}"
   log "  Those were gstack-generated files you had edited; restore anything you meant to keep under a different skill name."
+fi
+
+# A canonical install that failed the hook parse gate (step 10) got no hook
+# registered or re-pointed. Everything else completed; say so last, and fail.
+if [ "${_CANONICAL_HOOKS_REFUSED:-0}" -eq 1 ]; then
+  echo "" >&2
+  echo "setup finished WITHOUT registering hooks: $_CANONICAL_REAL failed the hook parse gate (see above)." >&2
+  exit 1
 fi

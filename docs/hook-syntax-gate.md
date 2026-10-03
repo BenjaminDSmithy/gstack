@@ -56,6 +56,7 @@ typing it out, so a hook added to either is covered without editing the test.
 | --- | --- | --- |
 | `test/hook-syntax.test.ts` | every `bun run test`, and the required free-suite CI check | fails the suite, naming the file and line |
 | `./setup` | every install, including the one `/gstack-upgrade` runs | **refuses**: nothing is sourced, built, created, linked or registered (only the CRLF heal below runs first) |
+| `./setup`, before it registers hooks | when `~/.claude/skills/gstack` resolves to a checkout other than the one setup runs from | **registers and re-points no hook**, finishes the rest of the install, and exits 1 |
 
 The setup block sits directly after `setup` resolves its own directory — above
 the first `source`, the first `bun` call and the first `mkdir`/`ln`/`cp`. The
