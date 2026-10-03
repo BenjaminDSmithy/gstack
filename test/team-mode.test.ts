@@ -351,7 +351,7 @@ describe('setup --team / --no-team / -q', () => {
       fs.writeFileSync(file, content, { mode: 0o755 });
     };
     try {
-      for (const rel of ['setup', 'VERSION', 'SKILL.md', 'qa/SKILL.md', 'bin/gstack-config', 'bin/gstack-patch-names', 'scripts/resolve-codex-generation-model.ts', 'scripts/models.ts', 'scripts/preflight-codex-overlap.ts', 'scripts/discover-skills.ts', 'scripts/external-skill-names.ts', 'scripts/host-config.ts']) {
+      for (const rel of ['setup', 'VERSION', 'SKILL.md', 'qa/SKILL.md', 'bin/gstack-config', 'bin/gstack-patch-names', 'scripts/resolve-codex-generation-model.ts', 'scripts/models.ts', 'scripts/preflight-codex-overlap.ts', 'scripts/hook-syntax.sh', 'scripts/discover-skills.ts', 'scripts/external-skill-names.ts', 'scripts/host-config.ts']) {
         const dest = path.join(cwd, rel);
         fs.mkdirSync(path.dirname(dest), { recursive: true });
         fs.copyFileSync(path.join(ROOT, rel), dest);
