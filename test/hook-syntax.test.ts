@@ -14,6 +14,7 @@
  *      a gate never shown to fail is not a gate
  *   2. it is SILENT on a healthy tree; a chattering gate gets routed around
  *   3. it does not claim coverage it lacks: skipped is reported as skipped
+ *   4. ./setup refuses BEFORE it runs, writes, links or registers anything
  *
  * The wired-hook list is DERIVED, not typed out: KNOWN_HOOKS in
  * bin/gstack-settings-hook is the registry ./setup and gstack-memorable write
@@ -636,5 +637,134 @@ describe('hook-syntax: house rules', () => {
     expect(body).toContain('[>]{7}');
     expect(body).toContain('[|]{7}');
     expect(body).not.toContain('[=]{7}');
+  });
+});
+
+// ── ./setup, the consumer ──────────────────────────────────────────────────
+
+// A minimal install tree: `setup`, the gate, whatever hook fixture the test
+// wants, and stubs for the first tree code setup runs AFTER the gate. Each
+// stub announces itself on stdout and exits. Without them, a setup that merely
+// WARNED and carried on would still die a line later on a missing file, and a
+// refusal test could not tell "refused" from "warned, then fell over". With
+// them, getting past the gate is observed, never inferred.
+//
+// Two stubs, because the first thing setup runs after the gate depends on the
+// setup: newer ones source bin/gstack-state-root.sh straight away (stderr
+// discarded, hence stdout), older ones reach scripts/preflight-codex-overlap.ts
+// first and turn any failure there into `exit 1`. The marker is the signal;
+// the exit code after it is the stub's business.
+const PAST_GATE = 'PAST THE GATE';
+
+function mkSetupTree(): { dir: string; home: string } {
+  const dir = fs.mkdtempSync(path.join(FX, 'setup-'));
+  const home = path.join(dir, 'home');
+  fs.mkdirSync(home, { recursive: true });
+  for (const sub of ['scripts', 'bin', 'hosts/claude/hooks']) {
+    fs.mkdirSync(path.join(dir, 'tree', sub), { recursive: true });
+  }
+  fs.copyFileSync(SETUP_SCRIPT, path.join(dir, 'tree', 'setup'));
+  fs.chmodSync(path.join(dir, 'tree', 'setup'), 0o755);
+  fs.copyFileSync(GATE, path.join(dir, 'tree', 'scripts', 'hook-syntax.sh'));
+  fs.writeFileSync(path.join(dir, 'tree', 'bin', 'gstack-state-root.sh'), `echo "${PAST_GATE}"\nexit 7\n`);
+  fs.writeFileSync(path.join(dir, 'tree', 'scripts', 'preflight-codex-overlap.ts'), `console.log(${JSON.stringify(PAST_GATE)});\nprocess.exit(7);\n`);
+  return { dir, home };
+}
+
+function runSetup(dir: string, home: string): Run {
+  // A scrubbed env: if the gate ever let setup through by mistake, every
+  // write must land in the scratch HOME, never in a real GSTACK_HOME,
+  // CLAUDE_CONFIG_DIR or CODEX_HOME inherited from the caller.
+  const r = spawnSync('/bin/bash', [path.join(dir, 'tree', 'setup'), '--no-prefix', '--no-team'], {
+    env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, TMPDIR: path.join(dir, 'tmp') },
+    cwd: path.join(dir, 'tree'),
+    encoding: 'utf-8',
+    timeout: SPAWN_TIMEOUT_MS,
+  });
+  return { code: r.status ?? 1, output: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+}
+
+function homeIsEmpty(home: string): boolean {
+  return fs.readdirSync(home).length === 0;
+}
+
+// What every refusal must look like: setup's own exit 1, the refusal banner,
+// nothing after the gate reached, nothing written.
+function expectRefused(r: Run, home: string): void {
+  expect(r.output).toContain('REFUSING TO REGISTER');
+  expect(r.output).not.toContain(PAST_GATE);
+  expect(r.code).toBe(1);
+  expect(homeIsEmpty(home)).toBe(true);
+}
+
+describe('setup: the gate refuses before anything is installed', () => {
+  test('setup refuses a tree whose PreToolUse hook does not parse', () => {
+    const { dir, home } = mkSetupTree();
+    fs.writeFileSync(path.join(dir, 'tree', 'hosts', 'claude', 'hooks', 'question-preference-hook'), '#!/usr/bin/env bash\nif true; then\n');
+    const r = runSetup(dir, home);
+    expectRefused(r, home);
+    expect(r.output).toContain('question-preference-hook');
+  }, TEST_TIMEOUT_MS);
+
+  test('setup refuses a half-merged hook that still parses', () => {
+    const { dir, home } = mkSetupTree();
+    fs.writeFileSync(path.join(dir, 'tree', 'hosts', 'claude', 'hooks', 'timeline-stop-hook'), `#!/usr/bin/env bash\n${CONFLICT_HEREDOC}`);
+    const r = runSetup(dir, home);
+    expectRefused(r, home);
+    expect(r.output).toContain('UNRESOLVED CONFLICT MARKERS');
+  }, TEST_TIMEOUT_MS);
+
+  test('setup refuses when the gate ITSELF is missing', () => {
+    // Deleting the checker must not be a way past it. setup and the checker
+    // ship in the same commit, so a missing checker means a partial checkout —
+    // the state the gate exists to catch.
+    const { dir, home } = mkSetupTree();
+    fs.rmSync(path.join(dir, 'tree', 'scripts', 'hook-syntax.sh'));
+    const r = runSetup(dir, home);
+    expectRefused(r, home);
+    expect(r.output).toContain('hook parse gate is missing');
+  }, TEST_TIMEOUT_MS);
+
+  test('control: a healthy tree gets past the gate', () => {
+    // Same minimal tree, nothing broken: a stub is reached, and it stops
+    // setup before it writes anything.
+    const { dir, home } = mkSetupTree();
+    fs.writeFileSync(path.join(dir, 'tree', 'hosts', 'claude', 'hooks', 'question-preference-hook'), '#!/usr/bin/env bash\nexit 0\n');
+    const r = runSetup(dir, home);
+    expect(r.output).not.toContain('REFUSING TO REGISTER');
+    expect(r.output).not.toContain('hook-syntax:');
+    expect(r.output).toContain(PAST_GATE);
+    expect(r.code).not.toBe(0);
+    expect(homeIsEmpty(home)).toBe(true);
+  }, TEST_TIMEOUT_MS);
+
+  test('setup invokes the gate with /bin/bash, never a bare bash', () => {
+    expect(SETUP_SRC).toContain('/bin/bash "$HOOK_SYNTAX_GATE" "$SOURCE_GSTACK_DIR"');
+  });
+
+  test('the gate runs before setup sources, executes or writes anything', () => {
+    // Kills "gate moved below the deploy step" directly, in case a refactor
+    // lets a refusal reach a write before it exits. A helper DEFINITION writes
+    // nothing until it is called, so only top-level lines count.
+    const gateAt = SETUP_SRC.indexOf('HOOK_SYNTAX_GATE="$SOURCE_GSTACK_DIR/scripts/hook-syntax.sh"');
+    expect(gateAt).toBeGreaterThan(-1);
+    let offset = 0;
+    let inFunction = false;
+    let firstUse = -1;
+    for (const line of SETUP_SRC.split('\n')) {
+      if (/^[A-Za-z_][A-Za-z0-9_]*\(\)\s*\{\s*$/.test(line)) inFunction = true;
+      else if (inFunction && line === '}') inFunction = false;
+      else if (!inFunction && firstUse < 0) {
+        const t = line.trim();
+        if (!t.startsWith('#') && (
+          /^(mkdir|ln|cp|rm|mv|_link_or_copy)\s/.test(t)
+          || /^(\.|source)\s+"\$SOURCE_GSTACK_DIR\//.test(t)
+          || /^bun\s+"\$SOURCE_GSTACK_DIR\//.test(t)
+        )) firstUse = offset;
+      }
+      offset += line.length + 1;
+    }
+    expect(firstUse).toBeGreaterThan(-1);
+    expect(gateAt).toBeLessThan(firstUse);
   });
 });
