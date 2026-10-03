@@ -3,8 +3,9 @@
 # repo ships.
 #
 # Run by `setup` before it sources, builds, links, copies or registers anything
-# (only scripts/heal-eol.sh runs first), and pinned by `test/hook-syntax.test.ts`,
-# which runs in the free suite. Also runnable alone (spell /bin/bash — see
+# (only scripts/heal-eol.sh runs first; the read-only `./setup --status` exits
+# earlier and installs nothing), and pinned by `test/hook-syntax.test.ts`, which
+# runs in the free suite. Also runnable alone (spell /bin/bash — see
 # "Invocation" below):
 #
 #   /bin/bash scripts/hook-syntax.sh                  # sweep the whole repo
@@ -118,7 +119,9 @@
 #
 # FORK BUDGET. Under a loaded scheduler a fork costs far more than the work it
 # does, so the per-file pass forks once (the parse) and every content scan
-# runs once per sweep over every file the parse pass accepted.
+# runs once per sweep over every file the parse pass accepted. Beyond that: one
+# probe per interpreter per run, one bun process per payload, and one grep per
+# shim that names its payload through a variable other than $HERE.
 #
 # EXIT. 0 clean, 1 something is broken or could not be looked at. Never
 # anything else: setup reads any other code as "the checker could not run".
