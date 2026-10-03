@@ -45,11 +45,14 @@
 #     to /bin/sh, which is dash on Debian and Ubuntu
 #   * a python shebang -> compiled in memory with SyntaxWarning as an error (an
 #     invalid escape is only a warning without it); no .pyc is written
-#   * a bun payload -> `bun build --target=bun --packages=external`: the
-#     entrypoint and every local file it imports, in memory, writing nothing.
-#     npm packages are left unresolved on purpose — `setup` runs this before
-#     its own `bun install`, so resolving them would refuse every fresh clone
-#     for a reason that has nothing to do with syntax
+#   * a bun payload -> bundled through Bun's build API (target bun, npm
+#     packages external, the bundle `bun build --target=bun
+#     --packages=external` makes): the entrypoint and every local file it
+#     imports, in memory, writing nothing. npm packages are left unresolved on
+#     purpose — `setup` runs this before its own `bun install`, so resolving
+#     them would refuse every fresh clone for a reason that has nothing to do
+#     with syntax. Every local file the build pulled in is then marker-scanned
+#     from its own bytes
 #   * conflict markers -> scanned SEPARATELY from parsing, because a marker
 #     inside a heredoc body or a quoted string parses cleanly and is still a
 #     half-merged file
@@ -89,7 +92,7 @@
 #   * TypeScript and JavaScript a shim does not reach are skipped; the type
 #     checker and the test suite own those.
 #   * Skipped files are not marker-scanned. A half-merged .md, .json or .tmpl
-#     is invisible here.
+#     is invisible here, unless a bun payload imports it.
 #   * A parse is not a run. A hook that parses and then fails at runtime is out
 #     of scope.
 #   * A shim that reaches bun any other way than `bun "$HERE/<path>"` has its
@@ -121,6 +124,41 @@
 # exist to exercise the absent-interpreter paths.
 HOOK_SYNTAX_PYTHON="${HOOK_SYNTAX_PYTHON:-python3}"
 HOOK_SYNTAX_BUN="${HOOK_SYNTAX_BUN:-bun}"
+
+# Run as `bun -e` in place of `bun build`, so one process both parses a
+# payload and names what it imports. Same bundle: target bun, npm packages
+# external, nothing written. On failure: bun's diagnostics, exit 1. On success:
+# the physical path of every local file the build pulled in other than the
+# entrypoint, one per line, read from the build's metafile; a bun whose build
+# API has no metafile prints NO_METAFILE instead. The list comes from the
+# build itself, never from the bundle's text, which bun re-prints: it turns an
+# ordinary "\n<<<<<<< " string into a template literal with the marker at
+# column 0, and it names modules in comment headers whose shape varies.
+#
+# An entrypoint without a JavaScript or TypeScript extension is loaded as
+# TypeScript, which is how `bun <file>` runs it. Left to the build's own rules
+# it is an asset: copied, never parsed, so a broken one passed (and `bun build`
+# refused a valid one with "cannot write multiple output files").
+HOOK_SYNTAX_BUN_JS='const path = require("path"); const fs = require("fs");
+const real = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
+const entry = real(process.argv[1]);
+const plugins = [];
+if (![".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"].includes(path.extname(entry))) {
+  const exact = new RegExp("^" + entry.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$");
+  plugins.push({ name: "hook-syntax-entry-as-ts", setup(b) {
+    b.onLoad({ filter: exact }, () => ({ contents: fs.readFileSync(entry, "utf8"), loader: "ts" }));
+  } });
+}
+let r;
+try {
+  r = await Bun.build({ entrypoints: [entry], target: "bun", packages: "external", metafile: true, plugins });
+} catch (e) {
+  for (const m of (e && e.errors) || [e]) console.error(Bun.inspect(m));
+  process.exit(1);
+}
+if (!r.success) { for (const m of r.logs) console.error(Bun.inspect(m)); process.exit(1); }
+if (!r.metafile) { console.log("NO_METAFILE"); process.exit(0); }
+for (const k of Object.keys(r.metafile.inputs)) { const p = real(k); if (p !== entry) console.log(p); }'
 
 # What the run actually covered. Read by `--report`; never asserted.
 HOOK_SYNTAX_CHECKED=0
@@ -302,10 +340,11 @@ _hook_syntax_unskip() {
   return 0
 }
 
-# Parse one bun payload: the entrypoint and every local file it imports, in
-# memory. $1 = payload. Silent on success.
+# Parse one bun payload, the entrypoint and every local file it imports, in
+# memory, and queue each of those files for the content scans. $1 = payload.
+# Silent on success.
 _hook_syntax_check_bun() {
-  local out
+  local out line rc=0
   _hook_syntax_unskip "$1"
   if ! _hook_syntax_probe "$HOOK_SYNTAX_BUN" --version; then
     # A coverage gap, not a fault: every shim exits cleanly when bun is absent.
@@ -315,12 +354,35 @@ _hook_syntax_check_bun() {
   fi
   HOOK_SYNTAX_CHECKED=$((HOOK_SYNTAX_CHECKED + 1))
   HOOK_SYNTAX_PARSED+=("$1")
-  if ! out=$("$HOOK_SYNTAX_BUN" build "$1" --target=bun --packages=external 2>&1 >/dev/null); then
+  if ! out=$("$HOOK_SYNTAX_BUN" -e "$HOOK_SYNTAX_BUN_JS" "$1" 2>&1); then
     printf 'hook-syntax: FAILS TO PARSE %s\n' "$1" >&2
     printf '%s\n' "$out" >&2
     return 1
   fi
-  return 0
+  # A module bun parsed as part of the payload is marker-scanned from its own
+  # bytes, like any other parsed file, so it counts as checked; one an earlier
+  # walk counted as skipped is taken back. A marker inside a template literal
+  # or a comment parses cleanly, and the sweep alone would skip the file.
+  while IFS= read -r line; do
+    case "$line" in
+      NO_METAFILE)
+        printf 'hook-syntax: %s cannot list what %s imports — those files are NOT marker-scanned\n' "$HOOK_SYNTAX_BUN" "$1" >&2
+        ;;
+      /*)
+        _hook_syntax_seen "$line" && continue
+        _hook_syntax_mark "$line"
+        if [ ! -r "$line" ]; then
+          printf 'hook-syntax: UNREADABLE %s — imported by %s, cannot check it\n' "$line" "$1" >&2
+          rc=1
+          continue
+        fi
+        _hook_syntax_unskip "$line"
+        HOOK_SYNTAX_CHECKED=$((HOOK_SYNTAX_CHECKED + 1))
+        HOOK_SYNTAX_PARSED+=("$line")
+        ;;
+    esac
+  done < <(printf '%s\n' "$out")
+  return "$rc"
 }
 
 # Find what every queued shell file hands to bun, and parse each of those. One
