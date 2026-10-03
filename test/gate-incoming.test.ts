@@ -224,7 +224,9 @@ describe('gstack-gate-incoming: gate only', () => {
       }
       expect(alive).toBe(false);
     } finally {
-      try { process.kill(sleeper, 'SIGKILL'); } catch { /* already gone */ }
+      // An empty pidfile reads as 0, and kill(0) would hit this runner's own
+      // process group.
+      if (sleeper > 0) try { process.kill(sleeper, 'SIGKILL'); } catch { /* already gone */ }
     }
   }, TEST_TIMEOUT_MS);
 
