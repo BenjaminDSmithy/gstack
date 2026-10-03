@@ -180,6 +180,9 @@ if [ "$_FF_RC" -eq 0 ]; then
   if ./setup; then echo "FF_OK"; else echo "SETUP_FAILED: git update succeeded; stop and inspect setup output (previous commit: $PRE_UPGRADE_COMMIT)" >&2; exit 1; fi
 elif [ "$_FF_RC" -eq 3 ]; then
   echo "FF_REFUSED"
+elif [ "$_FF_RC" -eq 126 ] || [ "$_FF_RC" -eq 127 ]; then
+  echo "HOOK_GATE_HELPER_MISSING: $INSTALL_DIR/bin/gstack-gate-incoming could not run (exit $_FF_RC); install unchanged at $PRE_UPGRADE_COMMIT" >&2
+  exit 1
 else
   echo "HOOK_GATE_REFUSED: install unchanged at $PRE_UPGRADE_COMMIT (gate exit $_FF_RC)" >&2
   exit 1
@@ -195,6 +198,8 @@ On `HOOK_GATE_REFUSED`, STOP and quote the `HOOK_GATE` line: `blocked` means
 the new version has a file that does not parse (name it from the report),
 `no-verdict` means the gate could not run. Nothing moved. Never take the
 fallback for it.
+On `HOOK_GATE_HELPER_MISSING`, STOP: nothing moved. Restore the helper with
+`git -C "$INSTALL_DIR" checkout -- bin/gstack-gate-incoming` and re-run.
 On `FETCH_FAILED`, stop for network/auth repair, not reset.
 Enter the fallback only on `FF_REFUSED` (its `FF refused` line says why).
 
@@ -218,7 +223,7 @@ The block re-gates `origin/main` before any stash or reset:
 ```bash
 cd "$INSTALL_DIR"
 INCOMING=$(git rev-parse --verify 'origin/main^{commit}') || exit 1
-"$INSTALL_DIR/bin/gstack-gate-incoming" "$INSTALL_DIR" "$INCOMING" || { echo "HOOK_GATE_REFUSED: nothing stashed or reset" >&2; exit 1; }
+"$INSTALL_DIR/bin/gstack-gate-incoming" "$INSTALL_DIR" "$INCOMING" || { echo "HOOK_GATE_REFUSED: nothing stashed or reset (gate exit $?)" >&2; exit 1; }
 STASH_OUTPUT=$(git stash 2>&1)
 git reset --hard "$INCOMING"
 ./setup
@@ -236,7 +241,7 @@ PARENT=$(dirname "$INSTALL_DIR")
 [ -e "$INSTALL_DIR.bak" ] && { echo "ERROR: stale backup exists at $INSTALL_DIR.bak (from a previous failed upgrade?) — inspect it, salvage/remove it, then re-run." >&2; exit 1; }
 TMP_DIR=$(mktemp -d) || { echo "ERROR: mktemp failed — aborting upgrade (install untouched)." >&2; exit 1; }
 git clone --depth 1 https://github.com/garrytan/gstack.git "$TMP_DIR/gstack" || { echo "ERROR: clone failed — aborting upgrade (install untouched)." >&2; rm -rf "$TMP_DIR"; exit 1; }
-"$INSTALL_DIR/bin/gstack-gate-incoming" "$TMP_DIR/gstack" HEAD || { echo "ERROR: the hook parse gate refused the new version — aborting upgrade (install untouched)." >&2; rm -rf "$TMP_DIR"; exit 1; }
+"$INSTALL_DIR/bin/gstack-gate-incoming" "$TMP_DIR/gstack" HEAD || { echo "ERROR: the hook parse gate refused the new version or could not run (exit $?) — aborting upgrade (install untouched)." >&2; rm -rf "$TMP_DIR"; exit 1; }
 mv "$INSTALL_DIR" "$INSTALL_DIR.bak" || { rm -rf "$TMP_DIR"; exit 1; }
 if mv "$TMP_DIR/gstack" "$INSTALL_DIR"; then
   if (cd "$INSTALL_DIR" && ./setup); then
