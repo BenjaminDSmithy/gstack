@@ -158,23 +158,30 @@ fi
   # heartbeat.
   trap 'kill "$HB_PID" 2>/dev/null; [ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" = "$MYPID" ] && rm -rf "$LOCK_DIR" 2>/dev/null' EXIT
 
-  # ── Pull latest ──
+  # ── Fetch, gate the incoming tree, then fast-forward ──
+  #
+  # settings.json runs this checkout's hooks by path, so the working tree IS
+  # the deployed hook set: a `git pull` that lands a hook which does not parse
+  # breaks every session before ./setup below can refuse it, and that refusal
+  # guards the next install, not this one. So fetch first, run the hook parse
+  # gate on the incoming commit in a throwaway worktree, and fast-forward only
+  # to the exact commit that passed. No verdict is never a pass: the checkout
+  # stays where it is and the next window tries again.
   OLD_HEAD=$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)
   UPDATE_URL=$(git -C "$GSTACK_DIR" remote get-url origin 2>/dev/null || echo "")
   UPDATE_HOST="${UPDATE_URL#*://}"; UPDATE_HOST="${UPDATE_HOST#*@}"; UPDATE_HOST="${UPDATE_HOST%%[/:]*}"
-  # --autostash: locally-patched TRACKED files are the NORM on installs, not
-  # the exception — skill-prefix mode rewrites frontmatter names and
-  # `gstack-config gbrain-refresh` renders brain blocks into SKILL.md. A bare
-  # --ff-only refuses over those edits, so auto-upgrade wedged permanently
-  # (observed: 308 consecutive PULL_FAILED with the reason discarded, #2566).
   # Capture stderr: the log must carry WHY a pull failed, never just the code.
   PULL_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/gstack-session-pull-XXXXXX" 2>/dev/null || echo "")
   GSTACK_HOME="$STATE_DIR" _receipted_git open session-update "${UPDATE_HOST:-unknown}" gstack-self-update-pull "auto_upgrade=true" \
-    bash -c 'git -C "$1" pull --ff-only --autostash -q 2>"${2:-/dev/null}"' _ "$GSTACK_DIR" "$PULL_ERR_FILE"
+    bash -c 'git -C "$1" fetch -q 2>"${2:-/dev/null}"' _ "$GSTACK_DIR" "$PULL_ERR_FILE"
   PULL_EXIT=$?
-  NEW_HEAD=$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)
+  INCOMING=""
+  if [ "$PULL_EXIT" -eq 0 ]; then
+    INCOMING=$(git -C "$GSTACK_DIR" rev-parse --verify '@{upstream}^{commit}' 2>"${PULL_ERR_FILE:-/dev/null}")
+    PULL_EXIT=$?
+  fi
 
-  # Heartbeat: pull done — keep the TTL clock fresh for the setup step.
+  # Heartbeat: fetch done — keep the TTL clock fresh for the gate and setup.
   touch "$LOCK_DIR/pid" 2>/dev/null
 
   # Record check time regardless of outcome
@@ -185,23 +192,54 @@ fi
   case "$P_FAILURES" in ''|*[!0-9]*) P_FAILURES=0 ;; esac
   case "$P_NEXT" in ''|*[!0-9]*) P_NEXT=0 ;; esac
 
+  # gstack-gate-incoming moves nothing when upstream is at or behind HEAD,
+  # gates a fast-forward and takes it only to the commit that passed, and
+  # refuses the rest. Its stdout lines go to the log; its exit says which.
+  if [ "$PULL_EXIT" -eq 0 ]; then
+    GATE_OUT=$(mktemp "${TMPDIR:-/tmp}/gstack-session-gate-XXXXXX" 2>/dev/null || echo /dev/null)
+    GATE_ERR=$(mktemp "${TMPDIR:-/tmp}/gstack-session-gate-XXXXXX" 2>/dev/null || echo /dev/null)
+    "$(cd "$(dirname "$0")" && pwd)/gstack-gate-incoming" --fast-forward "$GSTACK_DIR" "$INCOMING" >"$GATE_OUT" 2>"$GATE_ERR"
+    GATE_EXIT=$?
+    touch "$LOCK_DIR/pid" 2>/dev/null
+    GATE_VERDICT=$(grep -m1 '^HOOK_GATE' "$GATE_OUT" 2>/dev/null)
+    GATE_FF=$(grep -m1 '^FF ' "$GATE_OUT" 2>/dev/null)
+    GATE_KEPT=$(grep -m1 '^AUTOSTASH_KEPT ' "$GATE_OUT" 2>/dev/null | cut -d' ' -f2 | tr -d ':')
+    GATE_REPORT=$(grep -v '^hook-syntax: [0-9]* \(checked\|nested\)' "$GATE_ERR" 2>/dev/null | head -c 300 | tr '\n' ' ' | tr -s ' ')
+    [ "$GATE_OUT" = /dev/null ] || rm -f "$GATE_OUT"
+    [ "$GATE_ERR" = /dev/null ] || rm -f "$GATE_ERR"
+    case "$GATE_EXIT" in
+      0)
+        [ -n "$GATE_VERDICT" ] && log_entry "HOOK_GATE_PASSED incoming=$INCOMING verdict=$GATE_VERDICT"
+        # A conflicting autostash pop was reset to the gated commit; the
+        # local edits are kept in the stash, and the regenerable ones (prefix
+        # renames, gbrain blocks) are re-rendered below.
+        [ -n "$GATE_KEPT" ] && log_entry "AUTOSTASH_CONFLICT_RECOVERED tree_reset=1 kept_stash=$GATE_KEPT"
+        ;;
+      1)
+        log_entry "HOOK_SYNTAX_BLOCKED head=$OLD_HEAD incoming=$INCOMING verdict=${GATE_VERDICT:-none} report=${GATE_REPORT:-none}"
+        rm -f "$PULL_ERR_FILE" 2>/dev/null
+        exit 0
+        ;;
+      3)
+        printf '%s %s\n' "${GATE_FF:-FF refused}" "$GATE_REPORT" > "${PULL_ERR_FILE:-/dev/null}"
+        PULL_EXIT=3
+        ;;
+      *)
+        # The gate exits 0 or 1; anything else, a missing gate (126/127)
+        # included, means nothing was checked, and nothing moved.
+        log_entry "HOOK_GATE_INCONCLUSIVE head=$OLD_HEAD incoming=$INCOMING exit=$GATE_EXIT verdict=${GATE_VERDICT:-none} report=${GATE_REPORT:-none}"
+        rm -f "$PULL_ERR_FILE" 2>/dev/null
+        exit 0
+        ;;
+    esac
+  fi
+  NEW_HEAD=$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)
+
   if [ "$PULL_EXIT" -ne 0 ]; then
     PULL_REASON=$(head -c 300 "$PULL_ERR_FILE" 2>/dev/null | tr '\n' ' ' | tr -s ' ')
     log_entry "PULL_FAILED exit=$PULL_EXIT reason=${PULL_REASON:-unknown}"
     P_PULL="exit $PULL_EXIT: $(printf '%s' "${PULL_REASON:-no error output}" | head -c 160)"
     pending_save
-    # Autostash pop conflict leaves the stash behind and the tree half-merged.
-    # The local patches are REGENERABLE (prefix renames, gbrain blocks), so
-    # recover to a clean upstream tree and re-render them below rather than
-    # leaving conflict markers in a live install.
-    if grep -qi "autostash" "$PULL_ERR_FILE" 2>/dev/null; then
-      git -C "$GSTACK_DIR" checkout -q -- . 2>/dev/null
-      git -C "$GSTACK_DIR" stash drop -q 2>/dev/null
-      log_entry "AUTOSTASH_CONFLICT_RECOVERED tree_reset=1"
-      _PREFIX_CFG=$("$GSTACK_DIR/bin/gstack-config" get skill_prefix 2>/dev/null || echo false)
-      "$GSTACK_DIR/bin/gstack-patch-names" "$GSTACK_DIR" "$_PREFIX_CFG" >/dev/null 2>&1 || true  # best-effort: regenerable prefix rewrite
-      "$GSTACK_DIR/bin/gstack-config" gbrain-refresh >/dev/null 2>&1 || true  # best-effort: regenerable gbrain blocks
-    fi
     rm -f "$PULL_ERR_FILE" 2>/dev/null
     exit 0
   fi
@@ -232,22 +270,23 @@ fi
 
   if [ "$RUN_SETUP" -eq 1 ]; then
     FAILED_STAGE="" FAIL_REASON=""
+    # bun must be available for setup. Its output is kept, overwritten each
+    # run, so a SETUP_FAILED entry can say where to look.
     if command -v bun >/dev/null 2>&1; then
-      SETUP_OUT=$(mktemp "${TMPDIR:-/tmp}/gstack-session-setup-XXXXXX" 2>/dev/null || echo /dev/null)
-      ( cd "$GSTACK_DIR" && ./setup -q --refresh-registered ) >"$SETUP_OUT" 2>&1
+      SETUP_LOG="$(dirname "$LOG_FILE")/session-update-setup.log"
+      ( cd "$GSTACK_DIR" && ./setup -q --refresh-registered ) >"$SETUP_LOG" 2>&1
       SETUP_EXIT=$?
       # Heartbeat: setup done (either way) — refresh the TTL clock.
       touch "$LOCK_DIR/pid" 2>/dev/null
       if [ "$SETUP_EXIT" -ne 0 ]; then
-        _MIG="$(grep -o 'migration [^ ]* failed' "$SETUP_OUT" 2>/dev/null | head -1)"
+        _MIG="$(grep -o 'migration [^ ]* failed' "$SETUP_LOG" 2>/dev/null | head -1)"
         if [ -n "$_MIG" ]; then
           FAILED_STAGE="migrations" FAIL_REASON="$_MIG"
         else
-          _LAST="$(grep -v '^[[:space:]]*$' "$SETUP_OUT" 2>/dev/null | tail -1 | head -c 160)"
+          _LAST="$(grep -v '^[[:space:]]*$' "$SETUP_LOG" 2>/dev/null | tail -1 | head -c 160)"
           FAILED_STAGE="setup" FAIL_REASON="./setup exited $SETUP_EXIT${_LAST:+: $_LAST}"
         fi
       fi
-      [ "$SETUP_OUT" = /dev/null ] || rm -f "$SETUP_OUT"
     else
       FAILED_STAGE="setup" FAIL_REASON="bun not found on PATH"
       log_entry "SETUP_SKIPPED bun_missing"
@@ -266,8 +305,8 @@ fi
       case "$P_FAILURES" in 1) _WAIT=$THROTTLE_SECONDS ;; 2) _WAIT=21600 ;; *) _WAIT=86400 ;; esac
       P_STAGES="$FAILED_STAGE" P_NEXT=$((NOW + _WAIT)) P_REASON="$FAIL_REASON"
       pending_save
-      [ "$FAILED_STAGE" = setup ] && [ "$FAIL_REASON" != "bun not found on PATH" ] && log_entry "SETUP_FAILED reason=$FAIL_REASON"
-      [ "$FAILED_STAGE" = migrations ] && log_entry "MIGRATIONS_FAILED reason=$FAIL_REASON"
+      [ "$FAILED_STAGE" = setup ] && [ "$FAIL_REASON" != "bun not found on PATH" ] && log_entry "SETUP_FAILED reason=$FAIL_REASON log=$SETUP_LOG"
+      [ "$FAILED_STAGE" = migrations ] && log_entry "MIGRATIONS_FAILED reason=$FAIL_REASON log=$SETUP_LOG"
       log_entry "PENDING stages=$FAILED_STAGE attempt=$P_FAILURES next_retry_in=${_WAIT}s"
     fi
   else
@@ -276,7 +315,7 @@ fi
   fi
 # The detached subshell must own its stdio: it inherits the session hook's
 # pipes, and once the hook exits and the caller closes them, any child that
-# writes (git pull's autostash notice, setup output) dies of SIGPIPE —
+# writes (git's autostash notice, setup output) dies of SIGPIPE —
 # observed as PULL_FAILED exit=141 with an empty stderr capture. All
 # observability goes through LOG_FILE.
 ) >/dev/null 2>&1 &
