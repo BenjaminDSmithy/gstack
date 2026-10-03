@@ -32,7 +32,7 @@ describe.skipIf(process.platform === 'win32')('upgrade setup recovery (real shel
             : '**If `LOCAL_GSTACK` is non-empty AND `TEAM_MODE` is NOT `true`:**');
           const result = spawnSync('bash', ['-c', script], {
             cwd: root, encoding: 'utf8', timeout: 10_000,
-            env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, INSTALL_DIR: mode === 'vendored' ? target : source,
+            env: { ...process.env, HOME: root, PATH: `${bin}:${process.env.PATH}`, INSTALL_DIR: mode === 'vendored' ? target : source,
               LOCAL_GSTACK: target, UPGRADE_FIXTURE: source, SETUP_EXIT: String(setupExit) },
           });
           expect(result.status, result.stderr).toBe(setupExit);
@@ -60,7 +60,7 @@ describe.skipIf(process.platform === 'win32')('upgrade setup recovery (real shel
       const mark = join(root, 'setup-ran');
       const result = spawnSync('bash', ['-c', blockAfter('**For vendored installs**')], {
         cwd: root, encoding: 'utf8', timeout: 10_000,
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, INSTALL_DIR: target, UPGRADE_FIXTURE: source, SETUP_MARK: mark },
+        env: { ...process.env, HOME: root, PATH: `${bin}:${process.env.PATH}`, INSTALL_DIR: target, UPGRADE_FIXTURE: source, SETUP_MARK: mark },
       });
       expect(result.status).toBe(1);
       expect(result.stderr).toContain('hook parse gate');
@@ -84,7 +84,7 @@ describe.skipIf(process.platform === 'win32')('upgrade setup recovery (real shel
       writeFileSync(join(root, 'setup'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
       const result = spawnSync('bash', ['-c', blockAfter('**For git installs**')], {
         cwd: root, encoding: 'utf8', timeout: 10_000,
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, INSTALL_DIR: root },
+        env: { ...process.env, HOME: root, PATH: `${bin}:${process.env.PATH}`, INSTALL_DIR: root },
       });
       expect(result.status).toBe(1);
       expect(result.stderr).toContain('SETUP_FAILED');
