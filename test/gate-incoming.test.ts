@@ -167,7 +167,9 @@ describe('gstack-gate-incoming: gate only', () => {
     const r = runHelper(fx, [fx.install, 'origin/main']);
     expect(r.code).toBe(1);
     expect(r.stdout).toContain(`HOOK_GATE blocked ${sha}`);
-    expect(r.stderr).toContain('demo-hook');
+    expect(r.stderr).toContain('hosts/claude/hooks/demo-hook');
+    // The throwaway tree is gone by now; a path into it helps nobody.
+    expect(r.stderr).not.toContain('gstack-gate-incoming.');
     expect(leftovers(fx)).toEqual({ worktrees: 1, scratch: [] });
   }, TEST_TIMEOUT_MS);
 
