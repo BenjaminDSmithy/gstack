@@ -22,10 +22,13 @@
 #
 # --fast-forward moves nothing when <commit> is already HEAD or behind it, and
 # refuses a merge in progress or a checkout that has diverged. Local edits are
-# carried over with --autostash. A stash pop that conflicts writes conflict
-# markers into the live tree, and git still exits 0 for it, so the result is
-# judged by the unmerged entries: the tree is reset to the commit the gate
-# passed and the stash is KEPT, never dropped (its id is printed).
+# carried over with --autostash; they are re-applied on top of the gated commit
+# and are NOT re-checked here (./setup's own gate judges the live tree next).
+# A stash pop that conflicts writes conflict markers into the live tree, and git
+# still exits 0 for it, so the result is judged by the unmerged entries: the
+# tree is reset to the commit the gate passed and the autostash commit is KEPT,
+# in refs/stash or, when git could not store it there, under
+# refs/gstack-autostash/ (its id is printed). Nothing is ever dropped.
 #
 # Exit:
 #   0  clean (with --fast-forward: the checkout is at <commit>, or already
@@ -184,14 +187,34 @@ esac
 # skill-prefix mode rewrites frontmatter names and `gstack-config
 # gbrain-refresh` renders brain blocks into SKILL.md — and a bare --ff-only
 # refuses over them (#2566). The merge names the exact commit the gate passed.
-STASH_BEFORE=$(git -C "$REPO" rev-parse -q --verify refs/stash 2>/dev/null)
-git -C "$REPO" merge --ff-only --autostash -q "$SHA" >/dev/null 2>"$PARENT/merge.err"
+git -C "$REPO" merge --ff-only --autostash -q "$SHA" >"$PARENT/merge.out" 2>"$PARENT/merge.err"
 MERGE_RC=$?
-STASH_AFTER=$(git -C "$REPO" rev-parse -q --verify refs/stash 2>/dev/null)
-if [ -n "$(git -C "$REPO" ls-files -u 2>/dev/null | head -1)" ] \
-  && [ -n "$STASH_AFTER" ] && [ "$STASH_AFTER" != "$STASH_BEFORE" ]; then
+# Unmerged entries now can only be our autostash pop (a merge already in
+# progress was refused above), and the conflict markers are live whatever
+# git's exit says. The edits are in the autostash commit: git names it on
+# stdout, and names it again on stderr when it cannot store it in refs/stash
+# (a held refs/stash.lock). Anchor it before resetting; with no anchored
+# commit, leave the tree alone rather than lose the edits.
+if [ -n "$(git -C "$REPO" ls-files -u 2>/dev/null | head -1)" ]; then
+  KEPT=$(sed -n 's/^error: cannot store \([0-9a-f]\{7,\}\).*/\1/p' "$PARENT/merge.err" | head -1)
+  [ -n "$KEPT" ] || KEPT=$(sed -n 's/^Created autostash: \([0-9a-f]\{7,\}\).*/\1/p' "$PARENT/merge.out" | head -1)
+  KEPT=$(git -C "$REPO" rev-parse -q --verify "${KEPT:-none}^{commit}" 2>/dev/null)
+  if [ -z "$KEPT" ]; then
+    cat "$PARENT/merge.err" >&2
+    echo "FF refused: local edits conflicted with $SHA and the autostash commit could not be found; HEAD is $SHA with conflict markers left for you to resolve"
+    exit 3
+  fi
+  WHERE="refs/stash"
+  if [ "$(git -C "$REPO" rev-parse -q --verify refs/stash 2>/dev/null)" != "$KEPT" ]; then
+    WHERE="refs/gstack-autostash/$(date -u +%Y%m%dT%H%M%SZ)"
+    if ! git -C "$REPO" update-ref "$WHERE" "$KEPT" 2>/dev/null; then
+      cat "$PARENT/merge.err" >&2
+      echo "FF refused: local edits conflicted with $SHA and autostash $KEPT could not be anchored; HEAD is $SHA with conflict markers left for you to resolve"
+      exit 3
+    fi
+  fi
   git -C "$REPO" reset -q --hard
-  echo "AUTOSTASH_KEPT $STASH_AFTER: local edits conflicted with $SHA; the tree was reset to it and the edits kept in that stash"
+  echo "AUTOSTASH_KEPT $KEPT: local edits conflicted with $SHA; the tree was reset to it and the edits kept at $WHERE"
   MERGE_RC=0
 fi
 NOW=$(git -C "$REPO" rev-parse --verify -q HEAD 2>/dev/null)
