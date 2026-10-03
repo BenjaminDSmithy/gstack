@@ -47,6 +47,12 @@ export interface GbrainSourceRow {
   local_path?: string;
   page_count?: number;
   config?: { remote_url?: string | null } | null;
+  /**
+   * The source's persisted `sources.config.strategy`, or null when none is
+   * persisted. Only a gbrain with `sources set-strategy` emits the key, so its
+   * ABSENCE is the capability signal (see sourceStrategy).
+   */
+  strategy?: string | null;
 }
 
 /**
@@ -265,11 +271,11 @@ export async function ensureSourceRegistered(
 }
 
 /**
- * Get page_count for a registered source. Returns null if source is absent or if
- * page_count is missing/invalid in the JSON. Used by the verdict block + preamble
- * variant selection.
+ * The `gbrain sources list --json` row for <id>, or null when the call fails,
+ * the output is not JSON, or the source is not listed. Readers that must tell
+ * those cases apart use probeSource instead.
  */
-export function sourcePageCount(id: string, env?: NodeJS.ProcessEnv): number | null {
+function listedSource(id: string, env?: NodeJS.ProcessEnv): GbrainSourceRow | null {
   let stdout: string;
   try {
     const inv = gbrainInvocation(["sources", "list", "--json"]);
@@ -286,13 +292,64 @@ export function sourcePageCount(id: string, env?: NodeJS.ProcessEnv): number | n
   }
 
   try {
-    const match = parseSourcesList(JSON.parse(stdout)).find((s) => s.id === id);
-    if (!match) return null;
-    if (typeof match.page_count !== "number") return null;
-    return match.page_count;
+    return parseSourcesList(JSON.parse(stdout)).find((s) => s.id === id) ?? null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Get page_count for a registered source. Returns null if source is absent or if
+ * page_count is missing/invalid in the JSON. Used by the verdict block + preamble
+ * variant selection.
+ */
+export function sourcePageCount(id: string, env?: NodeJS.ProcessEnv): number | null {
+  const match = listedSource(id, env);
+  if (!match || typeof match.page_count !== "number") return null;
+  return match.page_count;
+}
+
+/** The per-source sync strategies gbrain persists in `sources.config.strategy`. */
+export type SourceStrategy = "markdown" | "code" | "auto";
+
+/**
+ * What gbrain reports about a source's persisted strategy:
+ *   - a SourceStrategy — persisted; `gbrain sync --source <id>` without
+ *     `--strategy` uses it.
+ *   - "unset"       — nothing persisted (or a value gbrain ignores). A sync
+ *     without `--strategy` then falls back to markdown.
+ *   - "unsupported" — the row carries no `strategy` key (a gbrain without
+ *     `sources set-strategy`), or the list call failed, or the source is not
+ *     listed. The persisted value can be neither read nor written.
+ */
+export type StrategyReading = SourceStrategy | "unset" | "unsupported";
+
+export function sourceStrategy(id: string, env?: NodeJS.ProcessEnv): StrategyReading {
+  const match = listedSource(id, env);
+  if (!match || !Object.prototype.hasOwnProperty.call(match, "strategy")) return "unsupported";
+  const s = match.strategy;
+  return s === "markdown" || s === "code" || s === "auto" ? s : "unset";
+}
+
+/**
+ * Persist <strategy> as source <id>'s sync strategy via
+ * `gbrain sources set-strategy`. Returns null on success, else the reason.
+ */
+export function setSourceStrategy(
+  id: string,
+  strategy: SourceStrategy,
+  env?: NodeJS.ProcessEnv,
+): string | null {
+  const inv = gbrainInvocation(["sources", "set-strategy", id, strategy]);
+  const r = spawnSync(inv.cmd, inv.argv, {
+    encoding: "utf-8",
+    timeout: 30_000,
+    env,
+    shell: inv.shell, // #1731: gbrain is a .cmd shim on Windows (+#2471 quoting)
+  });
+  if (r.status === 0) return null;
+  const tail = (r.stderr || r.stdout || "").trim().split("\n").pop();
+  return tail || (r.error ? r.error.message : `exit ${r.status}`);
 }
 
 /**
