@@ -364,12 +364,21 @@ describe('hook-syntax: line endings', () => {
       'flagged.sh': '#!/bin/bash\necho flagged\n',
       'notes.md': '# notes\nplain text\n',
       'g[l]ob.sh': '#!/usr/bin/env bash\necho glob\n',
+      'readonly.sh': '#!/bin/bash\necho readonly\n',
     };
     for (const [name, body] of Object.entries(lf)) fs.writeFileSync(path.join(repo, name), body, { mode: 0o755 });
+    // A healed script keeps its mode, executable or not.
+    fs.chmodSync(path.join(repo, 'clean.sh'), 0o755);
+    fs.chmodSync(path.join(repo, 'g[l]ob.sh'), 0o644);
+    fs.chmodSync(path.join(repo, 'readonly.sh'), 0o555);
     expect(g('add', '.').status).toBe(0);
     expect(g('-c', 'user.email=you@example.com', '-c', 'user.name=t', 'commit', '-qm', 'init').status).toBe(0);
     const crlf = (body: string) => body.replace(/\n/g, '\r\n');
     for (const name of ['clean.sh', 'notes.md', 'g[l]ob.sh']) fs.writeFileSync(path.join(repo, name), crlf(lf[name]));
+    // A read-only script, left CRLF: written through a brief owner-write bit.
+    fs.chmodSync(path.join(repo, 'readonly.sh'), 0o755);
+    fs.writeFileSync(path.join(repo, 'readonly.sh'), crlf(lf['readonly.sh']));
+    fs.chmodSync(path.join(repo, 'readonly.sh'), 0o555);
     fs.writeFileSync(path.join(repo, 'edited.sh'), '#!/bin/bash\r\necho local change\r\n');
     expect(g('update-index', '--assume-unchanged', 'flagged.sh').status).toBe(0);
     fs.writeFileSync(path.join(repo, 'flagged.sh'), '#!/bin/bash\r\necho hidden local edit\r\n');
@@ -378,13 +387,17 @@ describe('hook-syntax: line endings', () => {
     // A UTF-8 locale, as on a default macOS shell: bash 3.2 must not collate
     // the ordinary `H` tag into the assume-unchanged range.
     const utf8 = { ...env, LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' };
-    const r = spawnCaptured('/bin/bash', [path.join(ROOT, 'scripts', 'heal-eol.sh'), repo], { env: utf8 });
+    // Under setup's own `umask 077`, which a fresh temp file would inherit.
+    const r = spawnCaptured('/bin/bash', ['-c', 'umask 077; exec /bin/bash "$0" "$1"', path.join(ROOT, 'scripts', 'heal-eol.sh'), repo], { env: utf8 });
     fs.rmSync(path.join(repo, '.git', 'index.lock'), { force: true });
     expect(r.status).toBe(0);
     expect(r.stderr).toContain('rewrote clean.sh');
     expect(fs.readFileSync(path.join(repo, 'clean.sh'), 'utf-8')).toBe(lf['clean.sh']);
-    expect(fs.statSync(path.join(repo, 'clean.sh')).mode & 0o111).not.toBe(0);
+    expect(fs.statSync(path.join(repo, 'clean.sh')).mode & 0o777).toBe(0o755);
     expect(fs.readFileSync(path.join(repo, 'g[l]ob.sh'), 'utf-8')).toBe(lf['g[l]ob.sh']);
+    expect(fs.statSync(path.join(repo, 'g[l]ob.sh')).mode & 0o777).toBe(0o644);
+    expect(fs.readFileSync(path.join(repo, 'readonly.sh'), 'utf-8')).toBe(lf['readonly.sh']);
+    expect(fs.statSync(path.join(repo, 'readonly.sh')).mode & 0o777).toBe(0o555);
     // Not a shell script: outside the gate's concern, left alone.
     expect(fs.readFileSync(path.join(repo, 'notes.md'), 'utf-8')).toBe(crlf(lf['notes.md']));
     // Real edits, visible or hidden behind assume-unchanged, are never touched.

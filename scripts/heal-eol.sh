@@ -17,7 +17,7 @@
 #
 # How: the bytes a fresh checkout would write come from
 # `git cat-file --filters`, go to a temp file beside the original (carrying its
-# exec bit), and replace it with one `mv`. Nothing is deleted first, no
+# mode), and replace it with one `mv`. Nothing is deleted first, no
 # checkout runs, no hook fires, and a failure leaves the original exactly as it
 # was and says so. Best effort: no git, not a work tree, or nothing to heal is
 # a silent exit 0; the hook parse gate still judges the tree afterwards.
@@ -67,9 +67,20 @@ while IFS= read -r -d '' entry; do
   esac
   git -C "$root" diff --quiet -- "$path" 2>/dev/null || continue
   tmp="$file.heal-eol.$$"
-  if git -C "$root" cat-file --filters --path="$path" ":0:$path" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
-    [ -x "$file" ] && chmod +x "$tmp"
-    if mv -f "$tmp" "$file"; then
+  # The temp copy starts as `cp -p` of the original, so it has the original's
+  # mode; the redirect then rewrites its bytes and keeps that mode. A new file
+  # would get setup's `umask 077` instead, and a healed 0755 script would come
+  # out 0700, unreadable to every other user of a shared install. A read-only
+  # original copies as read-only, so the owner-write bit is lifted for the
+  # rewrite and put back before the swap.
+  ro=0
+  if cp -p "$file" "$tmp" 2>/dev/null; then
+    if [ ! -w "$tmp" ]; then
+      ro=1
+      chmod u+w "$tmp" 2>/dev/null
+    fi
+    if git -C "$root" cat-file --filters --path="$path" ":0:$path" > "$tmp" 2>/dev/null && [ -s "$tmp" ] &&
+      { [ "$ro" -eq 0 ] || chmod u-w "$tmp"; } && mv -f "$tmp" "$file"; then
       printf 'heal-eol: rewrote %s with LF line endings\n' "$path" >&2
       healed=$((healed + 1))
       continue
