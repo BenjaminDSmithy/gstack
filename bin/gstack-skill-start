@@ -72,7 +72,7 @@ fi
 
 _SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
 _BIN="$_SCRIPT_DIR"
-. "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+[ -r "$(dirname "$0")/gstack-state-root.sh" ] && . "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
 gstack_state_root_select
 _GH="$_gstack_sr_root"
 
@@ -318,7 +318,7 @@ if [ -d "$_GH/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
   if [ "$_BRAIN_DO_PULL" = "1" ]; then
     # Daily artifacts pull is a brain-sync-class sink: receipt-before-send,
     # fail-closed (same wiring as bin/gstack-brain-sync's fetch/push).
-    . "$_BIN/gstack-egress-lib.sh" 2>/dev/null || true
+    [ -r "$_BIN/gstack-egress-lib.sh" ] && . "$_BIN/gstack-egress-lib.sh" 2>/dev/null || true
     _PULL_HOST=$(cd "$_GH" 2>/dev/null && git remote get-url origin 2>/dev/null | sed -E 's|^[a-z+]+://([^/@]*@)?([^/:]+).*|\2|; s|^([^@]+@)?([^:]+):.*|\2|' | head -1)
     if command -v _receipted_git >/dev/null 2>&1; then
       # Non-interactive + slow-network bounded (same guards as gstack-update-check):

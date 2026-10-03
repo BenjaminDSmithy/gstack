@@ -29,7 +29,7 @@ set +e
 GSTACK_DIR="${GSTACK_DIR:-$HOME/.claude/skills/gstack}"
 # Hook: source the state-root twin (never spawn gstack-paths); a broken
 # install exits 0 silently, like every other error here.
-. "$(cd "$(dirname "$0")" && pwd)/gstack-state-root.sh" 2>/dev/null || exit 0  # best-effort: must never block a session start
+[ -r "$(cd "$(dirname "$0")" && pwd)/gstack-state-root.sh" ] && . "$(cd "$(dirname "$0")" && pwd)/gstack-state-root.sh" 2>/dev/null || exit 0  # best-effort: must never block a session start
 STATE_DIR="$(gstack_state_root; printf x)"; STATE_DIR="${STATE_DIR%x}"
 
 # Egress receipt helpers (_receipted_git): fail-open — an update pull must
