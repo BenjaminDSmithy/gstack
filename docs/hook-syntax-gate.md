@@ -46,9 +46,11 @@ the skill is active:
 | `bin/gstack-verify-gate` | Stop | `gstack-verify-gate`, by hand |
 | `careful/bin/check-careful.sh` | **PreToolUse** | /careful, /guard frontmatter |
 | `freeze/bin/check-freeze.sh` | **PreToolUse** | /freeze, /guard, /investigate frontmatter |
+| `autoplan/bin/phase-publication-hook` | **PreToolUse** | /autoplan frontmatter, injected when `SKILL.md` is generated |
 
 `test/hook-syntax.test.ts` derives this list from those two sources rather than
-typing it out, so a hook added to either is covered without editing the test.
+typing it out, reading both a skill's template and its generated `SKILL.md`, so
+a hook added to either is covered without editing the test.
 
 ## Where it runs
 
@@ -191,8 +193,10 @@ from 494 to 643 seconds in the same load window, still 19 pass, 0 fail.
   `.tmpl` is invisible here, unless a bun payload imports it.
 * **A parse is not a run.** A hook that parses and then fails at runtime is out
   of scope.
-* **A shim that reaches bun any other way** than `bun "$HERE/<path>"` has its
-  payload unchecked; the shim itself is still parsed.
+* **A shim that reaches bun any other way** than `bun "$VAR/<path>"`, with
+  `VAR` set from the shim's own directory (`$HERE`, or `/autoplan`'s
+  `$_AUTOPLAN_HOOK_DIR`), has its payload unchecked; the shim itself is still
+  parsed.
 * **An interpreter that is absent or cannot run** (`python3`, `bun`, a `PATH`
   bash) is reported as a coverage gap for the parse, never counted as a pass
   and never as a parse failure; the content scans still run. A shell or bun
