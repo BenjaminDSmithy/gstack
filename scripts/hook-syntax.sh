@@ -390,18 +390,32 @@ _hook_syntax_visit() {
 
 # Visit every file under a directory. $1 = directory.
 _hook_syntax_walk() {
-  local dir="$1" rc=0 f name prune=''
+  local dir="$1" rc=0 f name n=0 prune=''
   if [ ! -d "$dir" ]; then
     printf 'hook-syntax: no such directory: %s\n' "$dir" >&2
     return 1
   fi
+  # One physical spelling of the root. find does not descend a symlinked
+  # starting point on its own, and the live install (~/.claude/skills/gstack)
+  # is one; every path the sweep compares below must share this prefix.
+  dir="$(cd "$dir" 2>/dev/null && pwd -P)" || {
+    printf 'hook-syntax: cannot enter %s\n' "$1" >&2
+    return 1
+  }
   for name in $HOOK_SYNTAX_PRUNE_NAMES; do
     prune="$prune -o -name $name"
   done
   # shellcheck disable=SC2086
   while IFS= read -r -d '' f; do
+    n=$((n + 1))
     _hook_syntax_visit "$f" || rc=1
-  done < <(find -H "$dir" \( ${prune# -o } \) -prune -o -type f -print0 2>/dev/null | sort -z)
+  done < <(find "$dir" \( ${prune# -o } \) -prune -o -type f -print0 2>/dev/null | sort -z)
+  # A sweep that found no file at all checked nothing; never let that read
+  # green.
+  if [ "$n" -eq 0 ]; then
+    printf 'hook-syntax: no files found under %s — nothing was checked\n' "$dir" >&2
+    rc=1
+  fi
   return "$rc"
 }
 
