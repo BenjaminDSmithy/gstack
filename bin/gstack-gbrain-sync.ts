@@ -89,6 +89,7 @@ interface CodeStageDetail {
     | "failed"
     | "refused-autopilot"
     | "refused-reclone"
+    | "refused-strategy-unreadable"
     | "refused-egress-receipt"
     | "skipped-policy-read-only"
     | "refused-policy-deny"
@@ -1130,12 +1131,17 @@ const WALK_STRATEGY_PREVIEW =
   "(the source's persisted strategy; persists code first when unset; --strategy code when gbrain lacks sources set-strategy)";
 
 export interface CodeWalkStrategy {
-  /** argv for the walk after `sync`: [] lets gbrain use the persisted strategy. */
-  args: string[];
+  /**
+   * argv for the walk after `sync`: [] lets gbrain use the persisted strategy.
+   * null means the walk must not run (see refusal).
+   */
+  args: string[] | null;
   /** Set when gstack persisted `code` itself, for the stage log. */
   note?: string;
   /** Set when persisting `code` failed; the walk keeps `--strategy code`. */
   warning?: string;
+  /** Set, with args null, when gbrain did not report the source's strategy. */
+  refusal?: string;
 }
 
 /**
@@ -1158,6 +1164,10 @@ export interface CodeWalkStrategy {
  *   - no strategy surface    → `--strategy code`, as before (a gbrain whose
  *     (or a failed write)      `sources list --json` rows lack `strategy`
  *                              has no `sources set-strategy` either).
+ *   - strategy unreadable    → refuse the walk. The list call failed or did
+ *                              not list the source, so a persisted `auto`
+ *                              cannot be ruled out, and `--strategy code`
+ *                              would override it. The next run retries.
  */
 export function codeWalkStrategy(
   sourceId: string,
@@ -1169,6 +1179,9 @@ export function codeWalkStrategy(
   const explicit = ["--strategy", "code"];
 
   const reading = read(sourceId, env);
+  if (reading === "unreadable") {
+    return { args: null, refusal: `gbrain sources list did not report ${sourceId}, so its persisted strategy is unknown` };
+  }
   if (reading === "unsupported") return { args: explicit };
   if (reading !== "unset") return { args: [] };
 
@@ -1356,6 +1369,22 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
     };
   }
 
+  // The walk's `--strategy` argv. No flag once the source has one persisted
+  // (codeWalkStrategy); refused here, with the other guards, when gbrain did
+  // not report the source's strategy.
+  const strategy = codeWalkStrategy(sourceId, gbrainEnv);
+  if (strategy.args === null) {
+    return {
+      name: "code", ran: true, ok: false, duration_ms: Date.now() - t0,
+      summary: `refused: ${strategy.refusal}. Re-run /sync-gbrain once \`gbrain sources list --json\` lists the source.`,
+      detail: { source_id: sourceId, source_path: root, status: "refused-strategy-unreadable" },
+    };
+  }
+  if (!args.quiet) {
+    if (strategy.warning) console.error(`[sync:code] ${strategy.warning}`);
+    if (strategy.note) console.error(`[sync:code] ${strategy.note}`);
+  }
+
   // Egress receipt BEFORE the code walk (fail-closed): the walk ships repo
   // content to the user's gbrain DB, which may be a remote Postgres. The
   // gbrain subprocess owns the wire bytes, so the receipt is content-free
@@ -1397,13 +1426,6 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
   // --no-pull always (#2985): gstack indexes the user's working checkout and
   // never wants gbrain to pull or rebase it, and managed gbrain (>= 0.51)
   // refuses `sync` without it. Every supported gbrain accepts the flag.
-  //
-  // No `--strategy` once the source has one persisted (codeWalkStrategy).
-  const strategy = codeWalkStrategy(sourceId, gbrainEnv);
-  if (!args.quiet) {
-    if (strategy.warning) console.error(`[sync:code] ${strategy.warning}`);
-    if (strategy.note) console.error(`[sync:code] ${strategy.note}`);
-  }
   const walkArgs = ["sync", ...strategy.args, "--source", sourceId, "--no-pull"];
   if (args.mode === "full") walkArgs.push("--full", "--yes");
   const walkResult = await runGbrainStreaming(walkArgs, { quiet: args.quiet, timeoutMs: codeTimeoutMs, env: gbrainEnv });
