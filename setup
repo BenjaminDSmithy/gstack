@@ -313,7 +313,9 @@ SOURCE_GSTACK_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 # REFUSE before this tree's own code is sourced or built, and before anything is
 # linked, copied or registered. The one step that runs first is heal-eol.sh
 # below, which rewrites only tracked, unmodified shell files that an old CRLF
-# checkout left CRLF. setup wires gstack hooks into
+# checkout left CRLF. (`./setup --status`, near the top, sources two tree
+# scripts to print the install table and exits; it installs nothing and
+# registers nothing.) setup wires gstack hooks into
 # ~/.claude/settings.json by path, and a hook that does not parse exits 2 —
 # which Claude Code reads as "block". A broken PreToolUse hook fails every
 # matching tool call in every session on the machine, not just gstack's.
