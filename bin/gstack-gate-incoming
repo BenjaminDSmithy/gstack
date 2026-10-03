@@ -134,6 +134,16 @@ if [ ! -r "$CHECKER" ]; then
 fi
 GATE_BASH=/bin/bash
 [ -x "$GATE_BASH" ] || GATE_BASH="${BASH:-bash}"
+# The report names files by the throwaway tree's path, which is gone once
+# this exits; pass them on relative to the tree instead.
+TREE_P=$(cd "$TREE" && pwd -P)
+report() {
+  awk -v a="$TREE_P/" -v b="$TREE/" '{
+    while ((i = index($0, a)) > 0) $0 = substr($0, 1, i - 1) substr($0, i + length(a))
+    while ((i = index($0, b)) > 0) $0 = substr($0, 1, i - 1) substr($0, i + length(b))
+    print
+  }' "$PARENT/report"
+}
 
 # Polled rather than waited on, so a hung checker cannot hold the caller (and
 # the session-update lock it keeps alive) forever. Job control is on just for
@@ -159,7 +169,7 @@ RC=$?
 GATE_PID=""
 
 if [ "$TIMED_OUT" -eq 1 ]; then
-  cat "$PARENT/report" >&2
+  report >&2
   echo "HOOK_GATE no-verdict $SHA: the $FROM checker ran past ${LIMIT}s and was stopped"
   exit 2
 fi
@@ -167,17 +177,17 @@ case "$RC" in
   0)
     # Silent on a healthy tree; anything else it said (a coverage gap such as
     # "bun absent ... NOT checked") is passed on, never swallowed.
-    grep -v '^hook-syntax: [0-9]* \(checked\|nested\)' "$PARENT/report" >&2
+    report | grep -v '^hook-syntax: [0-9]* \(checked\|nested\)' >&2
     COVERAGE=$(grep -m1 '^hook-syntax: [0-9]* checked' "$PARENT/report" 2>/dev/null)
     echo "HOOK_GATE clean $SHA: ${COVERAGE:-hook-syntax: no coverage line} ($FROM checker)"
     ;;
   1)
-    grep -v '^hook-syntax: [0-9]* \(checked\|nested\)' "$PARENT/report" >&2
+    report | grep -v '^hook-syntax: [0-9]* \(checked\|nested\)' >&2
     echo "HOOK_GATE blocked $SHA: a file in the incoming tree does not parse, or is half-merged"
     exit 1
     ;;
   *)
-    cat "$PARENT/report" >&2
+    report >&2
     echo "HOOK_GATE no-verdict $SHA: $GATE_BASH exited $RC on the $FROM checker, which exits only 0 or 1"
     exit 2
     ;;
