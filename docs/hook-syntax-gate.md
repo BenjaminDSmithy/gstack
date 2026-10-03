@@ -62,11 +62,37 @@ the first `source`, the first `bun` call and the first `mkdir`/`ln`/`cp`. The
 test pins that twice: functionally (a refusal leaves the scratch `HOME` empty)
 and statically.
 
+It runs the gate with `/bin/bash` when that exists, and otherwise with `$BASH`,
+the bash already running `setup` (NixOS, FreeBSD and Guix have no `/bin/bash`).
+It never falls back to a bare `PATH` bash first, which on macOS is Homebrew's
+5.x and can deadlock writing a heredoc body. The gate exits only 0 or 1, and
+`setup` reads the exit three ways:
+
+| Gate exit | `setup` says | Means |
+| --- | --- | --- |
+| 0 | nothing | clean |
+| 1 | "a file that does not parse, or one that is still half-merged" | the report above it names the file |
+| anything else | "the hook parse gate could not run (… exited N …)" | nothing was checked: 126/127 when the interpreter could not exec it, 2 when an old bash in POSIX mode (`sh ./setup`) rejects its process substitution |
+
+Each of the last two is a refusal.
+
 **A missing checker is a refusal, not a warning.** The setup block and
 `scripts/hook-syntax.sh` ship in the same commit, so an older checkout has
 neither; a checkout with the block and without the checker is partial or
 half-merged — the state the gate exists to catch. Deleting the checker is not a
 way past it.
+
+**Stale CRLF copies are healed first.** `.gitattributes` pins every tracked
+shell script to LF, and `test/hook-syntax.test.ts` enumerates them, so a new
+one cannot land unpinned. An install checked out on Windows with
+`core.autocrlf=true` before those pins existed still holds CRLF copies, and
+`git pull` never rewrites a file whose blob did not change. Just before the
+gate, `setup` runs `scripts/heal-eol.sh`, which rewrites exactly those files:
+tracked, LF in the index, `eol=lf` by attribute, CRLF in the working tree, a
+shell shebang, not flagged assume-unchanged or skip-worktree, and no content
+change. The bytes come from `git cat-file --filters` and replace the file with
+one `mv`, so nothing is deleted first and a failure leaves the original as it
+was. It is the one write the setup block makes before the gate's verdict.
 
 ## What it checks
 
@@ -95,11 +121,31 @@ The sweep reads the first line of every file in the tree and dispatches on the
   in a comment is not a false positive. The unlabelled `=` separator is not
   scanned: it is indistinguishable from a banner rule, and a real conflict
   writes the labelled markers too.
+* **Carriage returns** — a CR byte anywhere in a shell file is refused. `bash -n`
+  accepts plenty of CRLF scripts, but bash keeps the `\r` on every line at run
+  time: `exec bun "$HERE/x.ts"` names `x.ts\r`. A CRLF shebang is stripped
+  before dispatch, so such a file is classified and refused, never skipped.
+  Python reads CRLF source fine and is compiled as usual.
 * **Shebang-less shell libraries** — the one rule that reads a name. A file
   with no `#!` line at all whose name ends in `.sh` is parsed as bash: it is a
   sourced library, and `bin/gstack-egress-lib.sh`, sourced by the SessionStart
   hook, is one. A file with any shebang is dispatched on the shebang alone.
 * **Everything else is skipped**, and skipped is never counted as checked.
+
+An interpreter that is present but cannot run — an asdf, mise or pyenv shim
+with no version selected, or the xcode-select `python3` stub — is a coverage
+gap, not a parse failure. `python3 -c pass` and `bun --version` are probed once
+per run, and a file handed to one that fails is reported as `NOT checked`.
+
+The sweep itself fails rather than reading green when it could not look:
+
+* a directory it cannot read or search, because everything under it would be
+  invisible
+* a sweep that found no file at all
+* a path that does not exist
+
+A symlinked root is resolved and swept through: the live install,
+`~/.claude/skills/gstack`, is often a symlink.
 
 Silent on a healthy tree. Coverage is printed only on request:
 
@@ -107,14 +153,22 @@ Silent on a healthy tree. Coverage is printed only on request:
 /bin/bash scripts/hook-syntax.sh --report
 ```
 
-When this landed that printed `hook-syntax: 115 checked, 2687 skipped`, and a
-full sweep took 23 seconds of wall clock at a load average of 175 — the
-per-file pass forks once (the parse), and both content scans run once per sweep.
+Measured 2026-10-03: on upstream v1.91.13 that printed `hook-syntax: 115
+checked, 2687 skipped`, and a full sweep took 23 seconds of wall clock at a
+load average of 175. The per-file pass forks once (the parse), and every
+content scan runs once per sweep. Every `setup` run pays for one sweep, 8–14
+seconds at a load average near 150, almost all of it the per-file parses. That
+adds up in tests that run `setup` repeatedly: `setup-codex-scope.test.ts` went
+from 494 to 643 seconds in the same load window, still 19 pass, 0 fail.
 
 ## What it does NOT cover — read no wider claim into it
 
 * **Scope is the tree it is pointed at**, minus `node_modules`, `.git`, `dist`,
   `.build`, `__pycache__` and `.venv`.
+* **Nested checkouts are not swept.** A directory holding its own `.git` —
+  a worktree such as `.claude/worktrees/<name>`, or a clone — is another
+  branch's files, and a conflict there must not refuse this install. `--report`
+  counts them.
 * **TypeScript and JavaScript no shim reaches are skipped.** The type checker
   and the test suite own those.
 * **Skipped files are not marker-scanned.** A half-merged `.md`, `.json` or
@@ -156,18 +210,19 @@ and trades a safety guard silently not running for the machine staying usable.
 
 ## Mutation results
 
-Thirteen named regressions were injected into the checker and `setup`, one at
-a time. Each edit was asserted to have applied before the suite ran, because an
-edit that silently misses reads as a survivor that proves nothing. All thirteen
-are killed:
+Twenty-five named regressions were injected into the checker, `setup`,
+`scripts/heal-eol.sh` and `.gitattributes`, one at a time, against the whole
+of `test/hook-syntax.test.ts`. Each edit was asserted to have applied before the
+suite ran, because an edit that silently misses reads as a survivor that proves
+nothing. All twenty-five are killed:
 
 | Injected regression | Cases that fail |
 | --- | --- |
 | marker scan removed | 20 |
 | sweep made non-recursive | 6 |
 | skipped files counted as checked | 5 |
-| dispatch keyed on extension instead of shebang | 46 |
-| bun payload arm removed | 21 |
+| dispatch keyed on extension instead of shebang | 52 |
+| bun payload arm removed | 23 |
 | unlabelled `=` added to the marker scan | 3 |
 | every shell file parsed by one PATH bash | 1 |
 | shebang-less `.sh` rule removed | 2 |
@@ -175,11 +230,23 @@ are killed:
 | python SyntaxWarning no longer an error | 1 |
 | `setup` warns instead of refusing | 2 |
 | `setup` tolerates a missing checker | 1 |
-| gate moved below `setup`'s first write | 4 |
+| gate moved below `setup`'s first write | 6 |
+| interpreter probe removed (a shim that cannot run reads as a parse failure) | 2 |
+| a sweep that found nothing allowed to pass | 2 |
+| nested checkouts swept | 2 |
+| glob characters in a nested-checkout path left unescaped | 1 |
+| directory access check removed | 2 |
+| carriage-return scan removed | 3 |
+| CRLF shebang no longer stripped for dispatch | 3 |
+| `setup` reads every non-zero gate exit as a parse failure | 2 |
+| `setup` no longer heals CRLF copies before the gate | 1 |
+| LF pin for the hook shims removed from `.gitattributes` | 1 |
+| gate exits 3 instead of 1 | 33 |
+| heal-eol rewrites any CRLF file, not only shell scripts | 1 |
 
-`setup` warns instead of refusing survived the first pass: in a minimal fixture
+`setup` warns instead of refusing survived a first pass: in a minimal fixture
 tree, `setup` died one line after the gate anyway. The fixture now carries a stub
-for the first file `setup` sources after the gate, and every refusal case
+for the first tree code `setup` runs after the gate, and every refusal case
 asserts the stub was never reached.
 
 Two kills depend on the machine. The one-interpreter case needs a `/bin/bash`
