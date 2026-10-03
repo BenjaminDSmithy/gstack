@@ -167,6 +167,47 @@ fi
 
 INSTALL_GSTACK_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_GSTACK_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+
+# ─── Hook parse gate ─────────────────────────────────────────
+# REFUSE before anything in this tree is sourced or run, and before anything is
+# written, linked, copied or registered. setup wires gstack hooks into
+# ~/.claude/settings.json by path, and a hook that does not parse exits 2 —
+# which Claude Code reads as "block". A broken PreToolUse hook fails every
+# matching tool call in every session on the machine, not just gstack's.
+# See docs/hook-syntax-gate.md.
+#
+# Position is load-bearing: this sits above the first source, the first bun
+# call and the first mkdir/ln/cp, so a broken tree cannot be half-installed.
+# test/hook-syntax.test.ts pins that functionally (a refusal leaves HOME empty)
+# and statically.
+#
+# Silent on a healthy tree. `/bin/bash`, never a bare `bash`: a PATH bash on
+# macOS is Homebrew's 5.x, which reopens the heredoc deadlock the
+# BASH_COMPAT guard at the top of this file closes.
+HOOK_SYNTAX_GATE="$SOURCE_GSTACK_DIR/scripts/hook-syntax.sh"
+if [ ! -r "$HOOK_SYNTAX_GATE" ]; then
+  # Deleting the checker must not be a way past it. This block and the
+  # checker ship in the same commit, so an older checkout has neither; a
+  # missing checker means a partial or half-merged tree, which is exactly what
+  # the gate exists to catch.
+  echo "REFUSING TO REGISTER: the hook parse gate is missing." >&2
+  echo "  expected: $HOOK_SYNTAX_GATE" >&2
+  echo "" >&2
+  echo "This checkout is incomplete. gstack registers hooks into" >&2
+  echo "~/.claude/settings.json and will not do that unchecked. Restore the file" >&2
+  echo "(git checkout -- scripts/hook-syntax.sh, or re-clone) and re-run ./setup." >&2
+  exit 1
+fi
+if ! /bin/bash "$HOOK_SYNTAX_GATE" "$SOURCE_GSTACK_DIR"; then
+  echo "" >&2
+  echo "REFUSING TO REGISTER: the checks above found a file that does not parse," >&2
+  echo "or one that is still half-merged. Nothing has been installed." >&2
+  echo "" >&2
+  echo "gstack registers hooks into ~/.claude/settings.json, one of them PreToolUse." >&2
+  echo "A hook that does not parse blocks tool calls in every session on this machine." >&2
+  echo "Fix the file named above, then re-run ./setup." >&2
+  exit 1
+fi
 INSTALL_SKILLS_DIR="$(dirname "$INSTALL_GSTACK_DIR")"
 BROWSE_BIN="$SOURCE_GSTACK_DIR/browse/dist/browse"
 CODEX_SKILLS="${CODEX_HOME:-$HOME/.codex}/skills"
