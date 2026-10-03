@@ -518,11 +518,13 @@ function blockAfter(marker: string): string {
   return TEMPLATE.slice(at).match(/```bash\n([\s\S]*?)\n```/)![1].replaceAll('{{SETUP_COMMAND}}', './setup');
 }
 
-function runBlock(fx: Fx, marker: string) {
+// HOME is the fixture's, so ~/.claude/skills/gstack (the running skill the
+// block tries first) is whatever the test puts there, never the live install.
+function runBlock(fx: Fx, marker: string, home = path.join(fx.base, 'home')) {
   const r = spawnSync('bash', ['-c', blockAfter(marker)], {
     cwd: fx.base,
     encoding: 'utf8',
-    env: { ...GIT_ENV, INSTALL_DIR: fx.install, TMPDIR: fx.tmp, SETUP_MARK: fx.mark },
+    env: { ...GIT_ENV, HOME: home, INSTALL_DIR: fx.install, TMPDIR: fx.tmp, SETUP_MARK: fx.mark },
     timeout: SPAWN_TIMEOUT_MS,
   });
   return { code: r.status ?? -1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
@@ -552,15 +554,49 @@ describe('/gstack-upgrade Step 4 gates origin/main before the install moves', ()
     expect(fs.readFileSync(fx.mark, 'utf8')).toBe('ran\n');
   }, TEST_TIMEOUT_MS);
 
-  test('a missing gate helper is named as such, and nothing moves', () => {
+  test('a helper deleted from the install is taken from origin/main', () => {
+    const fx = makeFixture();
+    const sha = advance(fx, { VERSION: '1.1.0\n' });
+    fs.rmSync(path.join(fx.install, 'bin', 'gstack-gate-incoming'));
+    const r = runBlock(fx, '**For git installs**');
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toContain('FF_OK');
+    expect(head(fx)).toBe(sha);
+  }, TEST_TIMEOUT_MS);
+
+  test('an install that predates the helper is gated by the running skill, and refused without one', () => {
+    const fx = makeFixture();
+    // The install and origin/main both lack the helper: an old project copy
+    // upgraded by a newer global skill.
+    const old = advance(fx, { 'bin/gstack-gate-incoming': null }, 'predates the helper');
+    git(fx.install, 'pull', '-q', '--ff-only');
+    expect(head(fx)).toBe(old);
+    const sha = advance(fx, { VERSION: '1.1.0\n' });
+
+    const bare = runBlock(fx, '**For git installs**');
+    expect(bare.code).toBe(1);
+    expect(bare.stderr).toContain('HOOK_GATE_HELPER_MISSING');
+    expect(bare.stderr).toContain('no copy exists');
+    expect(head(fx)).toBe(old);
+
+    const home = path.join(fx.base, 'skill-home');
+    write(home, '.claude/skills/gstack/bin/gstack-gate-incoming', fs.readFileSync(HELPER, 'utf-8'), 0o755);
+    write(home, '.claude/skills/gstack/scripts/hook-syntax.sh', fs.readFileSync(CHECKER, 'utf-8'), 0o755);
+    const r = runBlock(fx, '**For git installs**', home);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toContain('FF_OK');
+    expect(head(fx)).toBe(sha);
+  }, TEST_TIMEOUT_MS);
+
+  test('a helper deleted from an install that ships it gets the restore hint', () => {
     const fx = makeFixture();
     const before = head(fx);
-    advance(fx, { VERSION: '1.1.0\n' });
+    advance(fx, { 'bin/gstack-gate-incoming': null }, 'upstream dropped the helper');
     fs.rmSync(path.join(fx.install, 'bin', 'gstack-gate-incoming'));
     const r = runBlock(fx, '**For git installs**');
     expect(r.code).toBe(1);
     expect(r.stderr).toContain('HOOK_GATE_HELPER_MISSING');
-    expect(r.stderr).not.toContain('HOOK_GATE_REFUSED');
+    expect(r.stderr).toContain('restore it: git -C');
     expect(head(fx)).toBe(before);
     expect(fs.existsSync(fx.mark)).toBe(false);
   }, TEST_TIMEOUT_MS);
