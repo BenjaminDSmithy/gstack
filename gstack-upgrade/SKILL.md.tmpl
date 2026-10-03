@@ -188,7 +188,15 @@ if [ "$UPSTREAM_REF" = origin/stable ] && [ "$(git rev-parse origin/stable)" != 
   && { git merge-base --is-ancestor origin/stable HEAD 2>/dev/null || [ "$(printf '%s\n%s\n' "$(git show origin/stable:VERSION)" "$(cat VERSION)" | sort -V | tail -1)" = "$(cat VERSION)" ]; }; then echo "AHEAD_OF_STABLE"; exit 0; fi
 # Gate the exact commit the channel names, then move only to that commit.
 INCOMING=$(git rev-parse --verify "$UPSTREAM_REF^{commit}") || { echo "FF_STOPPED: cannot resolve $UPSTREAM_REF; nothing was changed" >&2; exit 1; }
-"$INSTALL_DIR/bin/gstack-gate-incoming" "$INSTALL_DIR" "$INCOMING" || { echo "HOOK_GATE_REFUSED: install unchanged at $PRE_UPGRADE_COMMIT (gate exit $?)" >&2; exit 1; }
+"$INSTALL_DIR/bin/gstack-gate-incoming" "$INSTALL_DIR" "$INCOMING"
+_GATE_RC=$?
+if [ "$_GATE_RC" -eq 126 ] || [ "$_GATE_RC" -eq 127 ]; then
+  echo "HOOK_GATE_HELPER_MISSING: $INSTALL_DIR/bin/gstack-gate-incoming could not run (exit $_GATE_RC); install unchanged at $PRE_UPGRADE_COMMIT" >&2
+  exit 1
+elif [ "$_GATE_RC" -ne 0 ]; then
+  echo "HOOK_GATE_REFUSED: install unchanged at $PRE_UPGRADE_COMMIT (gate exit $_GATE_RC)" >&2
+  exit 1
+fi
 FF=$(bash bin/gstack-ff-update . "$INCOMING"); FF_RC=$?
 echo "$FF"
 case "$FF_RC" in
@@ -225,6 +233,8 @@ On `HOOK_GATE_REFUSED`, STOP and quote the `HOOK_GATE` line: `blocked` means
 the new version has a file that does not parse (name it from the report),
 `no-verdict` means the gate could not run. Nothing moved. Never take the
 fallback for it.
+On `HOOK_GATE_HELPER_MISSING`, STOP: nothing moved. Restore the helper with
+`git -C "$INSTALL_DIR" checkout -- bin/gstack-gate-incoming` and re-run.
 On `FETCH_FAILED`, stop for network/auth repair, not reset.
 
 **Fallback (ff-only refused — local commits or divergence).** `git reset
@@ -250,7 +260,7 @@ cd -- "${INSTALL_DIR:?INSTALL_DIR is not set: re-run Step 2 and substitute the p
 # Regenerable render-footprint dirt (setup re-renders it) never goes into the stash.
 git checkout -- 'SKILL.md' '*/SKILL.md' '*/sections/*.md' 2>/dev/null || true
 INCOMING=$(git rev-parse --verify "${UPSTREAM_REF:?UPSTREAM_REF is not set: substitute the value Step 4 printed}^{commit}") || exit 1
-"$INSTALL_DIR/bin/gstack-gate-incoming" "$INSTALL_DIR" "$INCOMING" || { echo "HOOK_GATE_REFUSED: nothing stashed or reset" >&2; exit 1; }
+"$INSTALL_DIR/bin/gstack-gate-incoming" "$INSTALL_DIR" "$INCOMING" || { echo "HOOK_GATE_REFUSED: nothing stashed or reset (gate exit $?)" >&2; exit 1; }
 STASH_OUTPUT=$(git stash 2>&1)
 git reset --hard "$INCOMING"
 {{SETUP_COMMAND}} --refresh-registered
@@ -268,7 +278,7 @@ If `$STASH_OUTPUT` contains "Saved working directory", warn the user: "Note: loc
 [ -e "$INSTALL_DIR.bak" ] && { echo "ERROR: stale backup exists at $INSTALL_DIR.bak (from a previous failed upgrade?) — inspect it, salvage/remove it, then re-run." >&2; exit 1; }
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gstack-upgrade.XXXXXX") || { echo "ERROR: mktemp failed — aborting upgrade (install untouched)." >&2; exit 1; }
 git clone --depth 1 https://github.com/garrytan/gstack.git "$TMP_DIR/gstack" || { echo "ERROR: clone failed — aborting upgrade (install untouched)." >&2; rm -rf "$TMP_DIR"; exit 1; }
-"$INSTALL_DIR/bin/gstack-gate-incoming" "$TMP_DIR/gstack" HEAD || { echo "ERROR: the hook parse gate refused the new version — aborting upgrade (install untouched)." >&2; rm -rf "$TMP_DIR"; exit 1; }
+"$INSTALL_DIR/bin/gstack-gate-incoming" "$TMP_DIR/gstack" HEAD || { echo "ERROR: the hook parse gate refused the new version or could not run (exit $?) — aborting upgrade (install untouched)." >&2; rm -rf "$TMP_DIR"; exit 1; }
 mv "$INSTALL_DIR" "$INSTALL_DIR.bak" || { rm -rf "$TMP_DIR"; exit 1; }
 if mv "$TMP_DIR/gstack" "$INSTALL_DIR"; then
   if (cd "$INSTALL_DIR" && {{SETUP_COMMAND}} --refresh-registered); then

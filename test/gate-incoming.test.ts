@@ -516,6 +516,19 @@ describe('/gstack-upgrade Step 4 gates origin/main before the install moves', ()
     expect(fs.readFileSync(fx.mark, 'utf8')).toBe('ran\n');
   }, TEST_TIMEOUT_MS);
 
+  test('a missing gate helper is named as such, and nothing moves', () => {
+    const fx = makeFixture();
+    const before = head(fx);
+    advance(fx, { VERSION: '1.1.0\n' });
+    fs.rmSync(path.join(fx.install, 'bin', 'gstack-gate-incoming'));
+    const r = runBlock(fx, '**For git installs**');
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('HOOK_GATE_HELPER_MISSING');
+    expect(r.stderr).not.toContain('HOOK_GATE_REFUSED');
+    expect(head(fx)).toBe(before);
+    expect(fs.existsSync(fx.mark)).toBe(false);
+  }, TEST_TIMEOUT_MS);
+
   test('a diverged install routes to the fallback, whose re-gate refuses a broken origin/main before any reset', () => {
     const fx = makeFixture();
     write(fx.install, 'local.txt', 'mine\n');
