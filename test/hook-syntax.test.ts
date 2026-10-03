@@ -738,8 +738,26 @@ describe('setup: the gate refuses before anything is installed', () => {
     expect(homeIsEmpty(home)).toBe(true);
   }, TEST_TIMEOUT_MS);
 
-  test('setup invokes the gate with /bin/bash, never a bare bash', () => {
-    expect(SETUP_SRC).toContain('/bin/bash "$HOOK_SYNTAX_GATE" "$SOURCE_GSTACK_DIR"');
+  for (const code of [2, 127]) {
+    test(`a gate that exits ${code} is "could not run", never "does not parse"`, () => {
+      // 126/127: the interpreter could not exec the checker. 2: an old bash in
+      // POSIX mode rejected its process substitution. Nothing was checked, so
+      // setup still refuses, but must not send anyone hunting for a broken file.
+      const { dir, home } = mkSetupTree();
+      fs.writeFileSync(path.join(dir, 'tree', 'scripts', 'hook-syntax.sh'), `#!/bin/bash\nexit ${code}\n`);
+      const r = runSetup(dir, home);
+      expectRefused(r, home);
+      expect(r.output).toContain('the hook parse gate could not run');
+      expect(r.output).toContain(`exited ${code}`);
+      expect(r.output).not.toContain('does not parse,');
+    }, TEST_TIMEOUT_MS);
+  }
+
+  test('setup prefers /bin/bash, and falls back to the bash running it, never a bare PATH bash first', () => {
+    // No env seam on purpose: an overridable interpreter would let `/bin/true`
+    // stand in for the gate.
+    expect(SETUP_SRC).toContain('_HOOK_SYNTAX_BASH=/bin/bash\n[ -x "$_HOOK_SYNTAX_BASH" ] || _HOOK_SYNTAX_BASH="${BASH:-bash}"');
+    expect(SETUP_SRC).toContain('"$_HOOK_SYNTAX_BASH" "$HOOK_SYNTAX_GATE" "$SOURCE_GSTACK_DIR" || _hook_syntax_rc=$?');
   });
 
   test('the gate runs before setup sources, executes or writes anything', () => {

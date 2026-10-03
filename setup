@@ -235,10 +235,14 @@ SOURCE_GSTACK_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 # test/hook-syntax.test.ts pins that functionally (a refusal leaves HOME empty)
 # and statically.
 #
-# Silent on a healthy tree. `/bin/bash`, never a bare `bash`: a PATH bash on
-# macOS is Homebrew's 5.x, which reopens the heredoc deadlock the
-# BASH_COMPAT guard at the top of this file closes.
+# Silent on a healthy tree. `/bin/bash` when it exists, never a bare `bash`: a
+# PATH bash on macOS is Homebrew's 5.x, which reopens the heredoc deadlock the
+# BASH_COMPAT guard at the top of this file closes. Systems with no /bin/bash
+# (NixOS, FreeBSD, Guix) fall back to $BASH, the bash already running this
+# script, rather than failing to start the gate at all.
 HOOK_SYNTAX_GATE="$SOURCE_GSTACK_DIR/scripts/hook-syntax.sh"
+_HOOK_SYNTAX_BASH=/bin/bash
+[ -x "$_HOOK_SYNTAX_BASH" ] || _HOOK_SYNTAX_BASH="${BASH:-bash}"
 if [ ! -r "$HOOK_SYNTAX_GATE" ]; then
   # Deleting the checker must not be a way past it. This block and the
   # checker ship in the same commit, so an older checkout has neither; a
@@ -252,7 +256,9 @@ if [ ! -r "$HOOK_SYNTAX_GATE" ]; then
   echo "(git checkout -- scripts/hook-syntax.sh, or re-clone) and re-run ./setup." >&2
   exit 1
 fi
-if ! /bin/bash "$HOOK_SYNTAX_GATE" "$SOURCE_GSTACK_DIR"; then
+_hook_syntax_rc=0
+"$_HOOK_SYNTAX_BASH" "$HOOK_SYNTAX_GATE" "$SOURCE_GSTACK_DIR" || _hook_syntax_rc=$?
+if [ "$_hook_syntax_rc" -eq 1 ]; then
   echo "" >&2
   echo "REFUSING TO REGISTER: the checks above found a file that does not parse," >&2
   echo "or one that is still half-merged. Nothing has been installed." >&2
@@ -260,6 +266,18 @@ if ! /bin/bash "$HOOK_SYNTAX_GATE" "$SOURCE_GSTACK_DIR"; then
   echo "gstack registers hooks into ~/.claude/settings.json, one of them PreToolUse." >&2
   echo "A hook that does not parse blocks tool calls in every session on this machine." >&2
   echo "Fix the file named above, then re-run ./setup." >&2
+  exit 1
+elif [ "$_hook_syntax_rc" -ne 0 ]; then
+  # The gate itself exits only 0 or 1. Anything else means it never reached a
+  # verdict: 126/127 when its interpreter could not exec it, 2 when an old bash
+  # in POSIX mode (started as `sh ./setup`) rejects its process substitution.
+  # Still a refusal, because nothing was checked, but not a parse failure: the
+  # message must not send anyone hunting for a broken file that is not there.
+  echo "" >&2
+  echo "REFUSING TO REGISTER: the hook parse gate could not run" >&2
+  echo "  ($_HOOK_SYNTAX_BASH exited $_hook_syntax_rc on $HOOK_SYNTAX_GATE)." >&2
+  echo "Nothing was checked and nothing has been installed. Make sure bash can run" >&2
+  echo "that file, then re-run ./setup." >&2
   exit 1
 fi
 
