@@ -83,7 +83,9 @@
 #
 # WHAT IT DOES NOT COVER — read no wider claim into it.
 #   * Scope is the tree it is pointed at, minus node_modules, .git, dist,
-#     .build, __pycache__ and .venv.
+#     .build, __pycache__ and .venv, and minus any nested checkout (a
+#     directory holding its own .git): another branch's files, not this
+#     install's. `--report` counts them.
 #   * TypeScript and JavaScript a shim does not reach are skipped; the type
 #     checker and the test suite own those.
 #   * Skipped files are not marker-scanned. A half-merged .md, .json or .tmpl
@@ -92,8 +94,9 @@
 #     of scope.
 #   * A shim that reaches bun any other way than `bun "$HERE/<path>"` has its
 #     payload unchecked. The shim itself is still parsed.
-#   * An absent interpreter (python3, bun, a PATH bash) is reported as a
-#     coverage gap, never counted as a pass.
+#   * An interpreter that is absent or cannot run (python3, bun, a PATH bash)
+#     is reported as a coverage gap, never counted as a pass and never as a
+#     parse failure.
 #   * It guards the next install, not the running one. Hooks are registered by
 #     path, so a merge that writes markers into the registered checkout is live
 #     before any test or setup run sees it. docs/hook-syntax-gate.md has the
@@ -103,8 +106,12 @@
 # A gate that chatters on a good tree gets routed around.
 #
 # FORK BUDGET. Under a loaded scheduler a fork costs far more than the work it
-# does, so the per-file pass forks once (the parse) and both content scans run
-# once per sweep over every file the parse pass accepted.
+# does, so the per-file pass forks once (the parse) and every content scan
+# runs once per sweep over every file the parse pass accepted.
+#
+# EXIT. 0 clean, 1 something is broken or could not be looked at. Never
+# anything else: setup and fork-sync read any other code as "the checker could
+# not run".
 #
 # INVOCATION. Spell `/bin/bash`, not a bare `bash`: on macOS a PATH-resolved
 # bash is Homebrew's 5.x, which can deadlock writing a heredoc body. This file
