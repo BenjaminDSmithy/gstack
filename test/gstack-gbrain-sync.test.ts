@@ -18,7 +18,9 @@ import {
   planHostnameFoldMigration,
   sourceLocalPath,
   _resetGbrainSupportsRenameCache,
+  codeWalkStrategy,
 } from "../bin/gstack-gbrain-sync";
+import type { StrategyReading } from "../lib/gbrain-sources";
 
 const SCRIPT = join(import.meta.dir, "..", "bin", "gstack-gbrain-sync.ts");
 
@@ -77,10 +79,11 @@ describe("gstack-gbrain-sync CLI", () => {
 
     const r = runScript(["--dry-run", "--code-only", "--quiet"], { HOME: home, GSTACK_HOME: gstackHome });
     expect(r.exitCode).toBe(0);
-    // Code stage now uses native code surface: sources add + sync --strategy code
+    // Code stage now uses native code surface: sources add + sync on the
+    // source's persisted strategy
     // (NOT gbrain import — that's the markdown-only path that was rejected post-codex).
     expect(r.stdout).toContain("would: gbrain sources add");
-    expect(r.stdout).toContain("gbrain sync --strategy code");
+    expect(r.stdout).toContain("gbrain sync --source ");
     expect(r.stdout).not.toContain("gbrain import");
     // memory + brain-sync stages should not appear
     expect(r.stdout).not.toContain("gstack-memory-ingest --probe");
@@ -96,7 +99,7 @@ describe("gstack-gbrain-sync CLI", () => {
     const r = runScript(["--dry-run"], { HOME: home, GSTACK_HOME: gstackHome });
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("would: gbrain sources add");
-    expect(r.stdout).toContain("gbrain sync --strategy code");
+    expect(r.stdout).toContain("gbrain sync --source ");
     expect(r.stdout).toContain("would: gstack-memory-ingest");
     expect(r.stdout).toContain("would: gstack-brain-sync");
     rmSync(home, { recursive: true, force: true });
@@ -126,7 +129,7 @@ describe("gstack-gbrain-sync CLI", () => {
     const r = runScript(["--dry-run", "--code-only", "--quiet"], { HOME: home, GSTACK_HOME: gstackHome });
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toMatch(/gbrain sources add gstack-code-[a-z0-9-]+/);
-    expect(r.stdout).toMatch(/gbrain sync --strategy code --source gstack-code-[a-z0-9-]+/);
+    expect(r.stdout).toMatch(/gbrain sync --source gstack-code-[a-z0-9-]+/);
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -159,7 +162,7 @@ exit 99
     });
 
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain("gbrain sync --strategy code --source client-acme-app");
+    expect(r.stdout).toContain("gbrain sync --source client-acme-app");
     expect(r.stdout).not.toContain("gbrain sources add");
     expect(r.stdout).not.toContain("--federated");
     expect(existsSync(commandLog)).toBe(false);
@@ -664,7 +667,7 @@ esac
     // without a real gbrain CLI). Instead, assert the preview still includes
     // the new flow (sources add + sync + attach) at minimum.
     expect(r.stdout).toMatch(/gbrain sources add gstack-code-/);
-    expect(r.stdout).toMatch(/gbrain sync --strategy code --source gstack-code-/);
+    expect(r.stdout).toMatch(/gbrain sync --source gstack-code-/);
     expect(r.stdout).toMatch(/gbrain sources attach gstack-code-/);
 
     rmSync(repo, { recursive: true, force: true });
@@ -1012,5 +1015,169 @@ describe("sourceLocalPath", () => {
       "sources list --json": { stdout: JSON.stringify({ sources: [] }) },
     });
     expect(sourceLocalPath("missing-id", envWithBindir(bindir))).toBeNull();
+  });
+});
+// An explicit `--strategy` overrides the strategy gbrain persists per source,
+// so the walk passes none once one is persisted (a source set to `auto` must
+// keep `auto`). A source with nothing persisted gets `code` persisted BEFORE
+// its first walk: a walk with neither would fall back to markdown and
+// soft-delete every modified code page. A gbrain without the surface keeps
+// `--strategy code`.
+describe("code walk strategy (persisted per source)", () => {
+  describe("codeWalkStrategy", () => {
+    function io(readings: StrategyReading[], writeResult: string | null = null) {
+      const reads: string[] = [];
+      const writes: string[] = [];
+      return {
+        reads,
+        writes,
+        read: (id: string) => {
+          reads.push(id);
+          return readings.shift() ?? "unsupported";
+        },
+        write: (id: string, s: string) => {
+          writes.push(`${id} ${s}`);
+          return writeResult;
+        },
+      };
+    }
+
+    it("passes no strategy for a persisted one and writes nothing", () => {
+      for (const persisted of ["auto", "code", "markdown"]) {
+        const fake = io([persisted]);
+        expect(codeWalkStrategy("src", undefined, fake)).toEqual({ args: [] });
+        expect(fake.writes).toEqual([]);
+      }
+    });
+
+    it("persists code for an unset source and drops the flag once the re-read confirms it", () => {
+      const fake = io(["unset", "code"]);
+      const plan = codeWalkStrategy("src", undefined, fake);
+      expect(plan.args).toEqual([]);
+      expect(plan.note).toContain("persisted strategy code for src");
+      expect(fake.writes).toEqual(["src code"]);
+      expect(fake.reads).toEqual(["src", "src"]);
+    });
+
+    it("keeps --strategy code when the write fails or the re-read disagrees", () => {
+      const failed = codeWalkStrategy("src", undefined, io(["unset"], "database is read-only"));
+      expect(failed.args).toEqual(["--strategy", "code"]);
+      expect(failed.warning).toContain("database is read-only");
+
+      const unconfirmed = codeWalkStrategy("src", undefined, io(["unset", "unset"]));
+      expect(unconfirmed.args).toEqual(["--strategy", "code"]);
+      expect(unconfirmed.warning).toContain("reads back unset");
+    });
+
+    it("keeps --strategy code on a gbrain without the per-source strategy surface", () => {
+      const fake = io(["unsupported"]);
+      expect(codeWalkStrategy("src", undefined, fake)).toEqual({ args: ["--strategy", "code"] });
+      expect(fake.writes).toEqual([]);
+    });
+  });
+
+  // Stateful fake: $FAKE_STATE/id is the registered source (absent until
+  // `sources add`), $FAKE_STATE/strategy the row's `strategy` field ("@absent"
+  // omits the key, "null" persists nothing).
+  const FAKE_GBRAIN = String.raw`#!/bin/sh
+printf '%s\n' "$*" >> "$GSTACK_TEST_GBRAIN_LOG"
+case "$1 $2" in
+  "--version ") echo 'gbrain 0.60.0.0' ;;
+  "sources list")
+    if [ ! -f "$FAKE_STATE/id" ]; then echo '{"sources":[]}'; exit 0; fi
+    s=$(cat "$FAKE_STATE/strategy")
+    case "$s" in
+      @absent) extra='' ;;
+      null) extra=',"strategy":null' ;;
+      *) extra=",\"strategy\":\"$s\"" ;;
+    esac
+    printf '{"sources":[{"id":"%s","local_path":"%s","page_count":1%s}]}\n' "$(cat "$FAKE_STATE/id")" "$FAKE_REPO" "$extra"
+    ;;
+  "sources add") printf '%s' "$3" > "$FAKE_STATE/id" ;;
+  "sources set-strategy")
+    if [ -n "$FAKE_SET_FAILS" ]; then echo "Error: database is read-only" >&2; exit 1; fi
+    printf '%s' "$4" > "$FAKE_STATE/strategy"
+    ;;
+  "sources attach") ;;
+  "sync --source"|"sync --strategy") echo "Already up to date." ;;
+  *) echo "unexpected gbrain command: $*" >&2; exit 1 ;;
+esac
+`;
+
+  function runWalk(opts: { strategy: string; pin?: string; setFails?: boolean }) {
+    const home = makeTestHome();
+    const gstackHome = join(home, ".gstack");
+    const repo = mkdtempSync(join(tmpdir(), "gstack-strategy-repo-"));
+    const bindir = mkdtempSync(join(tmpdir(), "gstack-strategy-bin-"));
+    const state = mkdtempSync(join(tmpdir(), "gstack-strategy-state-"));
+    const commandLog = join(home, "gbrain-commands.log");
+    mkdirSync(gstackHome, { recursive: true });
+    mkdirSync(join(home, ".gbrain"), { recursive: true });
+    writeFileSync(join(home, ".gbrain", "config.json"), JSON.stringify({ engine: "pglite", database_url: "pglite:///test" }));
+    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo, timeout: 30_000 });
+    if (opts.pin) {
+      writeFileSync(join(repo, ".gbrain-source"), `${opts.pin}\n`);
+      writeFileSync(join(state, "id"), opts.pin);
+    }
+    writeFileSync(join(state, "strategy"), opts.strategy);
+    writeFileSync(join(bindir, "gbrain"), FAKE_GBRAIN);
+    chmodSync(join(bindir, "gbrain"), 0o755);
+    // Same reason as the pinned-symlink case above: stub pgrep so a live host
+    // autopilot cannot refuse the walk.
+    writeFileSync(join(bindir, "pgrep"), "#!/bin/sh\nexit 1\n");
+    chmodSync(join(bindir, "pgrep"), 0o755);
+    const r = spawnSync("bun", [SCRIPT, "--code-only", "--quiet"], {
+      encoding: "utf-8",
+      timeout: 60000,
+      cwd: repo,
+      env: {
+        ...process.env,
+        HOME: home,
+        GSTACK_HOME: gstackHome,
+        GBRAIN_HOME: "",
+        GSTACK_TEST_GBRAIN_LOG: commandLog,
+        FAKE_STATE: state,
+        FAKE_REPO: repo,
+        FAKE_SET_FAILS: opts.setFails ? "1" : "",
+        PATH: `${bindir}:${process.env.PATH || ""}`,
+      },
+    });
+    const commands = existsSync(commandLog) ? readFileSync(commandLog, "utf-8").split("\n").filter(Boolean) : [];
+    const persisted = readFileSync(join(state, "strategy"), "utf-8");
+    for (const d of [repo, bindir, state, home]) rmSync(d, { recursive: true, force: true });
+    return { r, commands, persisted, syncCalls: commands.filter((c) => c.startsWith("sync ")) };
+  }
+
+  it.skipIf(process.platform === "win32")("a source with a persisted strategy is walked without --strategy", () => {
+    const { r, commands, persisted, syncCalls } = runWalk({ strategy: "auto", pin: "client-acme-app" });
+    expect(r.status).toBe(0);
+    expect(syncCalls).toEqual(["sync --source client-acme-app"]);
+    expect(commands.some((c) => c.startsWith("sources set-strategy"))).toBe(false);
+    expect(persisted).toBe("auto");
+  });
+
+  it.skipIf(process.platform === "win32")("a new source gets code persisted before its first walk", () => {
+    const { r, commands, persisted, syncCalls } = runWalk({ strategy: "null" });
+    expect(r.status).toBe(0);
+    const added = commands.findIndex((c) => /^sources add gstack-code-\S+ --path /.test(c));
+    const set = commands.findIndex((c) => /^sources set-strategy gstack-code-\S+ code$/.test(c));
+    const walk = commands.findIndex((c) => c.startsWith("sync "));
+    expect(added).toBeGreaterThanOrEqual(0);
+    expect(set).toBeGreaterThan(added);
+    expect(walk).toBeGreaterThan(set);
+    expect(syncCalls).toHaveLength(1);
+    expect(syncCalls[0]).toMatch(/^sync --source gstack-code-\S+$/);
+    expect(persisted).toBe("code");
+  });
+
+  it.skipIf(process.platform === "win32")("keeps --strategy code when gbrain cannot persist one", () => {
+    const old = runWalk({ strategy: "@absent", pin: "client-acme-app" });
+    expect(old.r.status).toBe(0);
+    expect(old.syncCalls).toEqual(["sync --strategy code --source client-acme-app"]);
+    expect(old.commands.some((c) => c.startsWith("sources set-strategy"))).toBe(false);
+
+    const failed = runWalk({ strategy: "null", pin: "client-acme-app", setFails: true });
+    expect(failed.r.status).toBe(0);
+    expect(failed.syncCalls).toEqual(["sync --strategy code --source client-acme-app"]);
   });
 });
