@@ -26,6 +26,7 @@ gstack/
 │   ├── host-config.ts     # HostConfig interface + validator
 │   ├── host-config-export.ts  # Shell bridge for setup script
 │   ├── resolvers/   # Template resolver modules (preamble, aside = the Aside driver contract + research, browse = $B fallback setup + command reference, design, design-checklist = renders review/design-checklist.md from lib/design-catalog.ts, review, gbrain, etc.)
+│   ├── hook-syntax.sh     # Hook parse gate: shebang-keyed parse + bun-payload bundle + conflict-marker scan; setup refuses on any finding (docs/hook-syntax-gate.md)
 │   ├── skill-check.ts     # Health dashboard
 │   ├── test-free-shards.ts  # Strict parallel free-suite runner (GSTACK_FREE_JOBS, opt-in flaky retry)
 │   ├── test-paid-shards.ts  # Sharded paid-tier runner (one Bun process per shard)
@@ -41,6 +42,7 @@ gstack/
 │   ├── skill-validation.test.ts  # Tier 1: static validation (free, <1s)
 │   ├── gen-skill-docs.test.ts    # Tier 1: generator quality (free, <1s)
 │   ├── setup-*.test.ts, relink.test.ts, hook-scripts.test.ts  # Tier 1: setup linker ownership, retired-skill prune, browser hint, rebuild check + Chromium bootstrap (anchor-sliced from setup), gstack-relink, PreToolUse hooks (free)
+│   ├── hook-syntax.test.ts  # Tier 1: every wired hook RED when broken / GREEN when pristine, and setup's refusal (free)
 │   ├── skill-llm-eval.test.ts   # Tier 3: LLM-as-judge (~$0.15/run)
 │   └── skill-e2e-*.test.ts       # Tier 2: E2E via claude -p (~$3.85/run, split by category)
 ├── qa-only/         # /qa-only skill (report-only QA, no fixes)
@@ -92,7 +94,7 @@ gstack/
 │   └── docker/      # Dockerfile.ci (pre-baked toolchain + Playwright/Chromium)
 ├── contrib/         # Contributor-only tools (never installed for users)
 │   └── add-host/    # /gstack-contrib-add-host skill
-├── setup            # One-time setup: build the browse, design + make-pdf binaries (rebuilds when any is missing or browse/make-pdf/design/lib sources changed) + best-effort Chromium bootstrap + link skills + prune retired-skill renders (both ownership-gated)
+├── setup            # One-time setup: refuse a tree whose hooks do not parse, then build the browse, design + make-pdf binaries (rebuilds when any is missing or browse/make-pdf/design/lib sources changed) + best-effort Chromium bootstrap + link skills + prune retired-skill renders (both ownership-gated)
 ├── SKILL.md         # Generated from SKILL.md.tmpl (don't edit directly)
 ├── SKILL.md.tmpl    # Template: edit this, run gen:skill-docs
 ├── ETHOS.md         # Builder philosophy (Boil the Ocean, Search Before Building)
