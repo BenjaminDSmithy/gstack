@@ -23,6 +23,16 @@
 setup        text eol=lf
 bin/*        text eol=lf
 **/scripts/* text eol=lf
+# The registered hook shims are extensionless bash too, and a CRLF shim
+# breaks every call that runs it: bash keeps the \r on every line.
+hosts/*/hooks/*             text eol=lf
+# Every other extensionless shell script the hook parse gate parses. A
+# pattern containing a slash is anchored, so `bin/*` above covers only the
+# top-level bin/. test/hook-syntax.test.ts enumerates every tracked shell
+# file, so a new one cannot land without a rule here.
+**/bin/*                    text eol=lf
+lib/cso/images/*            text eol=lf
+scripts/app/gstack-browser  text eol=lf
 
 # TypeScript/JavaScript: LF for portability across the bun toolchain.
 *.ts         text eol=lf
