@@ -182,14 +182,23 @@ echo "PRE_UPGRADE_COMMIT=$PRE_UPGRADE_COMMIT"
 git fetch origin || { echo "FETCH_FAILED: nothing changed (still $PRE_UPGRADE_COMMIT)" >&2; exit 1; }
 # Same pre-advance check as the auto-updater: the incoming release's Bun floor.
 HOLD=$(. bin/gstack-bun-version.sh 2>/dev/null && gstack_bun_incoming_hold . origin/main) && { echo "BUN_TOO_OLD: $HOLD; nothing was changed" >&2; exit 1; }
-"$INSTALL_DIR/bin/gstack-gate-incoming" --fast-forward "$INSTALL_DIR" origin/main
+_GATE=~/.claude/skills/gstack/bin/gstack-gate-incoming
+[ -x "$_GATE" ] || _GATE="$INSTALL_DIR/bin/gstack-gate-incoming"
+_GATE_TMP=""
+if [ ! -x "$_GATE" ] && git cat-file -e origin/main:bin/gstack-gate-incoming 2>/dev/null; then
+  _GATE_TMP=$(mktemp) && git show origin/main:bin/gstack-gate-incoming > "$_GATE_TMP" && chmod +x "$_GATE_TMP" && _GATE="$_GATE_TMP"
+fi
+"$_GATE" --fast-forward "$INSTALL_DIR" origin/main
 _FF_RC=$?
+[ -z "$_GATE_TMP" ] || rm -f "$_GATE_TMP"
 if [ "$_FF_RC" -eq 0 ]; then
   if ./setup --refresh-registered; then echo "FF_OK"; else echo "SETUP_FAILED: git update succeeded; stop and inspect setup output (previous commit: $PRE_UPGRADE_COMMIT)" >&2; exit 1; fi
 elif [ "$_FF_RC" -eq 3 ]; then
   echo "FF_REFUSED"
 elif [ "$_FF_RC" -eq 126 ] || [ "$_FF_RC" -eq 127 ]; then
-  echo "HOOK_GATE_HELPER_MISSING: $INSTALL_DIR/bin/gstack-gate-incoming could not run (exit $_FF_RC); install unchanged at $PRE_UPGRADE_COMMIT" >&2
+  _HINT="no copy exists in the running skill, this install or origin/main"
+  git cat-file -e HEAD:bin/gstack-gate-incoming 2>/dev/null && _HINT="restore it: git -C \"$INSTALL_DIR\" checkout -- bin/gstack-gate-incoming"
+  echo "HOOK_GATE_HELPER_MISSING: gstack-gate-incoming could not run (exit $_FF_RC); $_HINT; install unchanged at $PRE_UPGRADE_COMMIT" >&2
   exit 1
 else
   echo "HOOK_GATE_REFUSED: install unchanged at $PRE_UPGRADE_COMMIT (gate exit $_FF_RC)" >&2
@@ -214,8 +223,10 @@ On `HOOK_GATE_REFUSED`, STOP and quote the `HOOK_GATE` line: `blocked` means
 the new version has a file that does not parse (name it from the report),
 `no-verdict` means the gate could not run. Nothing moved. Never take the
 fallback for it.
-On `HOOK_GATE_HELPER_MISSING`, STOP: nothing moved. Restore the helper with
-`git -C "$INSTALL_DIR" checkout -- bin/gstack-gate-incoming` and re-run.
+On `HOOK_GATE_HELPER_MISSING`, STOP: nothing moved. The block looks for the
+helper in the running skill, then this install, then `origin/main`; follow the
+line's hint. With no copy anywhere the upgrade cannot be gated: tell the user,
+and never fall back to an ungated pull.
 On `FETCH_FAILED`, stop for network/auth repair, not reset.
 Enter the fallback only on `FF_REFUSED` (its `FF refused` line says why).
 
@@ -240,7 +251,9 @@ The block re-gates `origin/main` before any stash or reset:
 cd -- "${INSTALL_DIR:?INSTALL_DIR is not set: re-run Step 2 and substitute the printed path}" || exit 1
 { [ -f VERSION ] && [ -f setup ] && [ -f bin/gstack-config ] && [ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ]; } || { echo "ERROR: $INSTALL_DIR is not a gstack checkout; nothing was changed. Re-run Step 2." >&2; exit 1; }
 INCOMING=$(git rev-parse --verify 'origin/main^{commit}') || exit 1
-"$INSTALL_DIR/bin/gstack-gate-incoming" "$INSTALL_DIR" "$INCOMING" || { echo "HOOK_GATE_REFUSED: nothing stashed or reset (gate exit $?)" >&2; exit 1; }
+_GATE=~/.claude/skills/gstack/bin/gstack-gate-incoming
+[ -x "$_GATE" ] || _GATE="$INSTALL_DIR/bin/gstack-gate-incoming"
+"$_GATE" "$INSTALL_DIR" "$INCOMING" || { echo "HOOK_GATE_REFUSED: nothing stashed or reset (gate exit $?)" >&2; exit 1; }
 STASH_OUTPUT=$(git stash 2>&1)
 git reset --hard "$INCOMING"
 ./setup --refresh-registered
@@ -258,7 +271,10 @@ If `$STASH_OUTPUT` contains "Saved working directory", warn the user: "Note: loc
 [ -e "$INSTALL_DIR.bak" ] && { echo "ERROR: stale backup exists at $INSTALL_DIR.bak (from a previous failed upgrade?) — inspect it, salvage/remove it, then re-run." >&2; exit 1; }
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gstack-upgrade.XXXXXX") || { echo "ERROR: mktemp failed — aborting upgrade (install untouched)." >&2; exit 1; }
 git clone --depth 1 https://github.com/garrytan/gstack.git "$TMP_DIR/gstack" || { echo "ERROR: clone failed — aborting upgrade (install untouched)." >&2; rm -rf "$TMP_DIR"; exit 1; }
-"$INSTALL_DIR/bin/gstack-gate-incoming" "$TMP_DIR/gstack" HEAD || { echo "ERROR: the hook parse gate refused the new version or could not run (exit $?) — aborting upgrade (install untouched)." >&2; rm -rf "$TMP_DIR"; exit 1; }
+_GATE=~/.claude/skills/gstack/bin/gstack-gate-incoming
+[ -x "$_GATE" ] || _GATE="$INSTALL_DIR/bin/gstack-gate-incoming"
+[ -x "$_GATE" ] || _GATE="$TMP_DIR/gstack/bin/gstack-gate-incoming"
+"$_GATE" "$TMP_DIR/gstack" HEAD || { echo "ERROR: the hook parse gate refused the new version or could not run (exit $?) — aborting upgrade (install untouched)." >&2; rm -rf "$TMP_DIR"; exit 1; }
 mv "$INSTALL_DIR" "$INSTALL_DIR.bak" || { rm -rf "$TMP_DIR"; exit 1; }
 if mv "$TMP_DIR/gstack" "$INSTALL_DIR"; then
   if (cd "$INSTALL_DIR" && ./setup --refresh-registered); then
