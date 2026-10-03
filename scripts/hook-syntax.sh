@@ -194,14 +194,26 @@ _hook_syntax_mark() {
   HOOK_SYNTAX_SEEN="$HOOK_SYNTAX_SEEN$HOOK_SYNTAX_NL$1$HOOK_SYNTAX_NL"
 }
 
-# $1 = path. Reads up to 512 characters of the first line (a builtin read, no
-# fork) and sets:
+# $1 = path. Reads the first line, up to 512 characters and never past a run
+# of NUL bytes (a builtin read, no fork), and sets:
 #   HOOK_SYNTAX_KIND     shell | python | none
 #   HOOK_SYNTAX_INTERP   the interpreter a shell shebang names
 #   HOOK_SYNTAX_SHEBANG  1 when the first line starts with #! at all
 HOOK_SYNTAX_KIND=none
 HOOK_SYNTAX_INTERP=''
 HOOK_SYNTAX_SHEBANG=0
+# bash 4 and later drop NUL bytes from a read without counting them toward -n,
+# so a newline-delimited read of a NUL-heavy file runs on past the cap (an 8 MB
+# run of NULs: about 1 s under bash 5.3). There the read stops at the first NUL
+# instead and the line is cut at its first newline afterwards. bash 3.2 counts
+# a NUL toward -n, so the cap already holds there, and it keeps the newline
+# read: NUL-delimited, a 3.2 read never stops at a newline, takes all 512
+# characters one byte at a time, and made a sweep of this tree 1.5-2.5 s slower.
+if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then
+  HOOK_SYNTAX_READ_TO_NUL=1
+else
+  HOOK_SYNTAX_READ_TO_NUL=0
+fi
 _hook_syntax_kind() {
   local line=''
   HOOK_SYNTAX_KIND=none
@@ -211,8 +223,15 @@ _hook_syntax_kind() {
   # uncapped read of a one-line data file costs time that grows faster than
   # its length: one 210 KB single-line JSON in this repo took over a minute
   # under a UTF-8 locale. A #! line longer than the cap is classified on its
-  # first 512 characters.
-  IFS= read -r -n 512 line < "$1" 2>/dev/null
+  # first 512 characters. Either read leaves a shebang that sits behind a run
+  # of NULs unread, which matches the kernel: a shebang is a file's first
+  # bytes.
+  if [ "$HOOK_SYNTAX_READ_TO_NUL" -eq 1 ]; then
+    IFS= read -r -d '' -n 512 line < "$1" 2>/dev/null
+    line="${line%%"$HOOK_SYNTAX_NL"*}"
+  else
+    IFS= read -r -n 512 line < "$1" 2>/dev/null
+  fi
   # A CRLF checkout (Windows, core.autocrlf=true) ends the shebang in \r. Left
   # on, it matched no kind, so the file was skipped and passed. Stripped, the
   # file is classified, and the CR scan in _hook_syntax_finish refuses it.
