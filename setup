@@ -318,6 +318,16 @@ SOURCE_GSTACK_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 HOOK_SYNTAX_GATE="$SOURCE_GSTACK_DIR/scripts/hook-syntax.sh"
 _HOOK_SYNTAX_BASH=/bin/bash
 [ -x "$_HOOK_SYNTAX_BASH" ] || _HOOK_SYNTAX_BASH="${BASH:-bash}"
+# A checkout made before .gitattributes pinned every shell script to LF can
+# still hold CRLF copies, and `git pull` never rewrites a file whose blob did
+# not change; the gate refuses those. Heal exactly them first (tracked, LF in
+# the index, unchanged content, shell shebang): the one write this block makes
+# before the gate. Best effort and silent when there is nothing to heal; the
+# gate still judges the tree afterwards.
+_HEAL_EOL="$SOURCE_GSTACK_DIR/scripts/heal-eol.sh"
+if [ -r "$_HEAL_EOL" ]; then
+  "$_HOOK_SYNTAX_BASH" "$_HEAL_EOL" "$SOURCE_GSTACK_DIR" || true
+fi
 if [ ! -r "$HOOK_SYNTAX_GATE" ]; then
   # Deleting the checker must not be a way past it. This block and the
   # checker ship in the same commit, so an older checkout has neither; a
