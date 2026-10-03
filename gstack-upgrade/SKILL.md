@@ -165,9 +165,11 @@ Use the install type and directory detected in Step 2:
 
 **For git installs** (global-git, local-git):
 
-Fast-forward first — the same policy the session-update auto-upgrade
-uses. `--autostash` carries local edits over the pull; render-footprint dirt
-is discarded first because it is regenerable and poisons stashes:
+Fast-forward first, as session-update does. Hooks run from this
+checkout by path, so `gstack-gate-incoming` parse-gates `origin/main` in a
+throwaway worktree and moves only to the commit that passed. `--autostash`
+carries local edits over; render-footprint dirt is discarded first because it
+is regenerable and poisons stashes:
 ```bash
 cd -- "${INSTALL_DIR:?INSTALL_DIR is not set: re-run Step 2 and substitute the printed path}" || exit 1
 { [ -f VERSION ] && [ -f setup ] && [ -f bin/gstack-config ] && [ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ]; } || { echo "ERROR: $INSTALL_DIR is not a gstack checkout; nothing was changed. Re-run Step 2." >&2; exit 1; }
@@ -175,15 +177,20 @@ cd -- "${INSTALL_DIR:?INSTALL_DIR is not set: re-run Step 2 and substitute the p
 # generated SKILL.md / sections files IN PLACE. They are regenerable (setup
 # re-renders to ~/.gstack/render), so discarding is lossless.
 git checkout -- 'SKILL.md' '*/SKILL.md' '*/sections/*.md' 2>/dev/null || true
-git fetch origin
-# Same pre-advance check as the auto-updater: the incoming release's Bun floor.
-HOLD=$(. bin/gstack-bun-version.sh 2>/dev/null && gstack_bun_incoming_hold . origin/main) && { echo "BUN_TOO_OLD: $HOLD; nothing was changed" >&2; exit 1; }
 PRE_UPGRADE_COMMIT=$(git rev-parse HEAD)
 echo "PRE_UPGRADE_COMMIT=$PRE_UPGRADE_COMMIT"
-if git pull --ff-only --autostash origin main; then
+git fetch origin || { echo "FETCH_FAILED: nothing changed (still $PRE_UPGRADE_COMMIT)" >&2; exit 1; }
+# Same pre-advance check as the auto-updater: the incoming release's Bun floor.
+HOLD=$(. bin/gstack-bun-version.sh 2>/dev/null && gstack_bun_incoming_hold . origin/main) && { echo "BUN_TOO_OLD: $HOLD; nothing was changed" >&2; exit 1; }
+"$INSTALL_DIR/bin/gstack-gate-incoming" --fast-forward "$INSTALL_DIR" origin/main
+_FF_RC=$?
+if [ "$_FF_RC" -eq 0 ]; then
   if ./setup --refresh-registered; then echo "FF_OK"; else echo "SETUP_FAILED: git update succeeded; stop and inspect setup output (previous commit: $PRE_UPGRADE_COMMIT)" >&2; exit 1; fi
-else
+elif [ "$_FF_RC" -eq 3 ]; then
   echo "FF_REFUSED"
+else
+  echo "HOOK_GATE_REFUSED: install unchanged at $PRE_UPGRADE_COMMIT (gate exit $_FF_RC)" >&2
+  exit 1
 fi
 ```
 
@@ -195,9 +202,17 @@ its retry command and never say every host was refreshed. A `skipped` row
 belongs to another checkout or project; pass on its command, do not run it.
 
 If the output ends with `FF_OK`, the upgrade is done — skip the fallback
-below entirely.
+below entirely. An `AUTOSTASH_KEPT <stash>` line means local edits conflicted:
+the install is on the new commit and the edits are in that stash, unapplied.
+Tell the user (`git -C "$INSTALL_DIR" stash show -p <stash>`); never drop it.
 On `BUN_TOO_OLD`, STOP: tell the user to run `bun upgrade`, then /gstack-upgrade again.
-On `SETUP_FAILED`, STOP; keep user changes and report the recovery commit. There is no `.bak` on the git path. Do not enter the divergence fallback merely because setup failed. Enter it only on `FF_REFUSED`, after inspecting the pull error; network/auth failures stop for repair, not reset.
+On `SETUP_FAILED`, STOP; keep user changes and report the recovery commit. There is no `.bak` on the git path. Do not enter the divergence fallback merely because setup failed.
+On `HOOK_GATE_REFUSED`, STOP and quote the `HOOK_GATE` line: `blocked` means
+the new version has a file that does not parse (name it from the report),
+`no-verdict` means the gate could not run. Nothing moved. Never take the
+fallback for it.
+On `FETCH_FAILED`, stop for network/auth repair, not reset.
+Enter the fallback only on `FF_REFUSED` (its `FF refused` line says why).
 
 **Fallback (ff-only refused — local commits or divergence).** `git reset
 --hard` DESTROYS things: a clean tree with unpushed local commits still loses
@@ -214,13 +229,18 @@ those commits. Gate it:
    rescue their work first (recommended when local commits exist). Never
    proceed on a vague reply.
 
+The block re-gates `origin/main` before any stash or reset:
+
 ```bash
 cd -- "${INSTALL_DIR:?INSTALL_DIR is not set: re-run Step 2 and substitute the printed path}" || exit 1
 { [ -f VERSION ] && [ -f setup ] && [ -f bin/gstack-config ] && [ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ]; } || { echo "ERROR: $INSTALL_DIR is not a gstack checkout; nothing was changed. Re-run Step 2." >&2; exit 1; }
+INCOMING=$(git rev-parse --verify 'origin/main^{commit}') || exit 1
+"$INSTALL_DIR/bin/gstack-gate-incoming" "$INSTALL_DIR" "$INCOMING" || { echo "HOOK_GATE_REFUSED: nothing stashed or reset" >&2; exit 1; }
 STASH_OUTPUT=$(git stash 2>&1)
-git reset --hard origin/main
+git reset --hard "$INCOMING"
 ./setup --refresh-registered
 ```
+On `HOOK_GATE_REFUSED`, STOP exactly as above.
 If `$STASH_OUTPUT` contains "Saved working directory", warn the user: "Note: local changes were stashed (any modified generated SKILL.md/sections files were discarded first — they regenerate on setup). Run `git stash pop` in the skill directory to restore your own changes."
 
 **For vendored installs** (vendored, vendored-global):
@@ -233,6 +253,7 @@ If `$STASH_OUTPUT` contains "Saved working directory", warn the user: "Note: loc
 [ -e "$INSTALL_DIR.bak" ] && { echo "ERROR: stale backup exists at $INSTALL_DIR.bak (from a previous failed upgrade?) — inspect it, salvage/remove it, then re-run." >&2; exit 1; }
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gstack-upgrade.XXXXXX") || { echo "ERROR: mktemp failed — aborting upgrade (install untouched)." >&2; exit 1; }
 git clone --depth 1 https://github.com/garrytan/gstack.git "$TMP_DIR/gstack" || { echo "ERROR: clone failed — aborting upgrade (install untouched)." >&2; rm -rf "$TMP_DIR"; exit 1; }
+"$INSTALL_DIR/bin/gstack-gate-incoming" "$TMP_DIR/gstack" HEAD || { echo "ERROR: the hook parse gate refused the new version — aborting upgrade (install untouched)." >&2; rm -rf "$TMP_DIR"; exit 1; }
 mv "$INSTALL_DIR" "$INSTALL_DIR.bak" || { rm -rf "$TMP_DIR"; exit 1; }
 if mv "$TMP_DIR/gstack" "$INSTALL_DIR"; then
   if (cd "$INSTALL_DIR" && ./setup --refresh-registered); then
