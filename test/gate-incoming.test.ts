@@ -194,16 +194,32 @@ describe('gstack-gate-incoming: gate only', () => {
     expect(leftovers(fx)).toEqual({ worktrees: 1, scratch: [] });
   }, TEST_TIMEOUT_MS);
 
-  test('a checker that hangs is stopped at the timeout and is no verdict', () => {
+  test('a checker that hangs is stopped at the timeout, grandchildren included, and is no verdict', async () => {
     const fx = makeFixture();
-    advance(fx, { 'scripts/hook-syntax.sh': '#!/bin/bash\nsleep 60\n' });
+    // The hang is a grandchild of the checker: killing only the checker's
+    // direct children would leave it running.
+    advance(fx, {
+      'scripts/hook-syntax.sh': '#!/bin/bash\nbash -c \'sleep 60 & echo $! > "$HANG_PIDFILE"; wait\'\n',
+    });
     git(fx.install, 'fetch', '-q');
+    const pidFile = path.join(fx.base, 'hang.pid');
     const started = Date.now();
-    const r = runHelper(fx, [fx.install, 'origin/main'], { GSTACK_HOOK_GATE_TIMEOUT: '2' });
-    expect(r.code).toBe(2);
-    expect(r.stdout).toContain('ran past 2s');
-    expect(Date.now() - started).toBeLessThan(45_000);
-    expect(leftovers(fx)).toEqual({ worktrees: 1, scratch: [] });
+    const r = runHelper(fx, [fx.install, 'origin/main'], { GSTACK_HOOK_GATE_TIMEOUT: '2', HANG_PIDFILE: pidFile });
+    const sleeper = Number(fs.readFileSync(pidFile, 'utf8').trim());
+    try {
+      expect(r.code).toBe(2);
+      expect(r.stdout).toContain('ran past 2s');
+      expect(Date.now() - started).toBeLessThan(45_000);
+      expect(leftovers(fx)).toEqual({ worktrees: 1, scratch: [] });
+      expect(sleeper).toBeGreaterThan(0);
+      let alive = true;
+      for (let i = 0; i < 20 && alive; i++) {
+        try { process.kill(sleeper, 0); await new Promise((res) => setTimeout(res, 100)); } catch { alive = false; }
+      }
+      expect(alive).toBe(false);
+    } finally {
+      try { process.kill(sleeper, 'SIGKILL'); } catch { /* already gone */ }
+    }
   }, TEST_TIMEOUT_MS);
 
   test('a revision that names no commit is no verdict', () => {
