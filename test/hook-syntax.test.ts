@@ -50,14 +50,34 @@ const TEST_TIMEOUT_MS = 150_000;
 const SWEEP_TIMEOUT_MS = 240_000;
 
 type Run = { code: number; output: string };
+type Captured = { status: number | null; stdout: string; stderr: string };
+
+// Child output goes through files, never pipes. Under heavy load Bun 1.3's
+// spawnSync has returned the right exit status with an EMPTY piped stderr (1
+// spawn in 2,400 in a churn loop, against 0 in 2,400 through file
+// descriptors), and every verdict this file checks is printed on stderr: a lost
+// pipe reads as a silent gate. Status-only spawns keep spawnSync.
+function spawnCaptured(cmd: string, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Captured {
+  const io = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-hook-syntax-io-'));
+  const outFd = fs.openSync(path.join(io, 'out'), 'w');
+  const errFd = fs.openSync(path.join(io, 'err'), 'w');
+  try {
+    const r = spawnSync(cmd, args, { ...opts, stdio: ['ignore', outFd, errFd], timeout: SPAWN_TIMEOUT_MS });
+    return {
+      status: r.status,
+      stdout: fs.readFileSync(path.join(io, 'out'), 'utf-8'),
+      stderr: fs.readFileSync(path.join(io, 'err'), 'utf-8'),
+    };
+  } finally {
+    fs.closeSync(outFd);
+    fs.closeSync(errFd);
+    fs.rmSync(io, { recursive: true, force: true });
+  }
+}
 
 function runGate(args: string[], env: Record<string, string> = {}): Run {
-  const r = spawnSync('/bin/bash', [GATE, ...args], {
-    env: { ...process.env, ...env },
-    encoding: 'utf-8',
-    timeout: SPAWN_TIMEOUT_MS,
-  });
-  return { code: r.status ?? 1, output: `${r.stdout ?? ''}${r.stderr ?? ''}`.trim() };
+  const r = spawnCaptured('/bin/bash', [GATE, ...args], { env: { ...process.env, ...env } });
+  return { code: r.status ?? 1, output: `${r.stdout}${r.stderr}`.trim() };
 }
 
 // ── the wired hooks, derived from where they are registered ────────────────
@@ -219,12 +239,9 @@ for (const hook of WIRED) {
       withEdit(hook.rel, breakParse, (p) => {
         fs.chmodSync(p, 0o755);
         const viaBash = hook.source.includes('frontmatter');
-        const r = spawnSync(viaBash ? 'bash' : p, viaBash ? [p] : [], {
+        const r = spawnCaptured(viaBash ? 'bash' : p, viaBash ? [p] : [], {
           cwd: FX,
           env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: path.join(FX, 'home') },
-          stdio: ['ignore', 'pipe', 'pipe'],
-          encoding: 'utf-8',
-          timeout: SPAWN_TIMEOUT_MS,
         });
         expect(r.status).toBe(2);
         expect(r.stderr).toContain('syntax error');
@@ -307,7 +324,7 @@ describe('hook-syntax: line endings', () => {
     // .gitattributes says otherwise, and bash keeps the \r on every line. The
     // dispatch below mirrors the gate's: a shell shebang, or no #! at all and
     // a .sh name.
-    const ls = spawnSync('git', ['-C', ROOT, 'ls-files', '-z'], { encoding: 'utf-8', timeout: SPAWN_TIMEOUT_MS });
+    const ls = spawnCaptured('git', ['-C', ROOT, 'ls-files', '-z']);
     if (ls.status !== 0) return; // not a git checkout: nothing to enumerate
     const shells = ls.stdout.split('\0').filter(Boolean).filter((rel) => {
       const p = path.join(ROOT, rel);
@@ -325,7 +342,7 @@ describe('hook-syntax: line endings', () => {
     // silently stopped matching does.
     expect(shells.length).toBeGreaterThanOrEqual(90);
     expect(shells).toContain('hosts/claude/hooks/question-preference-hook');
-    const attr = spawnSync('git', ['-C', ROOT, 'check-attr', 'eol', '--', ...shells], { encoding: 'utf-8', timeout: SPAWN_TIMEOUT_MS });
+    const attr = spawnCaptured('git', ['-C', ROOT, 'check-attr', 'eol', '--', ...shells]);
     expect(attr.status).toBe(0);
     const unpinned = attr.stdout.split('\n').filter((l) => l && !l.endsWith(': eol: lf'));
     expect(unpinned).toEqual([]);
@@ -337,7 +354,7 @@ describe('hook-syntax: line endings', () => {
     const repo = path.join(FX, 'heal-repo');
     fs.mkdirSync(repo, { recursive: true });
     const env = { ...process.env, HOME: repo, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
-    const g = (...args: string[]) => spawnSync('git', args, { cwd: repo, env, encoding: 'utf-8', timeout: SPAWN_TIMEOUT_MS });
+    const g = (...args: string[]) => spawnCaptured('git', args, { cwd: repo, env });
     expect(g('init', '-q').status).toBe(0);
     fs.writeFileSync(path.join(repo, '.gitattributes'), '* text eol=lf\n');
     const lf: Record<string, string> = {
@@ -360,7 +377,7 @@ describe('hook-syntax: line endings', () => {
     // A UTF-8 locale, as on a default macOS shell: bash 3.2 must not collate
     // the ordinary `H` tag into the assume-unchanged range.
     const utf8 = { ...env, LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' };
-    const r = spawnSync('/bin/bash', [path.join(ROOT, 'scripts', 'heal-eol.sh'), repo], { env: utf8, encoding: 'utf-8', timeout: SPAWN_TIMEOUT_MS });
+    const r = spawnCaptured('/bin/bash', [path.join(ROOT, 'scripts', 'heal-eol.sh'), repo], { env: utf8 });
     fs.rmSync(path.join(repo, '.git', 'index.lock'), { force: true });
     expect(r.status).toBe(0);
     expect(r.stderr).toContain('rewrote clean.sh');
@@ -375,7 +392,7 @@ describe('hook-syntax: line endings', () => {
     expect(fs.readdirSync(repo).filter((n) => n.includes('.heal-eol.'))).toEqual([]);
     // Not a repository: a silent no-op.
     fs.mkdirSync(path.join(FX, 'heal-not-a-repo'), { recursive: true });
-    const none = spawnSync('/bin/bash', [path.join(ROOT, 'scripts', 'heal-eol.sh'), path.join(FX, 'heal-not-a-repo')], { env, encoding: 'utf-8', timeout: SPAWN_TIMEOUT_MS });
+    const none = spawnCaptured('/bin/bash', [path.join(ROOT, 'scripts', 'heal-eol.sh'), path.join(FX, 'heal-not-a-repo')], { env });
     expect(none.status).toBe(0);
     expect(none.stderr).toBe('');
   }, TEST_TIMEOUT_MS);
@@ -611,8 +628,8 @@ describe('hook-syntax: per-file verdicts', () => {
     // `;;&` is bash 4+. It parses under a PATH bash 5 and is a syntax error
     // under the /bin/bash 3.2 that macOS runs a `#!/bin/bash` hook with.
     const body = 'case a in a) echo;;& esac\n';
-    const sys = spawnSync('/bin/bash', ['-c', 'echo "${BASH_VERSINFO[0]}"'], { encoding: 'utf-8', timeout: SPAWN_TIMEOUT_MS }).stdout.trim();
-    const envBash = spawnSync('bash', ['-c', 'echo "${BASH_VERSINFO[0]}"'], { encoding: 'utf-8', timeout: SPAWN_TIMEOUT_MS }).stdout.trim();
+    const sys = spawnCaptured('/bin/bash', ['-c', 'echo "${BASH_VERSINFO[0]}"']).stdout.trim();
+    const envBash = spawnCaptured('bash', ['-c', 'echo "${BASH_VERSINFO[0]}"']).stdout.trim();
     const fixed = runGate([fixture('interp/fixed.sh', `#!/bin/bash\n${body}`)]);
     const viaEnv = runGate([fixture('interp/env.sh', `#!/usr/bin/env bash\n${body}`)]);
     expect(fixed.code).toBe(Number(sys) < 4 ? 1 : 0);
@@ -770,7 +787,7 @@ describe('hook-syntax: honest coverage', () => {
   test('an invalid escape in python fails; the raw-string spelling does not', () => {
     // Both directions, or the rule would simply ban docstrings that mention a
     // regex. Python reports an invalid escape as SyntaxWarning from 3.12 on.
-    const v = spawnSync('python3', ['-c', 'import sys; print(sys.version_info[1] if sys.version_info[0] == 3 else 0)'], { encoding: 'utf-8', timeout: SPAWN_TIMEOUT_MS });
+    const v = spawnCaptured('python3', ['-c', 'import sys; print(sys.version_info[1] if sys.version_info[0] == 3 else 0)']);
     if (v.status !== 0 || Number(v.stdout.trim()) < 12) return;
     const bad = runGate([fixture('py/escape.py', '#!/usr/bin/env python3\n"""matches \\s+"""\n')]);
     const raw = runGate([fixture('py/raw.py', '#!/usr/bin/env python3\nr"""matches \\s+"""\n')]);
@@ -976,13 +993,11 @@ function runSetup(dir: string, home: string): Run {
   // A scrubbed env: if the gate ever let setup through by mistake, every
   // write must land in the scratch HOME, never in a real GSTACK_HOME,
   // CLAUDE_CONFIG_DIR or CODEX_HOME inherited from the caller.
-  const r = spawnSync('/bin/bash', [path.join(dir, 'tree', 'setup'), '--no-prefix', '--no-team'], {
+  const r = spawnCaptured('/bin/bash', [path.join(dir, 'tree', 'setup'), '--no-prefix', '--no-team'], {
     env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, TMPDIR: path.join(dir, 'tmp') },
     cwd: path.join(dir, 'tree'),
-    encoding: 'utf-8',
-    timeout: SPAWN_TIMEOUT_MS,
   });
-  return { code: r.status ?? 1, output: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+  return { code: r.status ?? 1, output: `${r.stdout}${r.stderr}` };
 }
 
 function homeIsEmpty(home: string): boolean {
