@@ -550,6 +550,38 @@ describe('hook-syntax: honest coverage', () => {
     // The shim still parses; only its payload goes uncovered.
     expect(r.output).toContain('1 checked, 1 skipped');
   }, TEST_TIMEOUT_MS);
+
+  // An interpreter that is on PATH and fails every invocation: an asdf, mise
+  // or pyenv shim with no version selected, or the xcode-select stub. It logs
+  // each call, so the test can see the probe ran once, not once per file.
+  function brokenInterpreter(name: string): { bin: string; calls: () => number } {
+    const log = path.join(FX, 'fx', 'broken-interp', `${name}.calls`);
+    const bin = fixture(`broken-interp/${name}`, `#!/bin/sh\necho call >> '${log}'\necho "${name}: no version is set" >&2\nexit 127\n`);
+    fs.chmodSync(bin, 0o755);
+    return { bin, calls: () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf-8').split('\n').filter(Boolean).length : 0) };
+  }
+
+  test('a python3 that cannot run is a coverage gap, probed once, never "fails to parse"', () => {
+    const py = brokenInterpreter('python3');
+    const a = fixture('py-shim/a.py', '#!/usr/bin/env python3\nprint("ok")\n');
+    const b = fixture('py-shim/b.py', '#!/usr/bin/env python3\nprint("ok")\n');
+    const r = runGate(['--report', a, b], { HOOK_SYNTAX_PYTHON: py.bin });
+    expect(r.code).toBe(0);
+    expect(r.output).not.toContain('FAILS TO PARSE');
+    expect(r.output).toContain('cannot run (exit 127)');
+    expect(r.output).toContain('0 checked, 2 skipped');
+    expect(py.calls()).toBe(1);
+  }, TEST_TIMEOUT_MS);
+
+  test('a bun that cannot run is a coverage gap for the payload, never "fails to parse"', () => {
+    const bun = brokenInterpreter('bun');
+    const r = runGate(['--report', path.join(SCRATCH, 'hosts/claude/hooks/timeline-stop-hook')], { HOOK_SYNTAX_BUN: bun.bin });
+    expect(r.code).toBe(0);
+    expect(r.output).not.toContain('FAILS TO PARSE');
+    expect(r.output).toContain('cannot run (exit 127)');
+    expect(r.output).toContain('1 checked, 1 skipped');
+    expect(bun.calls()).toBe(1);
+  }, TEST_TIMEOUT_MS);
 });
 
 // ── the bun payload arm ────────────────────────────────────────────────────
