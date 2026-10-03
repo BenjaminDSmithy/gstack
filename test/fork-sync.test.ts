@@ -443,6 +443,10 @@ function makeSandbox(opts: { pushCarried?: boolean } = {}): Sandbox {
   // clears the same set): an inherited GIT_COMMON_DIR would make the sandbox's
   // own main checkout look like a linked worktree and STOP every run.
   delete env.GIT_COMMON_DIR;
+  // An operator who exported GSTACK_SKIP_RENDER_HOOK for their own git command
+  // would silence every render-hook shim in the sandbox, so the hook cases
+  // would fail on any tree. Cases that want it opt in per command.
+  delete env.GSTACK_SKIP_RENDER_HOOK;
 
   const notifyLog = path.join(base, 'notify.log');
   write(path.join(bin, 'notify'), `#!${BASH}\nprintf '%s\\n' "$*" >> ${JSON.stringify(notifyLog)}\n`, 0o755);
