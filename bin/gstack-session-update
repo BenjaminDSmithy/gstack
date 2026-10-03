@@ -173,7 +173,9 @@ fi
     [ "$GATE_ERR" = /dev/null ] || rm -f "$GATE_ERR"
     case "$GATE_EXIT" in
       0)
-        [ -n "$GATE_VERDICT" ] && log_entry "HOOK_GATE_PASSED incoming=$INCOMING verdict=$GATE_VERDICT"
+        # A pass can still carry a coverage gap ("bun absent ... NOT checked");
+        # it goes into the log, not away.
+        [ -n "$GATE_VERDICT" ] && log_entry "HOOK_GATE_PASSED incoming=$INCOMING verdict=$GATE_VERDICT${GATE_REPORT:+ report=$GATE_REPORT}"
         # A conflicting autostash pop was reset to the gated commit; the
         # local edits are kept in the stash, and the regenerable ones (prefix
         # renames, gbrain blocks) are re-rendered below.
