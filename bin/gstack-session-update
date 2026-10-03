@@ -256,7 +256,8 @@ fi
     touch "$LOCK_DIR/pid" 2>/dev/null
     GATE_VERDICT=$(grep -m1 '^HOOK_GATE' "$GATE_OUT" 2>/dev/null)
     GATE_FF=$(grep -m1 '^FF ' "$GATE_OUT" 2>/dev/null)
-    GATE_KEPT=$(grep -m1 '^AUTOSTASH_KEPT ' "$GATE_OUT" 2>/dev/null | cut -d' ' -f2 | tr -d ':')
+    GATE_KEPT_LINE=$(grep -m1 '^AUTOSTASH_KEPT ' "$GATE_OUT" 2>/dev/null | cut -c1-200)
+    GATE_KEPT=$(printf '%s\n' "$GATE_KEPT_LINE" | cut -d' ' -f2 | tr -d ':')
     GATE_REPORT=$(grep -v '^hook-syntax: [0-9]* \(checked\|nested\)' "$GATE_ERR" 2>/dev/null | head -c 300 | tr '\n' ' ' | tr -s ' ')
     [ "$GATE_OUT" = /dev/null ] || rm -f "$GATE_OUT"
     [ "$GATE_ERR" = /dev/null ] || rm -f "$GATE_ERR"
@@ -266,9 +267,10 @@ fi
         # it goes into the log, not away.
         [ -n "$GATE_VERDICT" ] && log_entry "HOOK_GATE_PASSED incoming=$INCOMING verdict=$GATE_VERDICT${GATE_REPORT:+ report=$GATE_REPORT}"
         # A conflicting autostash pop was reset to the gated commit; the
-        # local edits are kept in the stash, and the regenerable ones (prefix
-        # renames, gbrain blocks) are re-rendered below.
-        [ -n "$GATE_KEPT" ] && log_entry "AUTOSTASH_CONFLICT_RECOVERED tree_reset=1 kept_stash=$GATE_KEPT"
+        # local edits are kept in the autostash commit (refs/stash, or
+        # refs/gstack-autostash/ when git could not store it), and the
+        # regenerable ones (prefix renames, gbrain blocks) are re-rendered below.
+        [ -n "$GATE_KEPT" ] && log_entry "AUTOSTASH_CONFLICT_RECOVERED tree_reset=1 kept_stash=$GATE_KEPT detail=$GATE_KEPT_LINE"
         ;;
       1)
         log_entry "HOOK_SYNTAX_BLOCKED head=$OLD_HEAD incoming=$INCOMING verdict=${GATE_VERDICT:-none} report=${GATE_REPORT:-none}"
