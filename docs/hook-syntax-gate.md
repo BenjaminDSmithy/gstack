@@ -147,7 +147,11 @@ with no version selected, or the xcode-select `python3` stub — is a coverage
 gap, not a parse failure. Each one is probed once per run before it is
 trusted: `python3 -c pass`, `bun --version`, and `<shell> -c :` for every shell
 a shebang names (`/bin/bash`, `/bin/sh`, a `PATH` bash or sh). A file handed to
-one that fails is reported as `NOT checked`.
+one that fails is reported as `NOT checked` for its parse, and its content
+scans (conflict markers, carriage returns, the payloads a shim hands to bun)
+still run. One exit status is a refusal rather than a gap: a shell or bun whose
+probe exits 2. Every hook run through it exits 2 as well, the status Claude
+Code reads as "block".
 
 The sweep itself fails rather than reading green when it could not look:
 
@@ -190,8 +194,9 @@ from 494 to 643 seconds in the same load window, still 19 pass, 0 fail.
 * **A shim that reaches bun any other way** than `bun "$HERE/<path>"` has its
   payload unchecked; the shim itself is still parsed.
 * **An interpreter that is absent or cannot run** (`python3`, `bun`, a `PATH`
-  bash) is reported as a coverage gap, never counted as a pass and never as a
-  parse failure.
+  bash) is reported as a coverage gap for the parse, never counted as a pass
+  and never as a parse failure; the content scans still run. A shell or bun
+  that exits 2 is refused.
 * **There is no commit-time arm.** A repository's git hooks live in
   `.git/hooks/`, untracked, so there is nothing in the tree to wire. The free
   suite and `./setup` carry the weight.

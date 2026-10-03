@@ -900,6 +900,61 @@ describe('hook-syntax: honest coverage', () => {
     expect(bash.calls()).toBe(1);
   }, TEST_TIMEOUT_MS);
 
+  // An interpreter that exits with a chosen status on every call.
+  function exitingInterpreter(name: string, code: number): string {
+    const bin = fixture(`exiting-${code}/${name}`, `#!/bin/sh\necho "${name}: broken" >&2\nexit ${code}\n`);
+    fs.chmodSync(bin, 0o755);
+    return bin;
+  }
+
+  test('a gap in the parse is not a gap in the content scans', () => {
+    // With the PATH bash unable to run, an env-bash file still has its
+    // conflict markers, carriage returns and bun payload checked.
+    const bash = brokenInterpreter('bash');
+    const env = { PATH: `${path.dirname(bash.bin)}:${process.env.PATH ?? '/usr/bin:/bin'}` };
+    const marked = runGate(['--report', fixture('gap-scans/marked.sh', `#!/usr/bin/env bash\n${CONFLICT_HEREDOC}`)], env);
+    expect(marked.code).toBe(1);
+    expect(marked.output).toContain('UNRESOLVED CONFLICT MARKERS');
+    expect(marked.output).toContain('NOT checked');
+    const crlf = runGate(['--report', fixture('gap-scans/crlf.sh', '#!/usr/bin/env bash\r\necho ok\r\n')], env);
+    expect(crlf.code).toBe(1);
+    expect(crlf.output).toContain('CRLF LINE ENDINGS');
+    fixture('gap-scans/hook', SHIM('hook.ts'));
+    fixture('gap-scans/hook.ts', 'const broken: number = {\n');
+    const payload = runGate(['--report', path.join(FX, 'fx', 'gap-scans/hook')], env);
+    expect(payload.code).toBe(1);
+    expect(payload.output).toContain('FAILS TO PARSE');
+    // And with python3 unable to run, a .py file's markers still fail.
+    const py = brokenInterpreter('python3');
+    const pyMarked = runGate(['--report', fixture('gap-scans/marked.py', `#!/usr/bin/env python3\nprint('ok')\n${LT} HEAD\n${GT} other\n`)], { HOOK_SYNTAX_PYTHON: py.bin });
+    expect(pyMarked.code).toBe(1);
+    expect(pyMarked.output).toContain('UNRESOLVED CONFLICT MARKERS');
+  }, TEST_TIMEOUT_MS);
+
+  test('a PATH bash that exits 2 is refused: every hook it runs would block', () => {
+    const bash = exitingInterpreter('bash', 2);
+    const ok = fixture('bash-exit2/ok.sh', '#!/usr/bin/env bash\necho ok\n');
+    const r = runGate(['--report', ok], { PATH: `${path.dirname(bash)}:${process.env.PATH ?? '/usr/bin:/bin'}` });
+    expect(r.code).toBe(1);
+    expect(r.output).toContain('bash exits 2 on every call');
+    // Premise: the same file, run as a hook would run it, exits 2.
+    fs.chmodSync(ok, 0o755);
+    const ran = spawnCaptured(ok, [], { env: { PATH: `${path.dirname(bash)}:/usr/bin:/bin` } });
+    expect(ran.status).toBe(2);
+  }, TEST_TIMEOUT_MS);
+
+  test('a bun that exits 2 is refused for a payload; a python3 that exits 2 stays a gap', () => {
+    const bun = exitingInterpreter('bun', 2);
+    const r = runGate(['--report', path.join(SCRATCH, 'hosts/claude/hooks/timeline-stop-hook')], { HOOK_SYNTAX_BUN: bun });
+    expect(r.code).toBe(1);
+    expect(r.output).toContain('exits 2 on every call');
+    // No wired hook runs through python3, so a broken one costs coverage only.
+    const py = exitingInterpreter('python3', 2);
+    const p = runGate(['--report', fixture('py-exit2/a.py', '#!/usr/bin/env python3\nprint("ok")\n')], { HOOK_SYNTAX_PYTHON: py });
+    expect(p.code).toBe(0);
+    expect(p.output).toContain('cannot run (exit 2)');
+  }, TEST_TIMEOUT_MS);
+
   test('a bun that cannot run is a coverage gap for the payload, never "fails to parse"', () => {
     const bun = brokenInterpreter('bun');
     const r = runGate(['--report', path.join(SCRATCH, 'hosts/claude/hooks/timeline-stop-hook')], { HOOK_SYNTAX_BUN: bun.bin });
