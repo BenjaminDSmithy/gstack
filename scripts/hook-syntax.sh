@@ -130,6 +130,44 @@ HOOK_SYNTAX_UNPARSED=()  # every file skipped, so a payload found later is uncou
 HOOK_SYNTAX_NL='
 '
 
+# Interpreters this run has probed, as `<name>=><verdict>` lines.
+HOOK_SYNTAX_PROBED="$HOOK_SYNTAX_NL"
+HOOK_SYNTAX_PROBE=''
+
+# $1 = interpreter, rest = a no-op invocation of it. Sets HOOK_SYNTAX_PROBE to
+# `ok`, `absent` or `cannot run (exit N)` and returns 0 only for `ok`. Probes
+# each interpreter once per run.
+#
+# Present is not the same as runnable: an asdf, mise or pyenv shim with no
+# version selected, or the xcode-select python3 stub, is on PATH and fails
+# every invocation. Without the probe, every file it was handed read as
+# "FAILS TO PARSE" and refused setup for a reason that is not syntax. A
+# coverage gap is what it is.
+_hook_syntax_probe() {
+  local name="$1" entry rc=0
+  shift
+  case "$HOOK_SYNTAX_PROBED" in
+    *"$HOOK_SYNTAX_NL$name=>"*)
+      entry="${HOOK_SYNTAX_PROBED#*"$HOOK_SYNTAX_NL$name=>"}"
+      HOOK_SYNTAX_PROBE="${entry%%"$HOOK_SYNTAX_NL"*}"
+      [ "$HOOK_SYNTAX_PROBE" = ok ]
+      return
+      ;;
+  esac
+  if ! command -v "$name" >/dev/null 2>&1; then
+    HOOK_SYNTAX_PROBE=absent
+  else
+    "$name" "$@" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      HOOK_SYNTAX_PROBE=ok
+    else
+      HOOK_SYNTAX_PROBE="cannot run (exit $rc)"
+    fi
+  fi
+  HOOK_SYNTAX_PROBED="$HOOK_SYNTAX_PROBED$name=>$HOOK_SYNTAX_PROBE$HOOK_SYNTAX_NL"
+  [ "$HOOK_SYNTAX_PROBE" = ok ]
+}
+
 # $1 = path. Returns 0 when this run has already checked it. Fork-free: a sweep
 # reads a few thousand files.
 _hook_syntax_seen() {
@@ -227,9 +265,9 @@ _hook_syntax_unskip() {
 _hook_syntax_check_bun() {
   local out
   _hook_syntax_unskip "$1"
-  if ! command -v "$HOOK_SYNTAX_BUN" >/dev/null 2>&1; then
+  if ! _hook_syntax_probe "$HOOK_SYNTAX_BUN" --version; then
     # A coverage gap, not a fault: every shim exits cleanly when bun is absent.
-    printf 'hook-syntax: %s absent — %s NOT checked\n' "$HOOK_SYNTAX_BUN" "$1" >&2
+    printf 'hook-syntax: %s %s — %s NOT checked\n' "$HOOK_SYNTAX_BUN" "$HOOK_SYNTAX_PROBE" "$1" >&2
     HOOK_SYNTAX_SKIPPED=$((HOOK_SYNTAX_SKIPPED + 1))
     return 0
   fi
@@ -331,8 +369,8 @@ _hook_syntax_visit() {
       fi
       ;;
     python)
-      if ! command -v "$HOOK_SYNTAX_PYTHON" >/dev/null 2>&1; then
-        printf 'hook-syntax: %s absent — %s NOT checked\n' "$HOOK_SYNTAX_PYTHON" "$file" >&2
+      if ! _hook_syntax_probe "$HOOK_SYNTAX_PYTHON" -c pass; then
+        printf 'hook-syntax: %s %s — %s NOT checked\n' "$HOOK_SYNTAX_PYTHON" "$HOOK_SYNTAX_PROBE" "$file" >&2
         HOOK_SYNTAX_SKIPPED=$((HOOK_SYNTAX_SKIPPED + 1))
         return 0
       fi
