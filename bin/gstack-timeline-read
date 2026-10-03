@@ -15,7 +15,7 @@ USAGE='Usage: gstack-timeline-read [--since "7 days ago"|7d|YYYY-MM-DD] [--limit
 SINCE_FORMS='accepted: "<N> minute|hour|day|week|month[s] ago", "<N>h|d|w", or an ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ'
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 eval "$("$SCRIPT_DIR/gstack-slug" 2>/dev/null)"
-. "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+[ -r "$(dirname "$0")/gstack-state-root.sh" ] && . "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
 gstack_state_root_select
 GSTACK_HOME="$_gstack_sr_root"
 

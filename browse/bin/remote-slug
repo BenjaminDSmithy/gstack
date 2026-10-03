@@ -5,7 +5,7 @@
 # 3+-segment nested-group remotes, #3003) is shared with bin/gstack-slug through
 # bin/gstack-remote-identity.sh.
 set -e
-. "$(dirname "$0")/../../bin/gstack-remote-identity.sh" 2>/dev/null || { echo "$0: bin/gstack-remote-identity.sh is missing. fix: reinstall with ./setup or /gstack-upgrade" >&2; exit 1; }
+[ -r "$(dirname "$0")/../../bin/gstack-remote-identity.sh" ] && . "$(dirname "$0")/../../bin/gstack-remote-identity.sh" 2>/dev/null || { echo "$0: bin/gstack-remote-identity.sh is missing. fix: reinstall with ./setup or /gstack-upgrade" >&2; exit 1; }
 URL=$(git remote get-url origin 2>/dev/null || true)
 _gri_slug=""
 if [ -n "$URL" ]; then
