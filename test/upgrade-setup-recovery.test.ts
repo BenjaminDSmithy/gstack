@@ -24,6 +24,9 @@ describe.skipIf(process.platform === 'win32')('upgrade setup recovery (real shel
           writeFileSync(join(source, 'VERSION'), 'new');
           writeFileSync(join(source, 'setup'), '#!/bin/sh\nexit "$SETUP_EXIT"\n', { mode: 0o755 });
           writeFileSync(join(bin, 'git'), '#!/bin/sh\nfor last; do :; done\ncp -R "$UPGRADE_FIXTURE" "$last"\n', { mode: 0o755 });
+          // The vendored path gates the clone with the installed copy's helper.
+          mkdirSync(join(target, 'bin'));
+          writeFileSync(join(target, 'bin', 'gstack-gate-incoming'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
           const script = blockAfter(mode === 'vendored'
             ? '**For vendored installs**'
             : '**If `LOCAL_GSTACK` is non-empty AND `TEAM_MODE` is NOT `true`:**');
@@ -42,12 +45,42 @@ describe.skipIf(process.platform === 'win32')('upgrade setup recovery (real shel
     }
   }
 
+  test('vendored: a clone that fails the hook parse gate never replaces the install', () => {
+    const root = mkdtempSync(join(tmpdir(), 'upgrade-recovery-'));
+    const target = join(root, 'target');
+    const source = join(root, 'source');
+    const bin = join(root, 'bin');
+    try {
+      for (const dir of [target, source, bin, join(target, 'bin')]) mkdirSync(dir);
+      writeFileSync(join(target, 'VERSION'), 'old');
+      writeFileSync(join(source, 'VERSION'), 'new');
+      writeFileSync(join(source, 'setup'), '#!/bin/sh\ntouch "$SETUP_MARK"\n', { mode: 0o755 });
+      writeFileSync(join(bin, 'git'), '#!/bin/sh\nfor last; do :; done\ncp -R "$UPGRADE_FIXTURE" "$last"\n', { mode: 0o755 });
+      writeFileSync(join(target, 'bin', 'gstack-gate-incoming'), '#!/bin/sh\necho "HOOK_GATE blocked"\nexit 1\n', { mode: 0o755 });
+      const mark = join(root, 'setup-ran');
+      const result = spawnSync('bash', ['-c', blockAfter('**For vendored installs**')], {
+        cwd: root, encoding: 'utf8', timeout: 10_000,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, INSTALL_DIR: target, UPGRADE_FIXTURE: source, SETUP_MARK: mark },
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('hook parse gate');
+      expect(readFileSync(join(target, 'VERSION'), 'utf8')).toBe('old');
+      expect(existsSync(`${target}.bak`)).toBe(false);
+      expect(existsSync(mark)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('git setup failure is not routed into the divergence reset fallback', () => {
     const root = mkdtempSync(join(tmpdir(), 'upgrade-git-setup-'));
     try {
       const bin = join(root, 'bin');
       mkdirSync(bin);
       writeFileSync(join(bin, 'git'), '#!/bin/sh\nif [ "$1" = rev-parse ]; then echo old-commit; fi\nexit 0\n', { mode: 0o755 });
+      // INSTALL_DIR is root, so this is $INSTALL_DIR/bin: the gated
+      // fast-forward reports success and setup is what fails.
+      writeFileSync(join(bin, 'gstack-gate-incoming'), '#!/bin/sh\necho "FF moved"\nexit 0\n', { mode: 0o755 });
       writeFileSync(join(root, 'setup'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
       const result = spawnSync('bash', ['-c', blockAfter('**For git installs**')], {
         cwd: root, encoding: 'utf8', timeout: 10_000,

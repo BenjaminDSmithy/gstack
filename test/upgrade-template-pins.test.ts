@@ -10,28 +10,47 @@ import * as path from 'path';
 const ROOT = path.resolve(import.meta.dir, '..');
 const read = (p: string) => fs.readFileSync(path.join(ROOT, p), 'utf-8');
 
-describe('gstack-upgrade template: ff-only precedes the gated reset (#2517)', () => {
+describe('gstack-upgrade template: the gated fast-forward precedes the gated reset (#2517)', () => {
   const tmpl = read('gstack-upgrade/SKILL.md.tmpl');
+  const reset = () => tmpl.indexOf('git reset --hard "$INCOMING"');
 
-  test('git pull --ff-only runs before any reset --hard', () => {
-    const ff = tmpl.indexOf('git pull --ff-only --autostash');
-    const reset = tmpl.indexOf('git reset --hard origin/main');
+  test('the hook-gated fast-forward runs before any reset --hard', () => {
+    const ff = tmpl.indexOf('gstack-gate-incoming" --fast-forward "$INSTALL_DIR" origin/main');
     expect(ff).toBeGreaterThan(-1);
-    expect(reset).toBeGreaterThan(-1);
-    expect(ff).toBeLessThan(reset);
+    expect(reset()).toBeGreaterThan(-1);
+    expect(ff).toBeLessThan(reset());
+  });
+
+  test('no git pull: a pull switches the tree in before anything can check it', () => {
+    // Hooks run from the install by path; see docs/hook-syntax-gate.md.
+    expect(tmpl).not.toMatch(/git pull\b/);
+    expect(tmpl).not.toContain('git reset --hard origin/main');
+  });
+
+  test('the fallback re-gates origin/main before it stashes or resets', () => {
+    const fallback = tmpl.slice(tmpl.indexOf('The block re-gates `origin/main`'));
+    const gate = fallback.indexOf('gstack-gate-incoming" "$INSTALL_DIR" "$INCOMING"');
+    expect(gate).toBeGreaterThan(-1);
+    expect(gate).toBeLessThan(fallback.indexOf('git stash'));
+    expect(gate).toBeLessThan(fallback.indexOf('git reset --hard "$INCOMING"'));
+  });
+
+  test('the vendored path gates the clone before it replaces the install', () => {
+    const vendored = tmpl.slice(tmpl.indexOf('**For vendored installs**'));
+    const gate = vendored.indexOf('gstack-gate-incoming" "$TMP_DIR/gstack" HEAD');
+    expect(gate).toBeGreaterThan(-1);
+    expect(gate).toBeLessThan(vendored.indexOf('mv "$INSTALL_DIR" "$INSTALL_DIR.bak"'));
   });
 
   test('the ff path carries the FF_OK success gate that skips the fallback', () => {
     expect(tmpl).toContain('FF_OK');
-    expect(tmpl.indexOf('FF_OK')).toBeLessThan(tmpl.indexOf('git reset --hard origin/main'));
+    expect(tmpl.indexOf('FF_OK')).toBeLessThan(reset());
   });
 
   test('the destructive fallback is gated on unpushed commits, not just a clean tree', () => {
     // A clean tree with unpushed local commits is NOT safe for reset --hard.
     expect(tmpl).toContain('git rev-list origin/main..HEAD');
-    expect(tmpl.indexOf('git rev-list origin/main..HEAD')).toBeLessThan(
-      tmpl.indexOf('git reset --hard origin/main'),
-    );
+    expect(tmpl.indexOf('git rev-list origin/main..HEAD')).toBeLessThan(reset());
   });
 });
 

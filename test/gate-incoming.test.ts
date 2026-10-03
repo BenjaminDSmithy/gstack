@@ -387,3 +387,64 @@ describe('gstack-session-update gates the incoming tree before it moves the chec
     expect(fs.readFileSync(fx.mark, 'utf8')).toBe('ran\n');
   }, TEST_TIMEOUT_MS);
 });
+
+// ── /gstack-upgrade Step 4, run as a real shell against real git ────────────
+
+function blockAfter(marker: string): string {
+  const at = TEMPLATE.indexOf(marker);
+  if (at < 0) throw new Error(`marker not in gstack-upgrade/SKILL.md.tmpl: ${marker}`);
+  return TEMPLATE.slice(at).match(/```bash\n([\s\S]*?)\n```/)![1].replaceAll('{{SETUP_COMMAND}}', './setup');
+}
+
+function runBlock(fx: Fx, marker: string) {
+  const r = spawnSync('bash', ['-c', blockAfter(marker)], {
+    cwd: fx.base,
+    encoding: 'utf8',
+    env: { ...GIT_ENV, INSTALL_DIR: fx.install, TMPDIR: fx.tmp, SETUP_MARK: fx.mark },
+    timeout: SPAWN_TIMEOUT_MS,
+  });
+  return { code: r.status ?? -1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
+
+describe('/gstack-upgrade Step 4 gates origin/main before the install moves', () => {
+  test('a broken hook on origin/main is refused; the install and setup are untouched', () => {
+    const fx = makeFixture();
+    const before = head(fx);
+    advance(fx, { [HOOK]: BROKEN_HOOK });
+    const r = runBlock(fx, '**For git installs**');
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('HOOK_GATE_REFUSED');
+    expect(r.stdout).toContain('HOOK_GATE blocked');
+    expect(r.stdout).not.toContain('FF_REFUSED');
+    expect(head(fx)).toBe(before);
+    expect(fs.existsSync(fx.mark)).toBe(false);
+  }, TEST_TIMEOUT_MS);
+
+  test('a clean origin/main is fast-forwarded to and set up', () => {
+    const fx = makeFixture();
+    const sha = advance(fx, { VERSION: '1.1.0\n' });
+    const r = runBlock(fx, '**For git installs**');
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toContain('FF_OK');
+    expect(head(fx)).toBe(sha);
+    expect(fs.readFileSync(fx.mark, 'utf8')).toBe('ran\n');
+  }, TEST_TIMEOUT_MS);
+
+  test('a diverged install routes to the fallback, whose re-gate refuses a broken origin/main before any reset', () => {
+    const fx = makeFixture();
+    write(fx.install, 'local.txt', 'mine\n');
+    git(fx.install, 'add', 'local.txt');
+    git(fx.install, 'commit', '-q', '-m', 'local commit');
+    const before = head(fx);
+    advance(fx, { [HOOK]: BROKEN_HOOK });
+    const main = runBlock(fx, '**For git installs**');
+    expect(main.stdout).toContain('FF_REFUSED');
+    expect(main.stdout).toContain('not a fast-forward');
+    const fallback = runBlock(fx, 'The block re-gates `origin/main`');
+    expect(fallback.code).toBe(1);
+    expect(fallback.stderr).toContain('HOOK_GATE_REFUSED');
+    expect(head(fx)).toBe(before);
+    expect(git(fx.install, 'stash', 'list')).toBe('');
+    expect(fs.existsSync(fx.mark)).toBe(false);
+  }, TEST_TIMEOUT_MS);
+});
