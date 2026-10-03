@@ -32,7 +32,8 @@
 #
 # and the /careful, /freeze and /guard skills tell users to wire two more
 # PreToolUse hooks by hand: careful/bin/check-careful.sh and
-# freeze/bin/check-freeze.sh.
+# freeze/bin/check-freeze.sh. /autoplan's generated frontmatter wires a third
+# for as long as the skill is active: autoplan/bin/phase-publication-hook.
 #
 # WHAT IT CHECKS. The sweep reads the first line of every file in the tree and
 # dispatches on the SHEBANG, never on an extension — an extension-keyed sweep in
@@ -79,7 +80,10 @@
 #
 # `bash -n` on the shim proves the shim parses and says nothing about the file
 # that runs. So every shell file this run parsed is searched for the paths it
-# hands to bun, and each of those is parsed too. The payload is found from the
+# hands to bun, and each of those is parsed too. `$HERE` is the usual name;
+# any variable the shim sets from its own directory (`$(cd "$(dirname "$0")"`
+# or `"${BASH_SOURCE[0]}"`) counts the same, which is how /autoplan's hook
+# names its payload. The payload is found from the
 # shim's own content, never guessed from `*.ts`, so a renamed or extension-less
 # payload cannot slip past, and a `.ts` nothing wired reaches is reported as
 # skipped rather than silently included. Comment lines never name a payload —
@@ -96,8 +100,9 @@
 #     is invisible here, unless a bun payload imports it.
 #   * A parse is not a run. A hook that parses and then fails at runtime is out
 #     of scope.
-#   * A shim that reaches bun any other way than `bun "$HERE/<path>"` has its
-#     payload unchecked. The shim itself is still parsed.
+#   * A shim that reaches bun any other way than `bun "$VAR/<path>"`, with
+#     VAR set from the shim's own directory, has its payload unchecked. The
+#     shim itself is still parsed.
 #   * An interpreter that is absent or cannot run (python3, bun, a PATH bash)
 #     is reported as a coverage gap for its parse, never counted as a pass and
 #     never as a parse failure. The content scans still run on its files. A
@@ -406,14 +411,17 @@ _hook_syntax_check_bun() {
 }
 
 # Find what every queued shell file hands to bun, and parse each of those. One
-# grep over all of them; the shape is `bun "$HERE/<rel>"`, with or without
-# `exec` and `run`, resolved against the shim's own directory.
+# grep over all of them; the shape is `bun "$VAR/<rel>"`, with or without
+# `exec` and `run`, resolved against the shim's own directory. VAR is HERE, or
+# a variable the same file sets from its own directory; any other variable
+# names somewhere else, and the path is not followed.
 _hook_syntax_payloads() {
   [ "${#HOOK_SYNTAX_SHELLS[@]}" -gt 0 ] || return 0
-  local hits rest hit shim f text rel dir payload rc=0
+  local hits rest hit shim f text var rel dir payload rc=0
   local comment_re='^[[:space:]]*#'
-  local bun_re='bun[[:space:]]+(run[[:space:]]+)?"\$HERE/([^"]+)"'
-  hits=$(grep -HE 'bun[[:space:]]+(run[[:space:]]+)?"\$HERE/' -- "${HOOK_SYNTAX_SHELLS[@]}" 2>/dev/null)
+  local bun_re='bun[[:space:]]+(run[[:space:]]+)?"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/([^"]+)"'
+  local own_dir_re='="\$\(cd "\$\(dirname "\$(0|\{BASH_SOURCE\[0\]\}|BASH_SOURCE)"\)"'
+  hits=$(grep -HE 'bun[[:space:]]+(run[[:space:]]+)?"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/' -- "${HOOK_SYNTAX_SHELLS[@]}" 2>/dev/null)
   [ -n "$hits" ] || return 0
   rest="$hits"
   while [ -n "$rest" ]; do
@@ -432,7 +440,11 @@ _hook_syntax_payloads() {
     text="${hit#"$shim:"}"
     [[ $text =~ $comment_re ]] && continue
     [[ $text =~ $bun_re ]] || continue
-    rel="${BASH_REMATCH[2]}"
+    var="${BASH_REMATCH[2]}"
+    rel="${BASH_REMATCH[3]}"
+    if [ "$var" != HERE ]; then
+      grep -qE "^[[:space:]]*(export[[:space:]]+|readonly[[:space:]]+|local[[:space:]]+)?$var$own_dir_re" -- "$shim" 2>/dev/null || continue
+    fi
     dir="${shim%/*}"
     [ "$dir" = "$shim" ] && dir='.'
     payload="$dir/$rel"
