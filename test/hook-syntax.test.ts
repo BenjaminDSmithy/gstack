@@ -873,6 +873,29 @@ describe('hook-syntax: house rules', () => {
     expect(GATE_SRC.split('\n').filter(l => !/^\s*#/.test(l)).some(l => /<<-?\s*['"]?[A-Z]+/.test(l))).toBe(false);
   });
 
+  test('every verdict is exit 0 or 1; any other code means the gate did not run', () => {
+    // setup and fork-sync both read the exit: 1 is "a file is broken", and
+    // anything but 0 or 1 is "the checker could not reach a verdict". A third
+    // code from the gate itself would blur those.
+    fixture('exit-matrix/ok.sh', '#!/bin/bash\nexit 0\n');
+    fixture('exit-matrix-bad/broken.sh', '#!/bin/bash\nif true; then\n');
+    fs.mkdirSync(path.join(FX, 'fx', 'exit-matrix-empty'), { recursive: true });
+    const runs: [string[], Record<string, string>, number][] = [
+      [[path.join(FX, 'fx', 'exit-matrix')], {}, 0],
+      [[path.join(FX, 'fx', 'exit-matrix-bad')], {}, 1],
+      [[path.join(FX, 'fx', 'exit-matrix-empty')], {}, 1],
+      [[path.join(FX, 'fx', 'no-such-dir-at-all')], {}, 1],
+      [[path.join(FX, 'fx', 'no-such-file.sh')], {}, 1],
+      [['--report', path.join(FX, 'fx', 'exit-matrix')], { HOOK_SYNTAX_BUN: 'definitely-not-bun', HOOK_SYNTAX_PYTHON: 'definitely-not-python' }, 0],
+    ];
+    for (const [args, env, want] of runs) {
+      expect([args.join(' '), runGate(args, env).code]).toEqual([args.join(' '), want]);
+    }
+    // And statically: the direct invocation's status is only ever 0 or 1.
+    const assigned = [...GATE_SRC.matchAll(/_rc=([^\s;|]+)/g)].map((m) => m[1]);
+    expect(new Set(assigned)).toEqual(new Set(['0', '1']));
+  }, TEST_TIMEOUT_MS);
+
   test('the gate cannot be switched off by an environment variable', () => {
     // HOOK_SYNTAX_PYTHON and HOOK_SYNTAX_BUN are interpreter-name seams for
     // this suite and are deliberately not matched here.
