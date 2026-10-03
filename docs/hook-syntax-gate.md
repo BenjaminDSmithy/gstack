@@ -210,15 +210,25 @@ else `$BASH`, like `setup`. A checker that runs past
 | 0 | clean; with `--fast-forward`, now at `<commit>` (or it already contained it) | moved only to the commit that passed |
 | 1 | a file in the incoming tree does not parse, or is half-merged; the report names it | not moved |
 | 2 | no verdict: the commit, the worktree or a checker could not be reached, the checker exited neither 0 nor 1, or it timed out | not moved |
-| 3 | `--fast-forward` only: diverged, a merge in progress, or git refused | not moved |
+| 3 | `--fast-forward` only: diverged, a merge in progress, or git refused | not moved; one exception, below: a conflicting pop whose autostash cannot be anchored leaves HEAD on `<commit>` with the markers in place |
 
 `--fast-forward` refuses before it gates when there is nothing it may take: a
 diverged checkout, or unmerged files from someone's merge in progress. Local
-edits are carried over with `--autostash`. A stash pop that conflicts writes
-conflict markers into the live tree, and git (2.56, measured 2026-10-04) still
-exits 0 for it, so the helper judges by the unmerged entries and the new
-stash: it resets the tree to the commit the gate passed and **keeps** the
-stash, printing its id. It never drops a stash.
+edits are carried over with `--autostash` and re-applied on top of the gated
+commit; they are not re-checked here (see the hole below). A stash pop that
+conflicts writes conflict markers into the live tree, and git (2.56, measured
+2026-10-04) still exits 0 for it, so the helper judges by the unmerged entries
+alone. It resets the tree to the commit the gate passed and **keeps** the
+autostash commit: in `refs/stash` as git leaves it, or, when git could not
+store it there (a held `refs/stash.lock` prints `error: cannot store <id>`),
+under `refs/gstack-autostash/<UTC time>`, and prints its id. If it cannot find
+or anchor that commit it resets nothing, exits 3 and leaves the markers for a
+person, because resetting would lose the edits. It never drops a stash.
+
+The checker runs in its own process group, so a timeout or a signal stops its
+children (bun, python, nested shells) too, and a clean verdict still passes on
+anything the checker said besides its coverage lines, such as a `NOT checked`
+gap.
 
 * **Team mode** — `bin/gstack-session-update` fetches (the receipted egress
   step), resolves `@{upstream}`, and hands that commit to
@@ -261,6 +271,12 @@ the whole file; every one is killed (measured 2026-10-04):
 * **Moves made by hand.** `git merge`, `git rebase` or `git stash pop` run in
   the registered checkout write conflict markers straight into it — the
   2026-08-27 shape. Nothing runs before them.
+* **Local edits carried over by `--autostash`.** They are re-applied on top
+  of the commit that passed and are not gated before they go live; a locally
+  edited hook that no longer parses on the new base reaches every session
+  until `./setup`'s own gate refuses the install (team mode logs that as
+  `SETUP_FAILED`). Install edits are normally regenerable SKILL.md renders, not
+  hooks.
 * **A `./setup` that fails for another reason** after a gated fast-forward
   leaves the new tree in place, as before. Its hooks passed the gate; what
   failed is the install around them.
