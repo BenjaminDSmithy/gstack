@@ -104,24 +104,31 @@ function knownHooks(): Wired[] {
   return out;
 }
 
-// Skills register hooks in their frontmatter, as `bash $HOME/.claude/skills/
-// gstack/<rel>`; they run whenever the skill is active.
+// Skills register hooks in their frontmatter; they run whenever the skill is
+// active. Some are written in the template (`bash $HOME/.claude/skills/gstack/
+// <rel>`), and some are injected when SKILL.md is generated (/autoplan's,
+// inside a `bash -c` wrapper), so both files are read, and any installed path
+// a hook command names counts.
 function frontmatterHooks(): Wired[] {
   const out = new Map<string, Wired>();
   for (const dir of fs.readdirSync(ROOT)) {
-    const tmpl = path.join(ROOT, dir, 'SKILL.md.tmpl');
-    if (!fs.existsSync(tmpl)) continue;
-    const text = fs.readFileSync(tmpl, 'utf-8');
-    if (!text.startsWith('---\n')) continue;
-    const front = text.slice(4, text.indexOf('\n---', 4));
-    if (!/^hooks:/m.test(front)) continue;
-    let event = '';
-    for (const line of front.split('\n')) {
-      const ev = line.match(/^ {2}([A-Za-z]+):\s*$/);
-      if (ev) event = ev[1];
-      // Upstream wraps the call: bash -c "exec bash \"$HOME/.claude/skills/gstack/<rel>\"".
-      const cmd = line.match(/command: .*?\$HOME\/\.claude\/skills\/gstack\/([^"'\s\\]+)/);
-      if (cmd && !out.has(cmd[1])) out.set(cmd[1], { rel: cmd[1], event, source: `${dir}/SKILL.md.tmpl frontmatter` });
+    for (const name of ['SKILL.md.tmpl', 'SKILL.md']) {
+      const file = path.join(ROOT, dir, name);
+      if (!fs.existsSync(file)) continue;
+      const text = fs.readFileSync(file, 'utf-8');
+      if (!text.startsWith('---\n')) continue;
+      const front = text.slice(4, text.indexOf('\n---', 4));
+      if (!/^hooks:/m.test(front)) continue;
+      let event = '';
+      for (const line of front.split('\n')) {
+        const ev = line.match(/^ {2}([A-Za-z]+):\s*$/);
+        if (ev) event = ev[1];
+        if (!/^\s*command:/.test(line)) continue;
+        for (const m of line.matchAll(/\$HOME\/\.claude\/skills\/gstack\/([A-Za-z0-9_.\/-]+)/g)) {
+          const rel = m[1];
+          if (!out.has(rel) && fs.existsSync(path.join(ROOT, rel))) out.set(rel, { rel, event, source: `${dir}/${name} frontmatter` });
+        }
+      }
     }
   }
   return [...out.values()];
@@ -132,10 +139,13 @@ const WIRED: Wired[] = [...knownHooks(), ...frontmatterHooks()];
 // The payload a shim hands to bun, read the way a reader would, independent of
 // the gate's own discovery.
 function payloadOf(shimText: string): string | null {
+  // HERE, or any variable the shim sets from its own directory.
+  const ownDir = new Set(['HERE']);
+  for (const m of shimText.matchAll(/^\s*(?:export\s+|readonly\s+|local\s+)?([A-Za-z_]\w*)="\$\(cd "\$\(dirname "\$(?:0|\{BASH_SOURCE\[0\]\}|BASH_SOURCE)"\)"/gm)) ownDir.add(m[1]);
   for (const line of shimText.split('\n')) {
     if (/^\s*#/.test(line)) continue;
-    const m = line.match(/bun\s+(?:run\s+)?"\$HERE\/([^"]+)"/);
-    if (m) return m[1];
+    const m = line.match(/bun\s+(?:run\s+)?"\$\{?([A-Za-z_]\w*)\}?\/([^"]+)"/);
+    if (m && ownDir.has(m[1])) return m[2];
   }
   return null;
 }
@@ -146,7 +156,12 @@ let FX = '';
 // A scratch copy of everything the wired hooks reach: the shims, their bun
 // payloads, everything those import, and the libraries the bin hooks source.
 let SCRATCH = '';
-const SCRATCH_DIRS = ['hosts', 'lib', 'scripts', 'bin', 'careful/bin', 'freeze/bin'];
+// What a wired hook and its payload pull in lives under these roots, plus the
+// hook's own directory (careful/bin, autoplan/bin, ...), derived so a newly
+// wired hook is copied without editing this list.
+const SCRATCH_ROOTS = ['hosts', 'lib', 'scripts', 'bin'];
+const SCRATCH_DIRS = [...new Set([...SCRATCH_ROOTS, ...WIRED.map(h => path.dirname(h.rel))])]
+  .filter(d => !SCRATCH_ROOTS.some(r => d !== r && d.startsWith(`${r}/`)));
 
 beforeAll(() => {
   FX = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-hook-syntax-'));
@@ -200,6 +215,7 @@ describe('hook-syntax: the wired hook list', () => {
     expect(frontmatterHooks().length).toBeGreaterThanOrEqual(2);
     expect(WIRED.find(h => h.rel === 'hosts/claude/hooks/question-preference-hook')?.event).toBe('PreToolUse');
     expect(WIRED.find(h => h.rel === 'careful/bin/check-careful.sh')?.event).toBe('PreToolUse');
+    expect(WIRED.find(h => h.rel === 'autoplan/bin/phase-publication-hook')?.event).toBe('PreToolUse');
   });
 
   test('every hosts/claude/hooks shim hands a payload to bun', () => {
@@ -1124,6 +1140,24 @@ describe('hook-syntax: bun payloads', () => {
   test('a commented-out bun invocation is not a payload', () => {
     // The gate's own header quotes the shim shape.
     const p = fixture('commented/hook', '#!/usr/bin/env bash\nHERE="$(pwd)"\n# exec bun "$HERE/never-existed.ts"\nexit 0\n');
+    const r = runGate([p]);
+    expect(r.output).toBe('');
+    expect(r.code).toBe(0);
+  }, TEST_TIMEOUT_MS);
+
+  test('a payload named through a variable set from the shim\'s own directory is found', () => {
+    // /autoplan's hook spells it `bun "$_AUTOPLAN_HOOK_DIR/<payload>"`.
+    const shim = '#!/usr/bin/env bash\nD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"\nR="$(bun "$D/payload.ts")"\necho "$R"\n';
+    fixture('var-payload/hook', shim);
+    fixture('var-payload/payload.ts', 'const broken: number = {\n');
+    const r = runGate(['--report', path.join(FX, 'fx', 'var-payload/hook')]);
+    expect(r.code).toBe(1);
+    expect(r.output).toContain('FAILS TO PARSE');
+    expect(r.output).toContain('payload.ts');
+  }, TEST_TIMEOUT_MS);
+
+  test('control: a variable that names somewhere else is not followed', () => {
+    const p = fixture('other-var/hook', '#!/usr/bin/env bash\nexec bun "$HOME/never-shipped.ts"\n');
     const r = runGate([p]);
     expect(r.output).toBe('');
     expect(r.code).toBe(0);
