@@ -50,7 +50,7 @@ const TEST_TIMEOUT_MS = 150_000;
 const SWEEP_TIMEOUT_MS = 240_000;
 
 type Run = { code: number; output: string };
-type Captured = { status: number | null; stdout: string; stderr: string };
+type Captured = { status: number | null; signal: string | null; stdout: string; stderr: string };
 
 // Child output goes through files, never pipes. Under heavy load Bun 1.3's
 // spawnSync has returned the right exit status with an EMPTY piped stderr (1
@@ -65,6 +65,7 @@ function spawnCaptured(cmd: string, args: string[], opts: { cwd?: string; env?: 
     const r = spawnSync(cmd, args, { ...opts, stdio: ['ignore', outFd, errFd], timeout: SPAWN_TIMEOUT_MS });
     return {
       status: r.status,
+      signal: r.signal ?? null,
       stdout: fs.readFileSync(path.join(io, 'out'), 'utf-8'),
       stderr: fs.readFileSync(path.join(io, 'err'), 'utf-8'),
     };
@@ -75,9 +76,17 @@ function spawnCaptured(cmd: string, args: string[], opts: { cwd?: string; env?: 
   }
 }
 
+// A child killed by a signal (the spawn timeout included) has no exit status.
+// It reads as -1, never as 1: a gate that hung until it was killed must not
+// pass a case that expects the refusal status.
+function codeOf(r: Captured): number {
+  return r.status ?? -1;
+}
+
 function runGate(args: string[], env: Record<string, string> = {}): Run {
   const r = spawnCaptured('/bin/bash', [GATE, ...args], { env: { ...process.env, ...env } });
-  return { code: r.status ?? 1, output: `${r.stdout}${r.stderr}`.trim() };
+  const killed = r.signal ? `\n[killed by ${r.signal}]` : '';
+  return { code: codeOf(r), output: `${r.stdout}${r.stderr}${killed}`.trim() };
 }
 
 // ── the wired hooks, derived from where they are registered ────────────────
@@ -1106,6 +1115,13 @@ describe('hook-syntax: bun payloads', () => {
 // ── house rules ────────────────────────────────────────────────────────────
 
 describe('hook-syntax: house rules', () => {
+  test('the harness reads a killed gate as killed, never as exit 1', () => {
+    const r = spawnCaptured('/bin/sh', ['-c', 'kill -KILL $$']);
+    expect(r.status).toBeNull();
+    expect(r.signal).toBe('SIGKILL');
+    expect(codeOf(r)).toBe(-1);
+  });
+
   test('the gate ships a /bin/bash shebang and carries no heredoc', () => {
     // A PATH bash on macOS is Homebrew's 5.x, which can deadlock writing a
     // heredoc body.
@@ -1200,7 +1216,8 @@ function runSetup(dir: string, home: string): Run {
     env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, TMPDIR: path.join(dir, 'tmp') },
     cwd: path.join(dir, 'tree'),
   });
-  return { code: r.status ?? 1, output: `${r.stdout}${r.stderr}` };
+  const killed = r.signal ? `\n[killed by ${r.signal}]` : '';
+  return { code: codeOf(r), output: `${r.stdout}${r.stderr}${killed}` };
 }
 
 function homeIsEmpty(home: string): boolean {
