@@ -6,8 +6,10 @@
  *
  *   1. Code (current repo)         → `gbrain sources add` (idempotent via
  *                                    lib/gbrain-sources.ts) + `gbrain sync
- *                                    --strategy code` (incremental) or
- *                                    `gbrain reindex-code --yes` (--full).
+ *                                    --source <id>` on the source's persisted
+ *                                    strategy, `code` for a new source (see
+ *                                    codeWalkStrategy), incremental, or
+ *                                    `--full` + `gbrain reindex-code --yes`.
  *                                    NEVER `gbrain import` (markdown only).
  *   2. Transcripts + curated memory → gstack-memory-ingest (typed put_page)
  *   3. Curated artifacts to git    → gstack-brain-sync (existing pipeline)
@@ -37,7 +39,15 @@ import { createHash } from "crypto";
 
 import "../lib/conductor-env-shim";
 import { detectEngineTier, withErrorContext, canonicalizeRemote } from "../lib/gstack-memory-helpers";
-import { ensureSourceRegistered, sourcePageCount, parseSourcesList, cycleCompleted, type CycleStatus } from "../lib/gbrain-sources";
+import {
+  ensureSourceRegistered,
+  sourcePageCount,
+  parseSourcesList,
+  cycleCompleted,
+  sourceStrategy,
+  setSourceStrategy,
+  type CycleStatus,
+} from "../lib/gbrain-sources";
 import { detectAutopilot, decideSourceRemove, decideCodeSync } from "../lib/gbrain-guards";
 import { writeReceipt } from "../lib/egress-receipt";
 import { localEngineStatus, type LocalEngineStatus } from "../lib/gbrain-local-status";
@@ -1114,6 +1124,65 @@ export function gbrainFailureSummary(gbrainArgs: string[], run: GbrainStreamResu
   return `gbrain ${gbrainArgs.join(" ")} ${outcome}${lastLine ? `: ${lastLine}` : ""}`;
 }
 
+// What the dry-run preview says about the walk's strategy (dry-run never
+// probes gbrain, so it names both outcomes of codeWalkStrategy).
+const WALK_STRATEGY_PREVIEW =
+  "(the source's persisted strategy; persists code first when unset; --strategy code when gbrain lacks sources set-strategy)";
+
+export interface CodeWalkStrategy {
+  /** argv for the walk after `sync`: [] lets gbrain use the persisted strategy. */
+  args: string[];
+  /** Set when gstack persisted `code` itself, for the stage log. */
+  note?: string;
+  /** Set when persisting `code` failed; the walk keeps `--strategy code`. */
+  warning?: string;
+}
+
+/**
+ * Decide the `--strategy` argv for the code walk.
+ *
+ * An explicit `--strategy` overrides the strategy gbrain persists per source
+ * (`sources.config.strategy`), so passing `--strategy code` on every run
+ * replaced a deliberate per-source choice such as `auto` on a source that
+ * indexes Markdown memory files. Under `code` gbrain treats a modified `.md`
+ * as un-syncable and soft-deletes its page. So the walk passes no strategy
+ * and gbrain resolves the persisted one.
+ *
+ * Dropping the flag is safe only while a strategy IS persisted. With neither
+ * a flag nor a persisted value gbrain falls back to `markdown`: a code source
+ * then imports nothing, still advances its sync anchor, and soft-deletes
+ * every modified code page. So:
+ *   - persisted value        → no flag.
+ *   - nothing persisted      → persist `code` once, re-read, and drop the flag
+ *                              only when the re-read reports `code`.
+ *   - no strategy surface    → `--strategy code`, as before (a gbrain whose
+ *     (or a failed write)      `sources list --json` rows lack `strategy`
+ *                              has no `sources set-strategy` either).
+ */
+export function codeWalkStrategy(
+  sourceId: string,
+  env?: NodeJS.ProcessEnv,
+  io: { read?: typeof sourceStrategy; write?: typeof setSourceStrategy } = {},
+): CodeWalkStrategy {
+  const read = io.read ?? sourceStrategy;
+  const write = io.write ?? setSourceStrategy;
+  const explicit = ["--strategy", "code"];
+
+  const reading = read(sourceId, env);
+  if (reading === "unsupported") return { args: explicit };
+  if (reading !== "unset") return { args: [] };
+
+  const failure = write(sourceId, "code", env);
+  if (failure !== null) {
+    return { args: explicit, warning: `could not persist strategy code for ${sourceId} (${failure}); passing --strategy code` };
+  }
+  const confirmed = read(sourceId, env);
+  if (confirmed !== "code") {
+    return { args: explicit, warning: `persisted strategy code for ${sourceId} but gbrain reads back ${confirmed}; passing --strategy code` };
+  }
+  return { args: [], note: `persisted strategy code for ${sourceId} (it had none)` };
+}
+
 async function runCodeImport(args: CliArgs): Promise<StageResult> {
   const t0 = Date.now();
   const root = repoRoot();
@@ -1169,8 +1238,8 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
       ok: true,
       duration_ms: 0,
       summary: pinnedSourceId
-        ? `would: gbrain sync --strategy code --source ${sourceId} --no-pull; gbrain sources attach ${sourceId}`
-        : `would: gbrain sources add ${sourceId} --path ${root} --federated; gbrain sync --strategy code --source ${sourceId} --no-pull; gbrain sources attach ${sourceId}`,
+        ? `would: gbrain sync --source ${sourceId} --no-pull ${WALK_STRATEGY_PREVIEW}; gbrain sources attach ${sourceId}`
+        : `would: gbrain sources add ${sourceId} --path ${root} --federated; gbrain sync --source ${sourceId} --no-pull ${WALK_STRATEGY_PREVIEW}; gbrain sources attach ${sourceId}`,
       detail: { source_id: sourceId, source_path: root, status: "skipped" },
     };
   }
@@ -1256,8 +1325,8 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
   // walks the filesystem. On a freshly-registered source (0 pages) a --full
   // run that called reindex-code alone found nothing ("No code pages to
   // reindex"), finished in ~1s, and left the code index permanently empty
-  // while still reporting OK. The page-creating walk is `sync --strategy
-  // code`, so --full must run it FIRST, then reindex-code, to honor the
+  // while still reporting OK. The page-creating walk is `sync --source
+  // <id>`, so --full must run it FIRST, then reindex-code, to honor the
   // documented "full walk + reindex" contract for both fresh and populated
   // sources.
   const codeTimeoutMs = resolveStageTimeoutMs(
@@ -1310,7 +1379,7 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
 
   // `--full` must do a FULL walk, not a delta one.
   //
-  // A bare `sync --strategy code` is incremental: it only revisits files that
+  // A bare `sync --source <id>` is incremental: it only revisits files that
   // changed since the source's checkpoint. So a file missed at the ORIGINAL
   // import is never revisited and stays invisible indefinitely — and the
   // reindex-code pass below cannot rescue it, because it re-chunks pages that
@@ -1328,7 +1397,14 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
   // --no-pull always (#2985): gstack indexes the user's working checkout and
   // never wants gbrain to pull or rebase it, and managed gbrain (>= 0.51)
   // refuses `sync` without it. Every supported gbrain accepts the flag.
-  const walkArgs = ["sync", "--strategy", "code", "--source", sourceId, "--no-pull"];
+  //
+  // No `--strategy` once the source has one persisted (codeWalkStrategy).
+  const strategy = codeWalkStrategy(sourceId, gbrainEnv);
+  if (!args.quiet) {
+    if (strategy.warning) console.error(`[sync:code] ${strategy.warning}`);
+    if (strategy.note) console.error(`[sync:code] ${strategy.note}`);
+  }
+  const walkArgs = ["sync", ...strategy.args, "--source", sourceId, "--no-pull"];
   if (args.mode === "full") walkArgs.push("--full", "--yes");
   const walkResult = await runGbrainStreaming(walkArgs, { quiet: args.quiet, timeoutMs: codeTimeoutMs, env: gbrainEnv });
 
