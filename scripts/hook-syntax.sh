@@ -2,9 +2,10 @@
 # hook-syntax.sh — parse gate for the shell, python and hook-payload files this
 # repo ships.
 #
-# Run by `setup` before it executes, links, copies or registers anything, and
-# pinned by `test/hook-syntax.test.ts`, which runs in the free suite. Also
-# runnable alone (spell /bin/bash — see "Invocation" below):
+# Run by `setup` before it sources, builds, links, copies or registers anything
+# (only scripts/heal-eol.sh runs first), and pinned by `test/hook-syntax.test.ts`,
+# which runs in the free suite. Also runnable alone (spell /bin/bash — see
+# "Invocation" below):
 #
 #   /bin/bash scripts/hook-syntax.sh                  # sweep the whole repo
 #   /bin/bash scripts/hook-syntax.sh <file|dir>...    # check the named targets
