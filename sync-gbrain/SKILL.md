@@ -387,8 +387,12 @@ guidance in CLAUDE.md so the coding agent knows when to prefer `gbrain`
 search over Grep.
 
 **Architecture (post-codex review):** This skill uses gbrain v0.20.0+'s
-**native code surfaces** (`gbrain sources add`, `gbrain sync --strategy code`,
+**native code surfaces** (`gbrain sources add`, `gbrain sync --source <id>`,
 `gbrain reindex-code`, `gbrain code-def/code-refs/code-callers/code-callees`).
+The walk uses the strategy gbrain persists for the source, so a per-source
+choice such as `auto` sticks; a source with none gets `code` persisted first
+(`gbrain sources set-strategy`), and a gbrain without that command gets
+`--strategy code`.
 It does NOT use `gbrain import` (that path is for markdown directories).
 It does NOT touch `~/.gstack/` indexing (the existing `gstack-gbrain-source-wireup`
 owns that — never double-store).
