@@ -352,49 +352,67 @@ upstream and a running install, and `setup` is the line after that.
 
 ## Mutation results
 
-Twenty-five named regressions were injected into the checker, `setup`,
-`scripts/heal-eol.sh` and `.gitattributes`, one at a time, against the whole
-of `test/hook-syntax.test.ts`. Each edit was asserted to have applied before the
-suite ran, because an edit that silently misses reads as a survivor that proves
-nothing. All twenty-five are killed:
+Forty named regressions were injected into the checker, `setup`,
+`scripts/heal-eol.sh` and `.gitattributes`, one at a time, against
+`test/hook-syntax.test.ts`, on 2026-10-04 at this tree. Each edit was asserted
+to have applied before the suite ran, because an edit that silently misses
+reads as a survivor that proves nothing, and each file was restored byte for
+byte afterwards. A regression in `setup` ran the whole file; every other one ran
+it without the two real-setup canonical-tree cases, which take minutes each and
+which only `setup` can change. The unmutated baseline passed the whole file,
+152 cases. Thirty-nine are killed:
 
 | Injected regression | Cases that fail |
 | --- | --- |
-| marker scan removed | 20 |
+| marker scan removed | 27 |
 | sweep made non-recursive | 6 |
-| skipped files counted as checked | 5 |
-| dispatch keyed on extension instead of shebang | 52 |
-| bun payload arm removed | 23 |
-| unlabelled `=` added to the marker scan | 3 |
-| every shell file parsed by one PATH bash | 1 |
+| skipped files counted as checked | 7 |
+| dispatch keyed on extension instead of shebang | 62 |
+| bun payload arm removed | 35 |
+| unlabelled `=` added to the marker scan | 4 |
+| every shell file parsed by one PATH bash | 2 |
 | shebang-less `.sh` rule removed | 2 |
 | npm packages resolved instead of left external | 1 |
 | python SyntaxWarning no longer an error | 1 |
 | `setup` warns instead of refusing | 2 |
-| `setup` tolerates a missing checker | 1 |
-| gate moved below `setup`'s first write | 6 |
-| interpreter probe removed (a shim that cannot run reads as a parse failure) | 2 |
+| `setup` skips the gate when the checker is missing | 1 |
+| gate moved below `setup`'s first source | 6 |
+| interpreter probe removed (a shim that cannot run reads as a parse failure) | 8 |
 | a sweep that found nothing allowed to pass | 2 |
 | nested checkouts swept | 2 |
 | glob characters in a nested-checkout path left unescaped | 1 |
 | directory access check removed | 2 |
-| carriage-return scan removed | 3 |
-| CRLF shebang no longer stripped for dispatch | 3 |
+| carriage-return scan removed | 4 |
+| CRLF shebang no longer stripped for dispatch | 4 |
 | `setup` reads every non-zero gate exit as a parse failure | 2 |
 | `setup` no longer heals CRLF copies before the gate | 1 |
 | LF pin for the hook shims removed from `.gitattributes` | 1 |
-| gate exits 3 instead of 1 | 33 |
+| gate exits 3 instead of 1 | 72 |
 | heal-eol rewrites any CRLF file, not only shell scripts | 1 |
+| first-line read uncapped | 2 |
+| first-line read keyed on newline on every bash (NUL bound removed) | 2 |
+| a shell interpreter trusted on `command -v` alone | 3 |
+| heal-eol's temp file created under `setup`'s umask | 1 |
+| files a payload imports not marker-scanned | 3 |
+| an extension-less payload left to the build's own rules | 2 |
+| a bun that cannot list imports stays silent | 1 |
+| a gap in the parse skips the content scans too | 1 |
+| an interpreter that exits 2 treated as a gap | 2 |
+| a payload followed only through `$HERE` | 4 |
+| heal-eol reads index paths without the work-tree prefix | 1 |
+| heal-eol leaves a read-only temp copy read-only | 1 |
+| `setup` does not gate the canonical tree | 1 |
+| `setup` exits 0 after refusing to register hooks | 1 |
 
-`setup` warns instead of refusing survived a first pass: in a minimal fixture
-tree, `setup` died one line after the gate anyway. The fixture now carries a stub
-for the first tree code `setup` runs after the gate, and every refusal case
-asserts the stub was never reached.
+The one survivor is equivalent, not a gap: deleting only the `exit 1` after
+"the hook parse gate is missing" leaves `setup` to run the missing file, which
+exits 127, and the "could not run" branch refuses instead. The row above where
+`setup` skips the gate outright when the checker is missing is killed.
 
 Two kills depend on the machine. The one-interpreter case needs a `/bin/bash`
 older than 4, which is macOS, and the python case needs python 3.12 or later.
-Elsewhere those cases pass without proving anything, so those two mutants would
-survive.
+The NUL-bound case needs a bash 4 or newer, which is `/bin/bash` on Linux and a
+`PATH` bash on most Macs. Elsewhere those cases pass without proving anything.
 
 ## Running it by hand
 
