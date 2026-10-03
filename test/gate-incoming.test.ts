@@ -308,3 +308,82 @@ describe('gstack-gate-incoming --fast-forward', () => {
     expect(git(fx.install, 'stash', 'show', '-p', kept![1])).toContain('# top LOCAL');
   }, TEST_TIMEOUT_MS);
 });
+
+// ── bin/gstack-session-update ───────────────────────────────────────────────
+
+function runSessionUpdate(fx: Fx, env: Record<string, string> = {}) {
+  return spawnSync('bash', [SESSION_UPDATE], {
+    encoding: 'utf8',
+    env: { ...GIT_ENV, GSTACK_DIR: fx.install, GSTACK_STATE_DIR: fx.state, TMPDIR: fx.tmp, SETUP_MARK: fx.mark, ...env },
+    timeout: 30_000,
+  });
+}
+
+// The update forks into the background; its log is the only output.
+const DONE = /UPDATED from=|UP_TO_DATE|PULL_FAILED|HOOK_SYNTAX_BLOCKED|HOOK_GATE_INCONCLUSIVE/;
+async function waitForLog(fx: Fx, ms = 120_000): Promise<string> {
+  const logFile = path.join(fx.state, 'analytics', 'session-update.log');
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    const content = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
+    if (DONE.test(content)) return content;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
+}
+
+describe('gstack-session-update gates the incoming tree before it moves the checkout', () => {
+  test('an incoming commit with a broken hook leaves the checkout on OLD_HEAD and logs why', async () => {
+    const fx = makeFixture();
+    const before = head(fx);
+    const sha = advance(fx, { [HOOK]: BROKEN_HOOK });
+    expect(runSessionUpdate(fx).status).toBe(0);
+    const log = await waitForLog(fx);
+    const line = log.split('\n').find((l) => l.includes('HOOK_SYNTAX_BLOCKED')) ?? '';
+    expect(line, log).toContain(`head=${before}`);
+    expect(line).toContain(`incoming=${sha}`);
+    expect(line).toContain('demo-hook');
+    expect(log).not.toContain('UPDATING');
+    expect(head(fx)).toBe(before);
+    expect(fs.readFileSync(path.join(fx.install, HOOK), 'utf8')).toBe(GOOD_HOOK);
+    expect(fs.existsSync(fx.mark)).toBe(false);
+    expect(leftovers(fx)).toEqual({ worktrees: 1, scratch: [] });
+  }, TEST_TIMEOUT_MS);
+
+  test('a clean incoming commit is fast-forwarded to and set up', async () => {
+    const fx = makeFixture();
+    const sha = advance(fx, { VERSION: '1.1.0\n' });
+    expect(runSessionUpdate(fx).status).toBe(0);
+    const log = await waitForLog(fx);
+    expect(log).toContain(`HOOK_GATE_PASSED incoming=${sha}`);
+    expect(log).toContain('UPDATED from=1.0.0 to=1.1.0');
+    expect(log).not.toContain('SETUP_FAILED');
+    expect(head(fx)).toBe(sha);
+    expect(fs.readFileSync(fx.mark, 'utf8')).toBe('ran\n');
+  }, TEST_TIMEOUT_MS);
+
+  test('a gate with no verdict holds the checkout and logs it as inconclusive', async () => {
+    const fx = makeFixture();
+    const before = head(fx);
+    advance(fx, { 'scripts/hook-syntax.sh': '#!/bin/bash\nexit 3\n' });
+    expect(runSessionUpdate(fx).status).toBe(0);
+    const log = await waitForLog(fx);
+    expect(log).toMatch(/HOOK_GATE_INCONCLUSIVE head=\S+ incoming=\S+ exit=2 /);
+    expect(log).not.toContain('UPDATING');
+    expect(head(fx)).toBe(before);
+  }, TEST_TIMEOUT_MS);
+
+  test('a conflicting autostash pop leaves no conflict markers live, keeps the stash, and still sets up', async () => {
+    const fx = makeFixture();
+    const sha = advance(fx, { 'SKILL.md': '# top v2\nname: qa\nbody line\n' });
+    write(fx.install, 'SKILL.md', '# top LOCAL\nname: qa\nbody line\n');
+    expect(runSessionUpdate(fx).status).toBe(0);
+    const log = await waitForLog(fx);
+    expect(log).toMatch(/AUTOSTASH_CONFLICT_RECOVERED tree_reset=1 kept_stash=[0-9a-f]{40}/);
+    expect(log).toContain('UPDATED from=');
+    expect(head(fx)).toBe(sha);
+    expect(fs.readFileSync(path.join(fx.install, 'SKILL.md'), 'utf8')).not.toContain(LT);
+    expect(git(fx.install, 'stash', 'list')).toContain('autostash');
+    expect(fs.readFileSync(fx.mark, 'utf8')).toBe('ran\n');
+  }, TEST_TIMEOUT_MS);
+});
