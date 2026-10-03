@@ -497,6 +497,7 @@ CALLER_PID=$(gstack_harness_pid "$PPID")
     GATE_EXIT=$?
     touch "$LOCK_DIR/pid" 2>/dev/null
     GATE_VERDICT=$(grep -m1 '^HOOK_GATE' "$GATE_OUT" 2>/dev/null)
+    GATE_GAPS=$(grep -c 'NOT checked' "$GATE_ERR" 2>/dev/null)
     GATE_REPORT=$(grep -v '^hook-syntax: [0-9]* \(checked\|nested\)' "$GATE_ERR" 2>/dev/null | head -c 300 | tr '\n' ' ' | tr -s ' ')
     [ "$GATE_OUT" = /dev/null ] || rm -f "$GATE_OUT"
     [ "$GATE_ERR" = /dev/null ] || rm -f "$GATE_ERR"
@@ -504,7 +505,7 @@ CALLER_PID=$(gstack_harness_pid "$PPID")
       0)
         # A pass can still carry a coverage gap ("bun absent ... NOT checked");
         # it goes into the log, not away.
-        [ -n "$GATE_VERDICT" ] && log_entry "HOOK_GATE_PASSED incoming=$INCOMING verdict=$GATE_VERDICT${GATE_REPORT:+ report=$GATE_REPORT}"
+        [ -n "$GATE_VERDICT" ] && log_entry "HOOK_GATE_PASSED incoming=$INCOMING verdict=$GATE_VERDICT${GATE_REPORT:+ gaps=${GATE_GAPS:-0} report=$GATE_REPORT}"
         ;;
       1)
         log_entry "HOOK_SYNTAX_BLOCKED head=$OLD_HEAD incoming=$INCOMING verdict=${GATE_VERDICT:-none} report=${GATE_REPORT:-none}"
