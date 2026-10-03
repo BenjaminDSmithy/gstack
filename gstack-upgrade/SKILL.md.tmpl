@@ -164,13 +164,16 @@ Use the install type and directory detected in Step 2:
 **For git installs** (global-git, local-git):
 
 Fast-forward first, through `bin/gstack-ff-update`, the same code the
-session-update auto-upgrade uses: local edits that merge cleanly ride over the
-update, and an edit that conflicts (or a staged change, or an unmerged file)
-is saved in a rescue ref instead of being left as conflict markers:
+session-update auto-upgrade uses. Hooks run from this checkout by path, so
+`gstack-gate-incoming` first parse-gates the exact incoming commit in a
+throwaway worktree, and the fast-forward moves only to the commit that passed.
+Local edits that merge cleanly ride over the update, and an edit that
+conflicts (or a staged change, or an unmerged file) is saved in a rescue ref
+instead of being left as conflict markers:
 ```bash
 cd -- "${INSTALL_DIR:?INSTALL_DIR is not set: re-run Step 2 and substitute the printed path}" || exit 1
 { [ -f VERSION ] && [ -f setup ] && [ -f bin/gstack-config ] && _p=$(git rev-parse --show-prefix 2>/dev/null) && [ -z "$_p" ] && [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; } || { echo "ERROR: $INSTALL_DIR is not a gstack checkout; nothing was changed. Re-run Step 2." >&2; exit 1; }
-git fetch origin
+git fetch origin || { echo "FETCH_FAILED: nothing changed (still $(git rev-parse --short HEAD))" >&2; exit 1; }
 # Channel ref (docs/releases.md): origin/stable for a team install, else origin/main
 _CH=$(bash bin/gstack-update-channel.sh --fetch-ref 2>&1) || _CH=origin/main
 echo "$_CH"; UPSTREAM_REF=$(printf '%s\n' "$_CH" | tail -1)
@@ -183,7 +186,10 @@ echo "PRE_UPGRADE_COMMIT=$PRE_UPGRADE_COMMIT"
 # Past the release (by ancestry, or by VERSION in a depth-1 clone): wait for stable; nothing moves back.
 if [ "$UPSTREAM_REF" = origin/stable ] && [ "$(git rev-parse origin/stable)" != "$PRE_UPGRADE_COMMIT" ] && ! git merge-base --is-ancestor HEAD origin/stable 2>/dev/null \
   && { git merge-base --is-ancestor origin/stable HEAD 2>/dev/null || [ "$(printf '%s\n%s\n' "$(git show origin/stable:VERSION)" "$(cat VERSION)" | sort -V | tail -1)" = "$(cat VERSION)" ]; }; then echo "AHEAD_OF_STABLE"; exit 0; fi
-FF=$(bash bin/gstack-ff-update . "$UPSTREAM_REF"); FF_RC=$?
+# Gate the exact commit the channel names, then move only to that commit.
+INCOMING=$(git rev-parse --verify "$UPSTREAM_REF^{commit}") || { echo "FF_STOPPED: cannot resolve $UPSTREAM_REF; nothing was changed" >&2; exit 1; }
+"$INSTALL_DIR/bin/gstack-gate-incoming" "$INSTALL_DIR" "$INCOMING" || { echo "HOOK_GATE_REFUSED: install unchanged at $PRE_UPGRADE_COMMIT (gate exit $?)" >&2; exit 1; }
+FF=$(bash bin/gstack-ff-update . "$INCOMING"); FF_RC=$?
 echo "$FF"
 case "$FF_RC" in
   0) if {{SETUP_COMMAND}} --refresh-registered; then echo "FF_OK"; else echo "SETUP_FAILED: git update succeeded; stop and inspect setup output (previous commit: $PRE_UPGRADE_COMMIT)" >&2; exit 1; fi ;;
@@ -215,6 +221,11 @@ index is damaged.
 On `BUN_TOO_OLD`, STOP: tell the user to run `bun upgrade`, then /gstack-upgrade again.
 On `BUN_VERSION_UNREADABLE`, STOP: `bun --version` did not print a version gstack can read, so `bun upgrade` may not run either; tell the user to reinstall Bun from https://bun.sh (`curl -fsSL https://bun.sh/install | bash` in Git Bash or a macOS/Linux terminal), check that `bun --version` prints a version such as 1.4.2, then run /gstack-upgrade again (docs/troubleshooting.md#bun-version-unreadable).
 On `SETUP_FAILED`, STOP; keep user changes and report the recovery commit. There is no `.bak` on the git path. Do not enter the divergence fallback merely because setup failed. Enter it only on `FF_REFUSED` (local commits or a diverged history); network/auth failures stop for repair, not reset.
+On `HOOK_GATE_REFUSED`, STOP and quote the `HOOK_GATE` line: `blocked` means
+the new version has a file that does not parse (name it from the report),
+`no-verdict` means the gate could not run. Nothing moved. Never take the
+fallback for it.
+On `FETCH_FAILED`, stop for network/auth repair, not reset.
 
 **Fallback (ff-only refused — local commits or divergence).** `git reset
 --hard` DESTROYS things: a clean tree with unpushed local commits still loses
@@ -231,15 +242,20 @@ those commits. Gate it:
    rescue their work first (recommended when local commits exist). Never
    proceed on a vague reply.
 
+The block re-gates the channel's commit (`UPSTREAM_REF`) before any stash or reset:
+
 ```bash
 cd -- "${INSTALL_DIR:?INSTALL_DIR is not set: re-run Step 2 and substitute the printed path}" || exit 1
 { [ -f VERSION ] && [ -f setup ] && [ -f bin/gstack-config ] && _p=$(git rev-parse --show-prefix 2>/dev/null) && [ -z "$_p" ] && [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; } || { echo "ERROR: $INSTALL_DIR is not a gstack checkout; nothing was changed. Re-run Step 2." >&2; exit 1; }
 # Regenerable render-footprint dirt (setup re-renders it) never goes into the stash.
 git checkout -- 'SKILL.md' '*/SKILL.md' '*/sections/*.md' 2>/dev/null || true
+INCOMING=$(git rev-parse --verify "${UPSTREAM_REF:?UPSTREAM_REF is not set: substitute the value Step 4 printed}^{commit}") || exit 1
+"$INSTALL_DIR/bin/gstack-gate-incoming" "$INSTALL_DIR" "$INCOMING" || { echo "HOOK_GATE_REFUSED: nothing stashed or reset" >&2; exit 1; }
 STASH_OUTPUT=$(git stash 2>&1)
-git reset --hard "${UPSTREAM_REF:?UPSTREAM_REF is not set: substitute the value Step 4 printed}"
+git reset --hard "$INCOMING"
 {{SETUP_COMMAND}} --refresh-registered
 ```
+On `HOOK_GATE_REFUSED`, STOP exactly as above.
 If `$STASH_OUTPUT` contains "Saved working directory", warn the user: "Note: local changes were stashed (any modified generated SKILL.md/sections files were discarded first — they regenerate on setup). Run `git stash pop` in the skill directory to restore your own changes."
 
 **For vendored installs** (vendored, vendored-global):
@@ -252,6 +268,7 @@ If `$STASH_OUTPUT` contains "Saved working directory", warn the user: "Note: loc
 [ -e "$INSTALL_DIR.bak" ] && { echo "ERROR: stale backup exists at $INSTALL_DIR.bak (from a previous failed upgrade?) — inspect it, salvage/remove it, then re-run." >&2; exit 1; }
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gstack-upgrade.XXXXXX") || { echo "ERROR: mktemp failed — aborting upgrade (install untouched)." >&2; exit 1; }
 git clone --depth 1 https://github.com/garrytan/gstack.git "$TMP_DIR/gstack" || { echo "ERROR: clone failed — aborting upgrade (install untouched)." >&2; rm -rf "$TMP_DIR"; exit 1; }
+"$INSTALL_DIR/bin/gstack-gate-incoming" "$TMP_DIR/gstack" HEAD || { echo "ERROR: the hook parse gate refused the new version — aborting upgrade (install untouched)." >&2; rm -rf "$TMP_DIR"; exit 1; }
 mv "$INSTALL_DIR" "$INSTALL_DIR.bak" || { rm -rf "$TMP_DIR"; exit 1; }
 if mv "$TMP_DIR/gstack" "$INSTALL_DIR"; then
   if (cd "$INSTALL_DIR" && {{SETUP_COMMAND}} --refresh-registered); then

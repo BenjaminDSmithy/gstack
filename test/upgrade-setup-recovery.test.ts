@@ -27,6 +27,8 @@ describe.skipIf(process.platform === 'win32')('upgrade setup recovery (real shel
           writeFileSync(join(target, 'setup'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
           writeFileSync(join(source, 'setup'), '#!/bin/sh\nexit "$SETUP_EXIT"\n', { mode: 0o755 });
           writeFileSync(join(bin, 'git'), '#!/bin/sh\nfor last; do :; done\ncp -R "$UPGRADE_FIXTURE" "$last"\n', { mode: 0o755 });
+          // The vendored path gates the clone with the installed copy's helper.
+          writeFileSync(join(target, 'bin', 'gstack-gate-incoming'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
           const script = blockAfter(mode === 'vendored'
             ? '**For vendored installs**'
             : '**If `LOCAL_GSTACK` is non-empty AND `TEAM_MODE` is NOT `true`:**');
@@ -45,12 +47,45 @@ describe.skipIf(process.platform === 'win32')('upgrade setup recovery (real shel
     }
   }
 
+  test('vendored: a clone that fails the hook parse gate never replaces the install', () => {
+    const root = mkdtempSync(join(tmpdir(), 'upgrade-recovery-'));
+    const target = join(root, 'target');
+    const source = join(root, 'source');
+    const bin = join(root, 'bin');
+    try {
+      for (const dir of [target, source, bin, join(target, 'bin'), join(source, 'bin')]) mkdirSync(dir);
+      writeFileSync(join(target, 'VERSION'), 'old');
+      writeFileSync(join(source, 'VERSION'), 'new');
+      // C9: fences only touch a directory that looks like a gstack install.
+      for (const dir of [target, source]) writeFileSync(join(dir, 'bin', 'gstack-config'), '#!/bin/sh\n', { mode: 0o755 });
+      writeFileSync(join(target, 'setup'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      writeFileSync(join(source, 'setup'), '#!/bin/sh\ntouch "$SETUP_MARK"\n', { mode: 0o755 });
+      writeFileSync(join(bin, 'git'), '#!/bin/sh\nfor last; do :; done\ncp -R "$UPGRADE_FIXTURE" "$last"\n', { mode: 0o755 });
+      writeFileSync(join(target, 'bin', 'gstack-gate-incoming'), '#!/bin/sh\necho "HOOK_GATE blocked"\nexit 1\n', { mode: 0o755 });
+      const mark = join(root, 'setup-ran');
+      const result = spawnSync('bash', ['-c', blockAfter('**For vendored installs**')], {
+        cwd: root, encoding: 'utf8', timeout: 10_000,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, INSTALL_DIR: target, UPGRADE_FIXTURE: source, SETUP_MARK: mark },
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('hook parse gate');
+      expect(readFileSync(join(target, 'VERSION'), 'utf8')).toBe('old');
+      expect(existsSync(`${target}.bak`)).toBe(false);
+      expect(existsSync(mark)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('git setup failure is not routed into the divergence reset fallback', () => {
     const root = mkdtempSync(join(tmpdir(), 'upgrade-git-setup-'));
     try {
       const bin = join(root, 'bin');
       mkdirSync(bin);
       writeFileSync(join(bin, 'git'), '#!/bin/sh\nif [ "$1 $2" = "rev-parse --show-prefix" ]; then :; elif [ "$1 $2" = "rev-parse --is-inside-work-tree" ]; then echo true; elif [ "$1" = rev-parse ]; then echo old-commit; fi\nexit 0\n', { mode: 0o755 });
+      // INSTALL_DIR is root, so this is $INSTALL_DIR/bin: the hook gate
+      // passes the incoming commit and setup is what fails.
+      writeFileSync(join(bin, 'gstack-gate-incoming'), '#!/bin/sh\necho "HOOK_GATE passed"\nexit 0\n', { mode: 0o755 });
       writeFileSync(join(root, 'setup'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
       // C9: the git fence verifies it is inside gstack's own checkout first.
       writeFileSync(join(root, 'VERSION'), '1.0.0.0\n');
@@ -88,6 +123,9 @@ describe.skipIf(process.platform === 'win32')('upgrade Bun floor (real git)', ()
     writeFileSync(join(seed, 'bin', 'gstack-bun-version.sh'), helper);
     writeFileSync(join(seed, 'bin', 'gstack-ff-update'), readFileSync(join(import.meta.dir, '../bin/gstack-ff-update'), 'utf8'), { mode: 0o755 });
     writeFileSync(join(seed, 'bin', 'gstack-config'), '#!/bin/sh\n', { mode: 0o755 });
+    // Step 4 gates the incoming commit first (test/gate-incoming.test.ts runs
+    // the real gate); this fixture is about the Bun floor, so the gate passes.
+    writeFileSync(join(seed, 'bin', 'gstack-gate-incoming'), '#!/bin/sh\necho "HOOK_GATE passed"\nexit 0\n', { mode: 0o755 });
     writeFileSync(join(seed, 'VERSION'), '1.0.0\n');
     writeFileSync(join(seed, 'setup'), '#!/bin/sh\necho ran >> "$SETUP_LOG"\n', { mode: 0o755 });
     git(seed, 'init', '-q', '-b', 'main');
