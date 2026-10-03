@@ -203,10 +203,10 @@ describe("V1 /gbrain-sync orchestrator E2E", () => {
 
     const r = runBun(SYNC, ["--dry-run"], env);
     expect(r.exitCode).toBe(0);
-    // Code stage uses native gbrain code surfaces (sources add + sync --strategy code)
+    // Code stage uses native gbrain code surfaces (sources add + sync)
     // post-codex review; NOT `gbrain import` (markdown-only path).
     expect(r.stdout).toContain("would: gbrain sources add");
-    expect(r.stdout).toContain("gbrain sync --strategy code");
+    expect(r.stdout).toContain("gbrain sync --source ");
     expect(r.stdout).toContain("would: gstack-memory-ingest");
     expect(r.stdout).toContain("would: gstack-brain-sync");
 
