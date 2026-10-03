@@ -428,10 +428,22 @@ _hook_syntax_walk() {
     expr+=(-o -path "$pat")
     HOOK_SYNTAX_NESTED=$((HOOK_SYNTAX_NESTED + 1))
   done < <(find "$dir" -mindepth 1 \( "${skip[@]:1}" \) -prune -o -name .git -print0 -prune 2>/dev/null)
+  # Directories come through the same find as files. One the sweep cannot read
+  # or search hides everything under it, and find says so only on stderr, which
+  # goes to /dev/null here; so each directory is asked directly. `[ -r ]` and
+  # `[ -x ]` are builtins over access(): no fork per directory, ACLs and
+  # ownership count, and no temp file, so a wiped TMPDIR cannot refuse setup.
   while IFS= read -r -d '' f; do
+    if [ -d "$f" ]; then
+      if [ ! -r "$f" ] || [ ! -x "$f" ]; then
+        printf 'hook-syntax: UNREADABLE directory %s — cannot check what is under it\n' "$f" >&2
+        rc=1
+      fi
+      continue
+    fi
     n=$((n + 1))
     _hook_syntax_visit "$f" || rc=1
-  done < <(find "$dir" \( "${expr[@]:1}" \) -prune -o -type f -print0 2>/dev/null | sort -z)
+  done < <(find "$dir" \( "${expr[@]:1}" \) -prune -o \( -type f -o -type d \) -print0 2>/dev/null | sort -z)
   # A sweep that found no file at all checked nothing; never let that read
   # green.
   if [ "$n" -eq 0 ]; then

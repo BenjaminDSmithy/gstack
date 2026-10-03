@@ -405,6 +405,29 @@ describe('hook-syntax: sweep mechanics', () => {
     expect(r.output).not.toContain('nested checkout');
   }, TEST_TIMEOUT_MS);
 
+  for (const [label, mode] of [['unreadable', 0o300], ['unsearchable', 0o600]] as const) {
+    test(`an ${label} directory is a failure, not a quiet skip of what it holds`, () => {
+      fixture(`locked-${label}/ok.sh`, '#!/bin/bash\nexit 0\n');
+      fixture(`locked-${label}/inner/broken.sh`, '#!/bin/bash\nif true; then\n');
+      const inner = path.join(FX, 'fx', `locked-${label}`, 'inner');
+      fs.chmodSync(inner, mode);
+      try {
+        try {
+          fs.accessSync(inner, fs.constants.R_OK | fs.constants.X_OK);
+          return; // read-anything privileges: nothing is hidden, nothing to assert
+        } catch {
+          // expected: genuinely locked
+        }
+        const r = runGate([path.join(FX, 'fx', `locked-${label}`)]);
+        expect(r.code).toBe(1);
+        expect(r.output).toContain('UNREADABLE directory');
+        expect(r.output).toContain(`locked-${label}/inner`);
+      } finally {
+        fs.chmodSync(inner, 0o700);
+      }
+    }, TEST_TIMEOUT_MS);
+  }
+
   test('a sweep that finds no file at all is a failure, not a pass', () => {
     fs.mkdirSync(path.join(FX, 'fx', 'empty-sweep', 'node_modules', 'pkg'), { recursive: true });
     fixture('empty-sweep/node_modules/pkg/ok.sh', '#!/bin/bash\nexit 0\n');
