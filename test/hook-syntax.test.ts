@@ -330,6 +330,71 @@ describe('hook-syntax: line endings', () => {
     const unpinned = attr.stdout.split('\n').filter((l) => l && !l.endsWith(': eol: lf'));
     expect(unpinned).toEqual([]);
   }, TEST_TIMEOUT_MS);
+
+  test('heal-eol rewrites an unchanged CRLF shell script and nothing else', () => {
+    // An install checked out with autocrlf before the LF rules existed keeps
+    // its CRLF copies through `git pull`; setup heals them before the gate.
+    const repo = path.join(FX, 'heal-repo');
+    fs.mkdirSync(repo, { recursive: true });
+    const env = { ...process.env, HOME: repo, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+    const g = (...args: string[]) => spawnSync('git', args, { cwd: repo, env, encoding: 'utf-8', timeout: SPAWN_TIMEOUT_MS });
+    expect(g('init', '-q').status).toBe(0);
+    fs.writeFileSync(path.join(repo, '.gitattributes'), '* text eol=lf\n');
+    const lf: Record<string, string> = {
+      'clean.sh': '#!/bin/bash\necho clean\n',
+      'edited.sh': '#!/bin/bash\necho edited\n',
+      'flagged.sh': '#!/bin/bash\necho flagged\n',
+      'notes.md': '# notes\nplain text\n',
+      'g[l]ob.sh': '#!/usr/bin/env bash\necho glob\n',
+    };
+    for (const [name, body] of Object.entries(lf)) fs.writeFileSync(path.join(repo, name), body, { mode: 0o755 });
+    expect(g('add', '.').status).toBe(0);
+    expect(g('-c', 'user.email=you@example.com', '-c', 'user.name=t', 'commit', '-qm', 'init').status).toBe(0);
+    const crlf = (body: string) => body.replace(/\n/g, '\r\n');
+    for (const name of ['clean.sh', 'notes.md', 'g[l]ob.sh']) fs.writeFileSync(path.join(repo, name), crlf(lf[name]));
+    fs.writeFileSync(path.join(repo, 'edited.sh'), '#!/bin/bash\r\necho local change\r\n');
+    expect(g('update-index', '--assume-unchanged', 'flagged.sh').status).toBe(0);
+    fs.writeFileSync(path.join(repo, 'flagged.sh'), '#!/bin/bash\r\necho hidden local edit\r\n');
+    // A held index lock must neither block the heal nor cost a file.
+    fs.writeFileSync(path.join(repo, '.git', 'index.lock'), '');
+    // A UTF-8 locale, as on a default macOS shell: bash 3.2 must not collate
+    // the ordinary `H` tag into the assume-unchanged range.
+    const utf8 = { ...env, LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' };
+    const r = spawnSync('/bin/bash', [path.join(ROOT, 'scripts', 'heal-eol.sh'), repo], { env: utf8, encoding: 'utf-8', timeout: SPAWN_TIMEOUT_MS });
+    fs.rmSync(path.join(repo, '.git', 'index.lock'), { force: true });
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain('rewrote clean.sh');
+    expect(fs.readFileSync(path.join(repo, 'clean.sh'), 'utf-8')).toBe(lf['clean.sh']);
+    expect(fs.statSync(path.join(repo, 'clean.sh')).mode & 0o111).not.toBe(0);
+    expect(fs.readFileSync(path.join(repo, 'g[l]ob.sh'), 'utf-8')).toBe(lf['g[l]ob.sh']);
+    // Not a shell script: outside the gate's concern, left alone.
+    expect(fs.readFileSync(path.join(repo, 'notes.md'), 'utf-8')).toBe(crlf(lf['notes.md']));
+    // Real edits, visible or hidden behind assume-unchanged, are never touched.
+    expect(fs.readFileSync(path.join(repo, 'edited.sh'), 'utf-8')).toBe('#!/bin/bash\r\necho local change\r\n');
+    expect(fs.readFileSync(path.join(repo, 'flagged.sh'), 'utf-8')).toBe('#!/bin/bash\r\necho hidden local edit\r\n');
+    expect(fs.readdirSync(repo).filter((n) => n.includes('.heal-eol.'))).toEqual([]);
+    // Not a repository: a silent no-op.
+    fs.mkdirSync(path.join(FX, 'heal-not-a-repo'), { recursive: true });
+    const none = spawnSync('/bin/bash', [path.join(ROOT, 'scripts', 'heal-eol.sh'), path.join(FX, 'heal-not-a-repo')], { env, encoding: 'utf-8', timeout: SPAWN_TIMEOUT_MS });
+    expect(none.status).toBe(0);
+    expect(none.stderr).toBe('');
+  }, TEST_TIMEOUT_MS);
+
+  test('setup heals line endings after choosing its bash and before it runs the gate', () => {
+    const chosen = SETUP_SRC.indexOf('_HOOK_SYNTAX_BASH=/bin/bash');
+    const heal = SETUP_SRC.indexOf('"$_HOOK_SYNTAX_BASH" "$_HEAL_EOL" "$SOURCE_GSTACK_DIR" || true');
+    const gate = SETUP_SRC.indexOf('"$_HOOK_SYNTAX_BASH" "$HOOK_SYNTAX_GATE" "$SOURCE_GSTACK_DIR"');
+    expect(chosen).toBeGreaterThan(-1);
+    expect(heal).toBeGreaterThan(chosen);
+    expect(gate).toBeGreaterThan(heal);
+  });
+
+  test('a missing TMPDIR does not refuse a healthy tree', () => {
+    // Session scratch dirs get wiped; the gate writes no temp file.
+    const r = runGate([fixture('tmpdir-gone/ok.sh', '#!/bin/bash\necho ok\n')], { TMPDIR: path.join(FX, 'no-such-tmpdir') });
+    expect(r.output).toBe('');
+    expect(r.code).toBe(0);
+  }, TEST_TIMEOUT_MS);
 });
 
 // ── the real tree ──────────────────────────────────────────────────────────
