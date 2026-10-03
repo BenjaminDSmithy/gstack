@@ -40,7 +40,7 @@ PREFIX=$("$GSTACK_CONFIG" get skill_prefix 2>/dev/null || echo "false")
 # out-dir instead of the tracked install checkout. When a render exists for a
 # skill, relink serves it — otherwise a config change would silently flip
 # every skill back to the canonical (blockless) source.
-. "$SCRIPT_DIR/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $SCRIPT_DIR/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+[ -r "$SCRIPT_DIR/gstack-state-root.sh" ] && . "$SCRIPT_DIR/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $SCRIPT_DIR/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
 gstack_state_root_select; GSTACK_STATE_ROOT="$_gstack_sr_root"
 RENDER_DIR="${GSTACK_USER_RENDER_DIR:-$GSTACK_STATE_ROOT/render/claude}"
 

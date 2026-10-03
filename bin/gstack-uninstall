@@ -50,7 +50,7 @@ GSTACK_DIR="${GSTACK_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 # used read-only (daemon discovery) and reported when it is elsewhere.
 STATE_DIR="$HOME/.gstack"
 _STATE_DOC="https://github.com/garrytan/gstack/blob/main/docs/state-root.md"
-. "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade ($_STATE_DOC)" >&2; exit 1; }
+[ -r "$(dirname "$0")/gstack-state-root.sh" ] && . "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade ($_STATE_DOC)" >&2; exit 1; }
 gstack_state_root_select
 RESOLVED_ROOT="$_gstack_sr_root"
 RESOLVED_VAR="$_gstack_sr_var"

@@ -76,9 +76,9 @@ set -euo pipefail
 # bash writer and the TS reader must key the SAME cache, and a test running
 # with GSTACK_HOME=<temp> must write its cache junk there, not into the real
 # home (observed: 2,528 stale temp-cwd entries accumulated in ~/.gstack).
-. "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+[ -r "$(dirname "$0")/gstack-state-root.sh" ] && . "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
 gstack_state_root_select; GSTACK_STATE_ROOT="$_gstack_sr_root"
-. "$(dirname "$0")/gstack-remote-identity.sh" 2>/dev/null || { echo "$0: $(dirname "$0")/gstack-remote-identity.sh is missing. fix: reinstall with ./setup or /gstack-upgrade" >&2; exit 1; }
+[ -r "$(dirname "$0")/gstack-remote-identity.sh" ] && . "$(dirname "$0")/gstack-remote-identity.sh" 2>/dev/null || { echo "$0: $(dirname "$0")/gstack-remote-identity.sh is missing. fix: reinstall with ./setup or /gstack-upgrade" >&2; exit 1; }
 
 MODE=default
 MODE_ARG=""
