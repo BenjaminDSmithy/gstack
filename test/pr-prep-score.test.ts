@@ -1,12 +1,13 @@
 /**
- * Behavioral test for the /pr-prep collision scorer (bin/gstack-pr-prep-score).
+ * Behavioral test for the /pr-prep collision scorer (lib/pr-prep-score.ts,
+ * run through bin/gstack-pr-prep-score).
  *
  * Pins the Step 4 bucketing contract from pr-prep/SKILL.md: title/file Jaccard,
  * state weighting, and the EXACT_DUP / OVERLAP / SIBLING / CLEAN precedence.
  * Pure function, deterministic, free — gate-tier.
  */
 import { describe, test, expect } from 'bun:test';
-import { score, jaccard, type ScoreInput } from '../bin/gstack-pr-prep-score';
+import { score, jaccard, type ScoreInput } from '../lib/pr-prep-score';
 
 describe('pr-prep scorer: jaccard', () => {
   test('identical sets = 1.0', () => {
