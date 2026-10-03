@@ -287,6 +287,51 @@ describe('hook-syntax: libraries the wired hooks source', () => {
   }, TEST_TIMEOUT_MS);
 });
 
+// ── line endings ───────────────────────────────────────────────────────────
+
+// The first line of a file, without reading the whole of it.
+function firstLine(p: string): string {
+  const fd = fs.openSync(p, 'r');
+  try {
+    const buf = Buffer.alloc(256);
+    const n = fs.readSync(fd, buf, 0, 256, 0);
+    return buf.subarray(0, n).toString('utf-8').split('\n', 1)[0].replace(/\r$/, '');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+describe('hook-syntax: line endings', () => {
+  test('every tracked file the gate parses as shell is pinned to LF', () => {
+    // A default Windows checkout (core.autocrlf=true) writes CRLF unless
+    // .gitattributes says otherwise, and bash keeps the \r on every line. The
+    // dispatch below mirrors the gate's: a shell shebang, or no #! at all and
+    // a .sh name.
+    const ls = spawnSync('git', ['-C', ROOT, 'ls-files', '-z'], { encoding: 'utf-8', timeout: SPAWN_TIMEOUT_MS });
+    if (ls.status !== 0) return; // not a git checkout: nothing to enumerate
+    const shells = ls.stdout.split('\0').filter(Boolean).filter((rel) => {
+      const p = path.join(ROOT, rel);
+      let first: string;
+      try {
+        if (!fs.lstatSync(p).isFile()) return false;
+        first = firstLine(p);
+      } catch {
+        return false;
+      }
+      if (/^#!(\/bin\/(ba)?sh|\/usr\/bin\/env (ba)?sh)( |$)/.test(first)) return true;
+      return !first.startsWith('#!') && rel.endsWith('.sh');
+    });
+    // A floor, so a new script never turns this red, but a dispatch that
+    // silently stopped matching does.
+    expect(shells.length).toBeGreaterThanOrEqual(90);
+    expect(shells).toContain('hosts/claude/hooks/question-preference-hook');
+    const attr = spawnSync('git', ['-C', ROOT, 'check-attr', 'eol', '--', ...shells], { encoding: 'utf-8', timeout: SPAWN_TIMEOUT_MS });
+    expect(attr.status).toBe(0);
+    const unpinned = attr.stdout.split('\n').filter((l) => l && !l.endsWith(': eol: lf'));
+    expect(unpinned).toEqual([]);
+  }, TEST_TIMEOUT_MS);
+});
+
 // ── the real tree ──────────────────────────────────────────────────────────
 
 describe('hook-syntax: the real gstack tree', () => {
