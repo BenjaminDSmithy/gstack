@@ -426,6 +426,28 @@ describe('hook-syntax: line endings', () => {
     expect(none.stderr).toBe('');
   }, TEST_TIMEOUT_MS);
 
+  test('heal-eol in a subdirectory of another repository heals from its own index entry', () => {
+    // A vendored install: gstack's files are tracked by a parent project that
+    // has a same-named file of its own at the top, and its own attributes.
+    const proj = path.join(FX, 'heal-vendored');
+    const sub = path.join(proj, 'vendor', 'gstack');
+    fs.mkdirSync(sub, { recursive: true });
+    const env = { ...process.env, HOME: proj, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+    const g = (...args: string[]) => spawnCaptured('git', args, { cwd: proj, env });
+    expect(g('init', '-q').status).toBe(0);
+    fs.writeFileSync(path.join(proj, '.gitattributes'), 'setup text eol=crlf\n');
+    fs.writeFileSync(path.join(proj, 'setup'), '#!/bin/bash\necho project\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(sub, '.gitattributes'), 'setup text eol=lf\n');
+    fs.writeFileSync(path.join(sub, 'setup'), '#!/bin/bash\necho gstack\n', { mode: 0o755 });
+    expect(g('add', '.').status).toBe(0);
+    expect(g('-c', 'user.email=you@example.com', '-c', 'user.name=t', 'commit', '-qm', 'init').status).toBe(0);
+    fs.writeFileSync(path.join(sub, 'setup'), '#!/bin/bash\r\necho gstack\r\n');
+    const r = spawnCaptured('/bin/bash', [path.join(ROOT, 'scripts', 'heal-eol.sh'), sub], { env });
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain('rewrote setup');
+    expect(fs.readFileSync(path.join(sub, 'setup'), 'utf-8')).toBe('#!/bin/bash\necho gstack\n');
+  }, TEST_TIMEOUT_MS);
+
   test('setup heals line endings after choosing its bash and before it runs the gate', () => {
     const chosen = SETUP_SRC.indexOf('_HOOK_SYNTAX_BASH=/bin/bash');
     const heal = SETUP_SRC.indexOf('"$_HOOK_SYNTAX_BASH" "$_HEAL_EOL" "$SOURCE_GSTACK_DIR" || true');
