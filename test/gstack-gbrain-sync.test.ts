@@ -1202,16 +1202,30 @@ describe("code walk strategy (persisted per source)", () => {
       expect(codeWalkStrategy("src", undefined, fake)).toEqual({ args: ["--strategy", "code"] });
       expect(fake.writes).toEqual([]);
     });
+
+    it("refuses the walk when gbrain does not report the source's strategy", () => {
+      const fake = io(["unreadable"]);
+      const plan = codeWalkStrategy("src", undefined, fake);
+      expect(plan.args).toBeNull();
+      expect(plan.refusal).toContain("src");
+      expect(fake.writes).toEqual([]);
+    });
   });
 
   // Stateful fake: $FAKE_STATE/id is the registered source (absent until
   // `sources add`), $FAKE_STATE/strategy the row's `strategy` field ("@absent"
-  // omits the key, "null" persists nothing).
+  // omits the key, "null" persists nothing). With $FAKE_LIST_FAIL_FROM=n the
+  // n-th and later `sources list` calls fail.
   const FAKE_GBRAIN = String.raw`#!/bin/sh
 printf '%s\n' "$*" >> "$GSTACK_TEST_GBRAIN_LOG"
 case "$1 $2" in
   "--version ") echo 'gbrain 0.60.0.0' ;;
   "sources list")
+    n=$(( $(cat "$FAKE_STATE/list-calls" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$FAKE_STATE/list-calls"
+    if [ -n "$FAKE_LIST_FAIL_FROM" ] && [ "$n" -ge "$FAKE_LIST_FAIL_FROM" ]; then
+      echo "Error: connection timeout" >&2; exit 1
+    fi
     if [ ! -f "$FAKE_STATE/id" ]; then echo '{"sources":[]}'; exit 0; fi
     s=$(cat "$FAKE_STATE/strategy")
     case "$s" in
@@ -1232,7 +1246,7 @@ case "$1 $2" in
 esac
 `;
 
-  function runWalk(opts: { strategy: string; pin?: string; setFails?: boolean }) {
+  function runWalk(opts: { strategy: string; pin?: string; setFails?: boolean; listFailFrom?: number }) {
     const home = makeTestHome();
     const gstackHome = join(home, ".gstack");
     const repo = mkdtempSync(join(tmpdir(), "gstack-strategy-repo-"));
@@ -1267,6 +1281,7 @@ esac
         FAKE_STATE: state,
         FAKE_REPO: repo,
         FAKE_SET_FAILS: opts.setFails ? "1" : "",
+        FAKE_LIST_FAIL_FROM: opts.listFailFrom ? String(opts.listFailFrom) : "",
         PATH: `${bindir}:${process.env.PATH || ""}`,
       },
     });
@@ -1307,5 +1322,20 @@ esac
     const failed = runWalk({ strategy: "null", pin: "client-acme-app", setFails: true });
     expect(failed.r.status).toBe(0);
     expect(failed.syncCalls).toEqual(["sync --strategy code --source client-acme-app --no-pull"]);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses the walk when the strategy read fails, never passing --strategy code", () => {
+    // The strategy read is the last `sources list` before the walk. Fail it and
+    // every later list call, after the earlier guards have read the source.
+    const baseline = runWalk({ strategy: "auto", pin: "client-acme-app" });
+    const firstSync = baseline.commands.findIndex((c) => c.startsWith("sync "));
+    const listsBeforeWalk = baseline.commands.slice(0, firstSync).filter((c) => c.startsWith("sources list")).length;
+    expect(listsBeforeWalk).toBeGreaterThan(0);
+
+    const { r, commands, persisted, syncCalls } = runWalk({ strategy: "auto", pin: "client-acme-app", listFailFrom: listsBeforeWalk });
+    expect(r.status).not.toBe(0);
+    expect(syncCalls).toEqual([]);
+    expect(commands.some((c) => c.startsWith("sources set-strategy"))).toBe(false);
+    expect(persisted).toBe("auto");
   });
 });
