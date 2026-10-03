@@ -365,6 +365,42 @@ describe('gstack-gate-incoming --fast-forward', () => {
     expect(git(fx.install, 'stash', 'show', '-p', kept![1])).toContain('# top LOCAL');
   }, TEST_TIMEOUT_MS);
 
+  // A translated git words its autostash messages differently; the recovery
+  // must not depend on them. Skipped where git has no German catalog.
+  const GERMAN = { LC_ALL: 'de_DE.UTF-8', LANG: 'de_DE.UTF-8', LANGUAGE: 'de' };
+  // Probed in a fresh repo on a named branch, so the answer does not depend on
+  // the state of the checkout the suite runs from (detached in CI).
+  const germanGit = (() => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-gate-de-'));
+    try {
+      git(dir, 'init', '-q', '-b', 'main');
+      const r = spawnSync('git', ['status'], { cwd: dir, encoding: 'utf8', env: { ...GIT_ENV, ...GERMAN }, timeout: 30_000 });
+      return /Auf Branch main/.test(r.stdout ?? '');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  })();
+  test.skipIf(!germanGit)('a conflicting pop is recovered under a German git, stored or not', () => {
+    for (const locked of [false, true]) {
+      const fx = makeFixture();
+      const sha = advance(fx, { 'SKILL.md': '# top v2\nname: qa\nbody line\n' });
+      git(fx.install, 'fetch', '-q');
+      write(fx.install, 'SKILL.md', '# top LOCAL\nname: qa\nbody line\n');
+      const lock = path.join(fx.install, '.git', 'refs', 'stash.lock');
+      if (locked) fs.writeFileSync(lock, '');
+      const r = runHelper(fx, ['--fast-forward', fx.install, 'origin/main'], GERMAN);
+      fs.rmSync(lock, { force: true });
+      expect(r.code, `${locked}: ${r.stdout}${r.stderr}`).toBe(0);
+      expect(head(fx)).toBe(sha);
+      expect(fs.readFileSync(path.join(fx.install, 'SKILL.md'), 'utf8')).not.toContain(LT);
+      const kept = r.stdout.match(/^AUTOSTASH_KEPT ([0-9a-f]{40}): .* kept at (\S+)$/m);
+      expect(kept, r.stdout).not.toBeNull();
+      expect(kept![2]).toBe(locked ? kept![2] : 'refs/stash');
+      if (locked) expect(kept![2]).toMatch(/^refs\/gstack-autostash\//);
+      expect(git(fx.install, 'stash', 'show', '-p', kept![1])).toContain('# top LOCAL');
+    }
+  }, TEST_TIMEOUT_MS);
+
   test('the move names the gated commit, not a ref that changed while the gate ran', () => {
     const fx = makeFixture();
     // A: the commit to gate. Its checker moves origin/main mid-gate to B, a
