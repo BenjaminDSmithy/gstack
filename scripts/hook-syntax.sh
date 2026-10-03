@@ -99,8 +99,10 @@
 #   * A shim that reaches bun any other way than `bun "$HERE/<path>"` has its
 #     payload unchecked. The shim itself is still parsed.
 #   * An interpreter that is absent or cannot run (python3, bun, a PATH bash)
-#     is reported as a coverage gap, never counted as a pass and never as a
-#     parse failure.
+#     is reported as a coverage gap for its parse, never counted as a pass and
+#     never as a parse failure. The content scans still run on its files. A
+#     shell or bun whose probe exits 2 is refused instead: every hook it runs
+#     would exit 2 too.
 #   * It guards the next install, not the running one. Hooks are registered by
 #     path, so a merge that writes markers into the registered checkout is live
 #     before any test or setup run sees it. docs/hook-syntax-gate.md has the
@@ -218,6 +220,22 @@ _hook_syntax_probe() {
   fi
   HOOK_SYNTAX_PROBED="$HOOK_SYNTAX_PROBED$name=>$HOOK_SYNTAX_PROBE$HOOK_SYNTAX_NL"
   [ "$HOOK_SYNTAX_PROBE" = ok ]
+}
+
+# An interpreter the probe could not run is a coverage gap for the parse it
+# would have done: say so, count the file as skipped, return 0. One exception,
+# for the interpreters that run hooks (a shell, bun): a probe that exited 2.
+# Every hook run through that interpreter exits 2 as well, which is the status
+# Claude Code reads as "block", so that is a refusal, not a gap.
+# $1 = interpreter, $2 = file, $3 = runs-hooks (1 or 0). Reads HOOK_SYNTAX_PROBE.
+_hook_syntax_gap() {
+  if [ "$3" -eq 1 ] && [ "$HOOK_SYNTAX_PROBE" = 'cannot run (exit 2)' ]; then
+    printf 'hook-syntax: %s exits 2 on every call — a hook it runs, such as %s, would block every tool call it is wired to\n' "$1" "$2" >&2
+    return 1
+  fi
+  printf 'hook-syntax: %s %s — %s NOT checked\n' "$1" "$HOOK_SYNTAX_PROBE" "$2" >&2
+  HOOK_SYNTAX_SKIPPED=$((HOOK_SYNTAX_SKIPPED + 1))
+  return 0
 }
 
 # $1 = path. Returns 0 when this run has already checked it. Fork-free: a sweep
@@ -347,14 +365,15 @@ _hook_syntax_unskip() {
 _hook_syntax_check_bun() {
   local out line rc=0
   _hook_syntax_unskip "$1"
+  # The payload's own bytes are marker-scanned whatever the probe says.
+  HOOK_SYNTAX_PARSED+=("$1")
   if ! _hook_syntax_probe "$HOOK_SYNTAX_BUN" --version; then
-    # A coverage gap, not a fault: every shim exits cleanly when bun is absent.
-    printf 'hook-syntax: %s %s — %s NOT checked\n' "$HOOK_SYNTAX_BUN" "$HOOK_SYNTAX_PROBE" "$1" >&2
-    HOOK_SYNTAX_SKIPPED=$((HOOK_SYNTAX_SKIPPED + 1))
-    return 0
+    # Otherwise a coverage gap: every shim exits cleanly when bun is absent,
+    # and what the payload imports cannot be listed without it.
+    _hook_syntax_gap "$HOOK_SYNTAX_BUN" "$1" 1
+    return
   fi
   HOOK_SYNTAX_CHECKED=$((HOOK_SYNTAX_CHECKED + 1))
-  HOOK_SYNTAX_PARSED+=("$1")
   if ! out=$("$HOOK_SYNTAX_BUN" -e "$HOOK_SYNTAX_BUN_JS" "$1" 2>&1); then
     printf 'hook-syntax: FAILS TO PARSE %s\n' "$1" >&2
     printf '%s\n' "$out" >&2
@@ -459,16 +478,17 @@ _hook_syntax_visit() {
 
   case "$HOOK_SYNTAX_KIND" in
     shell)
+      # The content scans (markers, carriage returns, the payloads it hands to
+      # bun) need no interpreter, so they run whatever the probe says.
+      HOOK_SYNTAX_PARSED+=("$file")
+      HOOK_SYNTAX_SHELLS+=("$file")
       # Probed like python3 and bun: a PATH bash can be a version-manager shim
       # that fails every call, and `-n` under it says nothing about the file.
       if ! _hook_syntax_probe "$HOOK_SYNTAX_INTERP" -c :; then
-        printf 'hook-syntax: %s %s — %s NOT checked\n' "$HOOK_SYNTAX_INTERP" "$HOOK_SYNTAX_PROBE" "$file" >&2
-        HOOK_SYNTAX_SKIPPED=$((HOOK_SYNTAX_SKIPPED + 1))
-        return 0
+        _hook_syntax_gap "$HOOK_SYNTAX_INTERP" "$file" 1
+        return
       fi
       HOOK_SYNTAX_CHECKED=$((HOOK_SYNTAX_CHECKED + 1))
-      HOOK_SYNTAX_PARSED+=("$file")
-      HOOK_SYNTAX_SHELLS+=("$file")
       if ! out=$("$HOOK_SYNTAX_INTERP" -n "$file" 2>&1); then
         printf 'hook-syntax: FAILS TO PARSE %s (%s -n)\n' "$file" "$HOOK_SYNTAX_INTERP" >&2
         printf '%s\n' "$out" >&2
@@ -476,13 +496,12 @@ _hook_syntax_visit() {
       fi
       ;;
     python)
+      HOOK_SYNTAX_PARSED+=("$file")
       if ! _hook_syntax_probe "$HOOK_SYNTAX_PYTHON" -c pass; then
-        printf 'hook-syntax: %s %s — %s NOT checked\n' "$HOOK_SYNTAX_PYTHON" "$HOOK_SYNTAX_PROBE" "$file" >&2
-        HOOK_SYNTAX_SKIPPED=$((HOOK_SYNTAX_SKIPPED + 1))
-        return 0
+        _hook_syntax_gap "$HOOK_SYNTAX_PYTHON" "$file" 0
+        return
       fi
       HOOK_SYNTAX_CHECKED=$((HOOK_SYNTAX_CHECKED + 1))
-      HOOK_SYNTAX_PARSED+=("$file")
       if ! out=$("$HOOK_SYNTAX_PYTHON" -W error::SyntaxWarning -c \
         'import sys; compile(open(sys.argv[1],"rb").read(), sys.argv[1], "exec")' \
         "$file" 2>&1); then
