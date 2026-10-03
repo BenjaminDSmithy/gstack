@@ -355,6 +355,24 @@ describe('hook-syntax: sweep mechanics', () => {
     expect(r.code).toBe(1);
     expect(r.output).toContain('UNREADABLE');
   }, TEST_TIMEOUT_MS);
+
+  test('a symlinked directory is swept through, not read as empty', () => {
+    // The live install, ~/.claude/skills/gstack, is a symlink to a checkout.
+    fixture('symlinked/real/broken.sh', '#!/bin/bash\nif true; then\n');
+    const link = path.join(FX, 'fx', 'symlinked', 'link');
+    fs.symlinkSync(path.join(FX, 'fx', 'symlinked', 'real'), link);
+    const r = runGate([link]);
+    expect(r.code).toBe(1);
+    expect(r.output).toContain('broken.sh');
+  }, TEST_TIMEOUT_MS);
+
+  test('a sweep that finds no file at all is a failure, not a pass', () => {
+    fs.mkdirSync(path.join(FX, 'fx', 'empty-sweep', 'node_modules', 'pkg'), { recursive: true });
+    fixture('empty-sweep/node_modules/pkg/ok.sh', '#!/bin/bash\nexit 0\n');
+    const r = runGate([path.join(FX, 'fx', 'empty-sweep')]);
+    expect(r.code).toBe(1);
+    expect(r.output).toContain('no files found');
+  }, TEST_TIMEOUT_MS);
 });
 
 // ── per-file verdicts ──────────────────────────────────────────────────────
