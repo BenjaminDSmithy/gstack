@@ -30,6 +30,12 @@ if [ -z "$root" ]; then
 fi
 command -v git >/dev/null 2>&1 || exit 0
 git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+# `ls-files` names paths relative to $root, but an index path (`:0:<path>`)
+# and `--path` are read from the top of the work tree. They differ when gstack
+# sits in a subdirectory of another repository (a vendored install): without
+# the prefix, a same-named file at the project's top would be written over
+# gstack's, or the lookup would fail and the CRLF copy would stay.
+prefix=$(git -C "$root" rev-parse --show-prefix 2>/dev/null) || exit 0
 # Paths come from git and go back to git: never let one widen into a glob.
 export GIT_LITERAL_PATHSPECS=1
 # Byte-wise matching: under a UTF-8 locale bash 3.2 collates [a-z] over
@@ -79,7 +85,7 @@ while IFS= read -r -d '' entry; do
       ro=1
       chmod u+w "$tmp" 2>/dev/null
     fi
-    if git -C "$root" cat-file --filters --path="$path" ":0:$path" > "$tmp" 2>/dev/null && [ -s "$tmp" ] &&
+    if git -C "$root" cat-file --filters --path="$prefix$path" ":0:$prefix$path" > "$tmp" 2>/dev/null && [ -s "$tmp" ] &&
       { [ "$ro" -eq 0 ] || chmod u-w "$tmp"; } && mv -f "$tmp" "$file"; then
       printf 'heal-eol: rewrote %s with LF line endings\n' "$path" >&2
       healed=$((healed + 1))
