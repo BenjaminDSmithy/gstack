@@ -113,6 +113,7 @@ HOOK_SYNTAX_BUN="${HOOK_SYNTAX_BUN:-bun}"
 # What the run actually covered. Read by `--report`; never asserted.
 HOOK_SYNTAX_CHECKED=0
 HOOK_SYNTAX_SKIPPED=0
+HOOK_SYNTAX_NESTED=0
 
 # Paths already checked this run, newline-delimited, so a payload reached
 # through its shim is not checked again when the sweep walks past it.
@@ -390,7 +391,7 @@ _hook_syntax_visit() {
 
 # Visit every file under a directory. $1 = directory.
 _hook_syntax_walk() {
-  local dir="$1" rc=0 f name n=0 prune=''
+  local dir="$1" rc=0 f name n=0
   if [ ! -d "$dir" ]; then
     printf 'hook-syntax: no such directory: %s\n' "$dir" >&2
     return 1
@@ -402,14 +403,35 @@ _hook_syntax_walk() {
     printf 'hook-syntax: cannot enter %s\n' "$1" >&2
     return 1
   }
+  local g pat
+  local -a expr=() skip=()
   for name in $HOOK_SYNTAX_PRUNE_NAMES; do
-    prune="$prune -o -name $name"
+    expr+=(-o -name "$name")
+    [ "$name" = .git ] || skip+=(-o -name "$name")
   done
-  # shellcheck disable=SC2086
+  # A nested checkout (a worktree or clone under the tree, e.g. Claude Code's
+  # .claude/worktrees/<name>) is another branch's files, not this install's; a
+  # conflict marker there must not refuse this setup. Prune every directory
+  # that holds its own .git, file or directory. The search skips the other
+  # prune names, so a checkout inside an already-pruned tree is not counted,
+  # and starts at depth 1 so the root's own .git is the one entry it skips.
+  # Each path becomes a -path PATTERN, so its glob characters are escaped: a
+  # checkout under .../gstack[old]/ must match itself, literally.
+  while IFS= read -r -d '' g; do
+    [ "$g" = "$dir/.git" ] && continue
+    pat="${g%/.git}"
+    pat="${pat//\\/\\\\}"
+    pat="${pat//\[/\\[}"
+    pat="${pat//\]/\\]}"
+    pat="${pat//\*/\\*}"
+    pat="${pat//\?/\\?}"
+    expr+=(-o -path "$pat")
+    HOOK_SYNTAX_NESTED=$((HOOK_SYNTAX_NESTED + 1))
+  done < <(find "$dir" -mindepth 1 \( "${skip[@]:1}" \) -prune -o -name .git -print0 -prune 2>/dev/null)
   while IFS= read -r -d '' f; do
     n=$((n + 1))
     _hook_syntax_visit "$f" || rc=1
-  done < <(find "$dir" \( ${prune# -o } \) -prune -o -type f -print0 2>/dev/null | sort -z)
+  done < <(find "$dir" \( "${expr[@]:1}" \) -prune -o -type f -print0 2>/dev/null | sort -z)
   # A sweep that found no file at all checked nothing; never let that read
   # green.
   if [ "$n" -eq 0 ]; then
@@ -452,6 +474,9 @@ hook_syntax_check_tree() {
 hook_syntax_report() {
   printf 'hook-syntax: %d checked, %d skipped\n' \
     "$HOOK_SYNTAX_CHECKED" "$HOOK_SYNTAX_SKIPPED" >&2
+  if [ "$HOOK_SYNTAX_NESTED" -gt 0 ]; then
+    printf 'hook-syntax: %d nested checkout(s) not swept\n' "$HOOK_SYNTAX_NESTED" >&2
+  fi
 }
 
 # Direct invocation: sweep the repo, or the targets named on the command line.

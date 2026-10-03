@@ -366,6 +366,45 @@ describe('hook-syntax: sweep mechanics', () => {
     expect(r.output).toContain('broken.sh');
   }, TEST_TIMEOUT_MS);
 
+  test('a nested checkout is another branch, and is not swept', () => {
+    // e.g. .claude/worktrees/<name>: a conflict there must not refuse this
+    // install. A worktree's .git is a file, a clone's a directory; both count.
+    fixture('nested/top/ok.sh', '#!/bin/bash\nexit 0\n');
+    fixture('nested/top/wt/.git', 'gitdir: /elsewhere\n');
+    fixture('nested/top/wt/broken.sh', '#!/bin/bash\nif true; then\n');
+    fixture('nested/top/clone/.git/HEAD', 'ref: refs/heads/main\n');
+    fixture('nested/top/clone/conflicted.sh', `#!/bin/bash\n${CONFLICT_HEREDOC}`);
+    const r = runGate(['--report', path.join(FX, 'fx', 'nested', 'top')]);
+    expect(r.code).toBe(0);
+    expect(r.output).toContain('1 checked, 0 skipped');
+    expect(r.output).toContain('2 nested checkout(s) not swept');
+  }, TEST_TIMEOUT_MS);
+
+  test("the root's own .git does not hide the root", () => {
+    fixture('rootgit/.git/HEAD', 'ref: refs/heads/main\n');
+    fixture('rootgit/broken.sh', '#!/bin/bash\nif true; then\n');
+    const r = runGate([path.join(FX, 'fx', 'rootgit')]);
+    expect(r.code).toBe(1);
+    expect(r.output).toContain('broken.sh');
+  }, TEST_TIMEOUT_MS);
+
+  test('a nested checkout under a path with glob characters is matched literally', () => {
+    fixture('glob[1]/top/ok.sh', '#!/bin/bash\nexit 0\n');
+    fixture('glob[1]/top/wt/.git', 'gitdir: /elsewhere\n');
+    fixture('glob[1]/top/wt/broken.sh', '#!/bin/bash\nif true; then\n');
+    const r = runGate([path.join(FX, 'fx', 'glob[1]', 'top')]);
+    expect(r.output).toBe('');
+    expect(r.code).toBe(0);
+  }, TEST_TIMEOUT_MS);
+
+  test('a .git inside an already-pruned tree is not counted as a nested checkout', () => {
+    fixture('pruned-git/ok.sh', '#!/bin/bash\nexit 0\n');
+    fixture('pruned-git/node_modules/pkg/.git/HEAD', 'ref: refs/heads/main\n');
+    const r = runGate(['--report', path.join(FX, 'fx', 'pruned-git')]);
+    expect(r.code).toBe(0);
+    expect(r.output).not.toContain('nested checkout');
+  }, TEST_TIMEOUT_MS);
+
   test('a sweep that finds no file at all is a failure, not a pass', () => {
     fs.mkdirSync(path.join(FX, 'fx', 'empty-sweep', 'node_modules', 'pkg'), { recursive: true });
     fixture('empty-sweep/node_modules/pkg/ok.sh', '#!/bin/bash\nexit 0\n');
