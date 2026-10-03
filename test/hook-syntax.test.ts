@@ -836,6 +836,23 @@ describe('hook-syntax: honest coverage', () => {
     expect(py.calls()).toBe(1);
   }, TEST_TIMEOUT_MS);
 
+  test('a PATH bash that cannot run is a coverage gap, probed once, never "fails to parse"', () => {
+    // Only `#!/usr/bin/env bash` files resolve bash through PATH. A
+    // `#!/bin/bash` file in the same run is still parsed, and still caught.
+    const bash = brokenInterpreter('bash');
+    const ok = fixture('bash-shim/ok.sh', '#!/usr/bin/env bash\necho ok\n');
+    const broken = fixture('bash-shim/broken.sh', '#!/usr/bin/env bash\nif true; then\n');
+    const fixed = fixture('bash-shim/fixed.sh', '#!/bin/bash\nif true; then\n');
+    const r = runGate(['--report', ok, broken, fixed], { PATH: `${path.dirname(bash.bin)}:${process.env.PATH ?? '/usr/bin:/bin'}` });
+    expect(r.code).toBe(1);
+    expect(r.output).toContain('bash cannot run (exit 127)');
+    expect(r.output).not.toContain(`FAILS TO PARSE ${ok}`);
+    expect(r.output).not.toContain(`FAILS TO PARSE ${broken}`);
+    expect(r.output).toContain(`FAILS TO PARSE ${fixed} (/bin/bash -n)`);
+    expect(r.output).toContain('1 checked, 2 skipped');
+    expect(bash.calls()).toBe(1);
+  }, TEST_TIMEOUT_MS);
+
   test('a bun that cannot run is a coverage gap for the payload, never "fails to parse"', () => {
     const bun = brokenInterpreter('bun');
     const r = runGate(['--report', path.join(SCRATCH, 'hosts/claude/hooks/timeline-stop-hook')], { HOOK_SYNTAX_BUN: bun.bin });

@@ -135,8 +135,10 @@ so a one-line data file costs no more than a script) and dispatches on the
 
 An interpreter that is present but cannot run — an asdf, mise or pyenv shim
 with no version selected, or the xcode-select `python3` stub — is a coverage
-gap, not a parse failure. `python3 -c pass` and `bun --version` are probed once
-per run, and a file handed to one that fails is reported as `NOT checked`.
+gap, not a parse failure. Each one is probed once per run before it is
+trusted: `python3 -c pass`, `bun --version`, and `<shell> -c :` for every shell
+a shebang names (`/bin/bash`, `/bin/sh`, a `PATH` bash or sh). A file handed to
+one that fails is reported as `NOT checked`.
 
 The sweep itself fails rather than reading green when it could not look:
 
@@ -178,8 +180,9 @@ from 494 to 643 seconds in the same load window, still 19 pass, 0 fail.
   of scope.
 * **A shim that reaches bun any other way** than `bun "$HERE/<path>"` has its
   payload unchecked; the shim itself is still parsed.
-* **An absent interpreter** (`python3`, `bun`, a `PATH` bash) is reported as a
-  coverage gap, never counted as a pass.
+* **An interpreter that is absent or cannot run** (`python3`, `bun`, a `PATH`
+  bash) is reported as a coverage gap, never counted as a pass and never as a
+  parse failure.
 * **There is no commit-time arm.** A repository's git hooks live in
   `.git/hooks/`, untracked, so there is nothing in the tree to wire. The free
   suite and `./setup` carry the weight.
