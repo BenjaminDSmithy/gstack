@@ -493,7 +493,7 @@ describe('gstack-session-update gates the incoming tree before it moves the chec
     const log = await waitForLog(fx);
     const line = log.split('\n').find((l) => l.includes('HOOK_GATE_PASSED')) ?? '';
     expect(line, log).toContain(`incoming=${sha}`);
-    expect(line).toContain('report=');
+    expect(line).toContain('gaps=1 report=');
     expect(line).toContain('NOT checked');
   }, TEST_TIMEOUT_MS);
 
@@ -503,7 +503,7 @@ describe('gstack-session-update gates the incoming tree before it moves the chec
     write(fx.install, 'SKILL.md', '# top LOCAL\nname: qa\nbody line\n');
     expect(runSessionUpdate(fx).status).toBe(0);
     const log = await waitForLog(fx);
-    expect(log).toMatch(/AUTOSTASH_CONFLICT_RECOVERED tree_reset=1 kept_stash=[0-9a-f]{40}/);
+    expect(log).toMatch(/AUTOSTASH_CONFLICT_RECOVERED tree_reset=1 kept_stash=[0-9a-f]{40} kept_ref=refs\/stash/);
     expect(log).toContain('UPDATED from=');
     expect(head(fx)).toBe(sha);
     expect(fs.readFileSync(path.join(fx.install, 'SKILL.md'), 'utf8')).not.toContain(LT);
