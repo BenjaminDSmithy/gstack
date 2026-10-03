@@ -43,8 +43,12 @@ const HOOK = 'hosts/claude/hooks/demo-hook';
 const GOOD_HOOK = '#!/bin/bash\necho ok\n';
 const BROKEN_HOOK = '#!/bin/bash\nif then fi\n';
 
+// No global or system git config: a global core.hooksPath would make the
+// hooks-isolation case pass without proving anything.
 const GIT_ENV = {
   ...process.env,
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_NOSYSTEM: '1',
   GIT_AUTHOR_NAME: 'gate-test',
   GIT_AUTHOR_EMAIL: 'gate-test@example.com',
   GIT_COMMITTER_NAME: 'gate-test',
@@ -84,7 +88,7 @@ function makeFixture(): Fx {
   const tmp = path.join(base, 'tmp');
   fs.mkdirSync(state);
   fs.mkdirSync(tmp);
-  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin], { env: GIT_ENV });
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin], { env: GIT_ENV, timeout: 30_000 });
   write(seed, 'VERSION', '1.0.0\n');
   write(seed, 'SKILL.md', '# top\nname: qa\nbody line\n');
   write(seed, 'bin/gstack-config',
@@ -100,7 +104,7 @@ function makeFixture(): Fx {
   git(seed, 'commit', '-q', '-m', 'seed');
   git(seed, 'remote', 'add', 'origin', origin);
   git(seed, 'push', '-q', 'origin', 'main');
-  execFileSync('git', ['clone', '-q', origin, install], { env: GIT_ENV });
+  execFileSync('git', ['clone', '-q', origin, install], { env: GIT_ENV, timeout: 30_000 });
   return { base, seed, install, state, tmp, mark: path.join(base, 'setup-ran') };
 }
 
@@ -280,6 +284,7 @@ describe('gstack-gate-incoming --fast-forward', () => {
     execFileSync('git', ['update-index', '--index-info'], {
       cwd: fx.install,
       env: GIT_ENV,
+      timeout: 30_000,
       input: [1, 2, 3].map((stage) => `100644 ${blob} ${stage}\tVERSION\n`).join(''),
     });
     const unmerged = git(fx.install, 'ls-files', '-u');
@@ -306,6 +311,24 @@ describe('gstack-gate-incoming --fast-forward', () => {
     const kept = r.stdout.match(/^AUTOSTASH_KEPT ([0-9a-f]{40}):/m);
     expect(kept).not.toBeNull();
     expect(git(fx.install, 'stash', 'show', '-p', kept![1])).toContain('# top LOCAL');
+  }, TEST_TIMEOUT_MS);
+
+  test('the move names the gated commit, not a ref that changed while the gate ran', () => {
+    const fx = makeFixture();
+    // A: the commit to gate. Its checker moves origin/main mid-gate to B, a
+    // descendant with a broken hook, and passes.
+    const gated = advance(fx, {
+      'scripts/hook-syntax.sh': '#!/bin/bash\ngit -C "$RACE_REPO" update-ref refs/remotes/origin/main "$RACE_TO"\nexit 0\n',
+    });
+    const broken = advance(fx, { [HOOK]: BROKEN_HOOK });
+    git(fx.install, 'fetch', '-q');
+    git(fx.install, 'update-ref', 'refs/remotes/origin/main', gated);
+    const r = runHelper(fx, ['--fast-forward', fx.install, 'origin/main'], { RACE_REPO: fx.install, RACE_TO: broken });
+    expect(r.code, r.stderr).toBe(0);
+    // The race happened: the ref the caller named now points at B.
+    expect(git(fx.install, 'rev-parse', 'refs/remotes/origin/main')).toBe(broken);
+    expect(head(fx)).toBe(gated);
+    expect(fs.readFileSync(path.join(fx.install, HOOK), 'utf8')).toBe(GOOD_HOOK);
   }, TEST_TIMEOUT_MS);
 });
 
