@@ -377,8 +377,10 @@ _hook_syntax_visit() {
 
   case "$HOOK_SYNTAX_KIND" in
     shell)
-      if ! command -v "$HOOK_SYNTAX_INTERP" >/dev/null 2>&1; then
-        printf 'hook-syntax: %s absent — %s NOT checked\n' "$HOOK_SYNTAX_INTERP" "$file" >&2
+      # Probed like python3 and bun: a PATH bash can be a version-manager shim
+      # that fails every call, and `-n` under it says nothing about the file.
+      if ! _hook_syntax_probe "$HOOK_SYNTAX_INTERP" -c :; then
+        printf 'hook-syntax: %s %s — %s NOT checked\n' "$HOOK_SYNTAX_INTERP" "$HOOK_SYNTAX_PROBE" "$file" >&2
         HOOK_SYNTAX_SKIPPED=$((HOOK_SYNTAX_SKIPPED + 1))
         return 0
       fi
