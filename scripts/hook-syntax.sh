@@ -53,6 +53,11 @@
 #   * conflict markers -> scanned SEPARATELY from parsing, because a marker
 #     inside a heredoc body or a quoted string parses cleanly and is still a
 #     half-merged file
+#   * a CR byte anywhere in a shell file -> refused. `bash -n` accepts plenty
+#     of CRLF scripts, but bash keeps the \r on every line at run time, so
+#     `exec bun "$HERE/x.ts"` names `x.ts\r`. A CRLF shebang is stripped for
+#     dispatch, so such a file is classified and refused, never skipped.
+#     Python reads CRLF source fine and is not affected
 #   * anything else is SKIPPED, and skipped is never counted as checked.
 #     `--report` prints the split.
 #
@@ -195,6 +200,10 @@ _hook_syntax_kind() {
   HOOK_SYNTAX_INTERP=''
   HOOK_SYNTAX_SHEBANG=0
   IFS= read -r line < "$1" 2>/dev/null
+  # A CRLF checkout (Windows, core.autocrlf=true) ends the shebang in \r. Left
+  # on, it matched no kind, so the file was skipped and passed. Stripped, the
+  # file is classified, and the CR scan in _hook_syntax_finish refuses it.
+  line="${line%$'\r'}"
   case "$line" in
     '#!'*) HOOK_SYNTAX_SHEBANG=1 ;;
   esac
@@ -453,11 +462,33 @@ _hook_syntax_walk() {
   return "$rc"
 }
 
-# Drain the queues: parse the bun payloads, then scan everything parsed for
-# conflict markers. Payloads first, so they are marker-scanned too.
+# CR bytes in shell files: one grep over every queued shell file. $@ = files.
+_hook_syntax_carriage_returns() {
+  [ "$#" -gt 0 ] || return 0
+  local hits f rest rc=0
+  # Judged on output, like the marker scan.
+  hits=$(grep -l $'\r' -- "$@" 2>/dev/null)
+  [ -n "$hits" ] || return 0
+  rest="$hits"
+  while [ -n "$rest" ]; do
+    f="${rest%%"$HOOK_SYNTAX_NL"*}"
+    case "$rest" in
+      *"$HOOK_SYNTAX_NL"*) rest="${rest#*"$HOOK_SYNTAX_NL"}" ;;
+      *) rest='' ;;
+    esac
+    printf 'hook-syntax: CRLF LINE ENDINGS %s — bash keeps the \\r on every line\n' "$f" >&2
+    rc=1
+  done
+  return "$rc"
+}
+
+# Drain the queues: parse the bun payloads, then scan for carriage returns in
+# shell files and for conflict markers in everything parsed. Payloads first,
+# so they are marker-scanned too.
 _hook_syntax_finish() {
   local rc=0
   _hook_syntax_payloads || rc=1
+  _hook_syntax_carriage_returns "${HOOK_SYNTAX_SHELLS[@]}" || rc=1
   _hook_syntax_markers "${HOOK_SYNTAX_PARSED[@]}" || rc=1
   HOOK_SYNTAX_PARSED=()
   HOOK_SYNTAX_SHELLS=()

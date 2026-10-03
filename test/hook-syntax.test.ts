@@ -389,6 +389,42 @@ describe('hook-syntax: line endings', () => {
     expect(gate).toBeGreaterThan(heal);
   });
 
+  test('a CRLF shell file is refused, never skipped', () => {
+    // The \r-terminated shebang used to match no kind: skipped, then passed.
+    // `bash -n` accepts this file, so the CR check has to be its own.
+    const crlf = fixture('crlf/hook', '#!/usr/bin/env bash\r\necho hi\r\n');
+    expect(spawnSync('bash', ['-n', crlf], { timeout: SPAWN_TIMEOUT_MS }).status).toBe(0); // guard the premise
+    const r = runGate(['--report', crlf]);
+    expect(r.code).toBe(1);
+    expect(r.output).toContain('CRLF LINE ENDINGS');
+    expect(r.output).toContain('1 checked, 0 skipped');
+  }, TEST_TIMEOUT_MS);
+
+  test('an LF shebang over a body with a CR in it is refused too', () => {
+    const mixed = fixture('crlf/mixed', '#!/usr/bin/env bash\nHERE=.\nexec bun "$HERE/x.ts"\r\n');
+    const r = runGate([mixed]);
+    expect(r.code).toBe(1);
+    expect(r.output).toContain('CRLF LINE ENDINGS');
+  }, TEST_TIMEOUT_MS);
+
+  test("a CRLF shim's payload is still found and parsed", () => {
+    fixture('crlf-shim/hook', SHIM('hook.ts').replace(/\n/g, '\r\n'));
+    fixture('crlf-shim/hook.ts', 'export const ok = 1;\n');
+    const r = runGate(['--report', path.join(FX, 'fx', 'crlf-shim', 'hook')]);
+    expect(r.code).toBe(1);
+    expect(r.output).toContain('CRLF LINE ENDINGS');
+    expect(r.output).toContain('2 checked, 0 skipped');
+  }, TEST_TIMEOUT_MS);
+
+  test('a CRLF python file is classified and compiled, not refused', () => {
+    // Python reads CRLF source fine; only bash keeps the \r.
+    if (spawnSync('python3', ['-c', 'pass'], { timeout: SPAWN_TIMEOUT_MS }).status !== 0) return;
+    const py = fixture('crlf/tool.py', '#!/usr/bin/env python3\r\nprint("ok")\r\n');
+    const r = runGate(['--report', py]);
+    expect(r.code).toBe(0);
+    expect(r.output).toContain('1 checked, 0 skipped');
+  }, TEST_TIMEOUT_MS);
+
   test('a missing TMPDIR does not refuse a healthy tree', () => {
     // Session scratch dirs get wiped; the gate writes no temp file.
     const r = runGate([fixture('tmpdir-gone/ok.sh', '#!/bin/bash\necho ok\n')], { TMPDIR: path.join(FX, 'no-such-tmpdir') });
