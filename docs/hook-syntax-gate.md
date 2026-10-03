@@ -57,7 +57,7 @@ a hook added to either is covered without editing the test.
 | Consumer | Fires on | Verdict |
 | --- | --- | --- |
 | `test/hook-syntax.test.ts` | every `bun run test`, and the required free-suite CI check | fails the suite, naming the file and line |
-| `./setup` | every install, including the one `/gstack-upgrade` runs | **refuses**: nothing is sourced, built, created, linked or registered (only the CRLF heal below runs first) |
+| `./setup` | every install, including the one `/gstack-upgrade` runs | **refuses**: nothing is sourced, built, created, linked or registered (only the CRLF heal below runs first; the read-only `./setup --status` exits before the gate and installs nothing) |
 | `./setup`, before it registers hooks | when `~/.claude/skills/gstack` resolves to a checkout other than the one setup runs from | **registers and re-points no hook**, finishes the rest of the install, and exits 1 |
 | `bin/gstack-gate-incoming` | team mode's `bin/gstack-session-update` and `/gstack-upgrade`, on the incoming commit, **before** the checkout moves | **holds**: the checkout stays on its old commit; see [Gating the incoming tree](#gating-the-incoming-tree) |
 
@@ -94,9 +94,12 @@ one cannot land unpinned. An install checked out on Windows with
 gate, `setup` runs `scripts/heal-eol.sh`, which rewrites exactly those files:
 tracked, LF in the index, `eol=lf` by attribute, CRLF in the working tree, a
 shell shebang, not flagged assume-unchanged or skip-worktree, and no content
-change. The bytes come from `git cat-file --filters` and replace the file with
-one `mv`, so nothing is deleted first and a failure leaves the original as it
-was. It is the one write the setup block makes before the gate's verdict.
+change. The bytes come from `git cat-file --filters`, read at the path's place
+in the work tree, so a gstack vendored into another repository heals from its
+own index entry. They go into a copy of the original, which keeps its mode (a
+read-only script stays read-only), and replace the file with one `mv`, so
+nothing is deleted first and a failure leaves the original as it was. It is the
+one write the setup block makes before the gate's verdict.
 
 ## What it checks
 
@@ -172,13 +175,21 @@ Silent on a healthy tree. Coverage is printed only on request:
 /bin/bash scripts/hook-syntax.sh --report
 ```
 
-Measured 2026-10-03: on upstream v1.91.13 that printed `hook-syntax: 115
-checked, 2687 skipped`, and a full sweep took 23 seconds of wall clock at a
-load average of 175. The per-file pass forks once (the parse), and every
-content scan runs once per sweep. Every `setup` run pays for one sweep, 8–14
-seconds at a load average near 150, almost all of it the per-file parses. That
-adds up in tests that run `setup` repeatedly: `setup-codex-scope.test.ts` went
-from 494 to 643 seconds in the same load window, still 19 pass, 0 fail.
+Measured 2026-10-04 on this tree (base v1.91.16.0): `hook-syntax: 153 checked,
+2558 skipped`, the 153 including the 33 local files the seven bun payloads
+import. A full sweep under `/bin/bash` took 16–24 seconds at a load average near
+230; earlier the same day, with 118–133 checked, it took 5–9 seconds at
+85–120. Each payload build takes 0.1–0.2 seconds; almost all the rest is the
+per-file parses, one fork each, plus one probe per interpreter.
+
+Every `setup` run pays for one sweep, and for a second when
+`~/.claude/skills/gstack` resolves to a different checkout. `./setup
+--refresh-registered`, which `/gstack-upgrade` runs, re-runs `setup` once per
+registered host, so an upgrade pays for 1+N sweeps. In three pairs of healthy
+`./setup --host claude` runs on 2026-10-04 (load average 78–111), an install
+took 10–12 seconds before the gate and 18–26 seconds with it. On v1.91.13, in
+one load window, `setup-codex-scope.test.ts` went from 494 to 643 seconds, still
+19 pass, 0 fail.
 
 ## What it does NOT cover — read no wider claim into it
 
