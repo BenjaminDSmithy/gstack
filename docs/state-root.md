@@ -181,6 +181,12 @@ distribution exists.
   `gstack_state_root_select` (sets `$_gstack_sr_root`), or `eval` gstack-paths
   with the guard above. Hooks must source the twin; never spawn gstack-paths
   from a hook.
+- Source the twin as `[ -r FILE ] && . FILE 2>/dev/null || { echo ...; exit 1; }`.
+  The `[ -r ]` test is required: macOS `/bin/bash` 3.2 under `set -e`, and any
+  bash in POSIX mode, exits on `.` of a missing file before `||` runs, so the
+  reinstall message never prints. `test/state-root-source-guard.test.ts` pins
+  the form on every site, and runs setup and each executable with the twin
+  missing under `/bin/bash` and `/bin/bash --posix`.
 - TypeScript: `resolveStateRoot()` and `readConfigKey()` from
   `lib/state-root.ts`.
 - `test/state-root-ratchet.test.ts` fails on a hand-rolled chain, an
