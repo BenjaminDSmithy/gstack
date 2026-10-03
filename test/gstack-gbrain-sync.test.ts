@@ -1171,7 +1171,7 @@ describe("code walk strategy (persisted per source)", () => {
     }
 
     it("passes no strategy for a persisted one and writes nothing", () => {
-      for (const persisted of ["auto", "code", "markdown"]) {
+      for (const persisted of ["auto", "code", "markdown"] as const) {
         const fake = io([persisted]);
         expect(codeWalkStrategy("src", undefined, fake)).toEqual({ args: [] });
         expect(fake.writes).toEqual([]);
