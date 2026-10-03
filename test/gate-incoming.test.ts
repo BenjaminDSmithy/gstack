@@ -344,6 +344,27 @@ describe('gstack-gate-incoming --fast-forward', () => {
     expect(git(fx.install, 'stash', 'show', '-p', kept![1])).toContain('# top LOCAL');
   }, TEST_TIMEOUT_MS);
 
+  test('a conflicting pop git cannot store is anchored before the reset, never lost', () => {
+    const fx = makeFixture();
+    const sha = advance(fx, { 'SKILL.md': '# top v2\nname: qa\nbody line\n' });
+    git(fx.install, 'fetch', '-q');
+    write(fx.install, 'SKILL.md', '# top LOCAL\nname: qa\nbody line\n');
+    // A held refs/stash.lock: git exits 0, prints "cannot store <id>" and
+    // leaves the markers live with no refs/stash.
+    const lock = path.join(fx.install, '.git', 'refs', 'stash.lock');
+    fs.writeFileSync(lock, '');
+    const r = runHelper(fx, ['--fast-forward', fx.install, 'origin/main']);
+    fs.rmSync(lock, { force: true });
+    expect(r.code, r.stderr).toBe(0);
+    expect(head(fx)).toBe(sha);
+    expect(fs.readFileSync(path.join(fx.install, 'SKILL.md'), 'utf8')).toBe('# top v2\nname: qa\nbody line\n');
+    expect(git(fx.install, 'ls-files', '-u')).toBe('');
+    const kept = r.stdout.match(/^AUTOSTASH_KEPT ([0-9a-f]{40}): .* kept at (refs\/gstack-autostash\/\S+)$/m);
+    expect(kept, r.stdout).not.toBeNull();
+    expect(git(fx.install, 'rev-parse', kept![2])).toBe(kept![1]);
+    expect(git(fx.install, 'stash', 'show', '-p', kept![1])).toContain('# top LOCAL');
+  }, TEST_TIMEOUT_MS);
+
   test('the move names the gated commit, not a ref that changed while the gate ran', () => {
     const fx = makeFixture();
     // A: the commit to gate. Its checker moves origin/main mid-gate to B, a
