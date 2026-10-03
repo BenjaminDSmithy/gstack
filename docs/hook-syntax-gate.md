@@ -109,12 +109,20 @@ more than a script) and dispatches on the **shebang**, never on an extension:
 * **bun payloads** — every hook in `hosts/claude/hooks/` is a bash shim that
   hands a TypeScript file to bun (`exec bun "$HERE/question-preference-hook.ts"`).
   `bash -n` on the shim says nothing about the file that runs, so each shell
-  file is searched for the paths it hands to bun, and each one is parsed with
-  `bun build --target=bun --packages=external`: the entrypoint and every local
-  file it imports, in memory. npm packages are deliberately left unresolved —
+  file is searched for the paths it hands to bun, and each one is bundled
+  through Bun's build API with target `bun` and npm packages external (the
+  bundle `bun build --target=bun --packages=external` makes): the entrypoint and
+  every local file it imports, in memory. npm packages are deliberately left unresolved —
   `setup` runs the gate before its own `bun install`, and resolving them would
   refuse every fresh clone for a reason that is not syntax. A missing *local*
-  import still fails.
+  import still fails. Every local file the build pulled in, as listed by the
+  build's own metafile, is then marker-scanned from its own bytes and counted
+  as checked. A marker inside a template literal or a comment of an imported
+  module parses cleanly, and the sweep alone skips a `.ts` no shim names, so
+  this is what catches it. The bundle's text is never scanned: bun re-prints an
+  ordinary `"\n<<<<<<< "` string as a template literal with the marker at
+  column 0. A bun whose build API has no metafile is reported as unable to
+  list a payload's imports, and those files go unscanned.
 * **Conflict markers** — scanned separately from parsing, because a marker
   inside a heredoc body, a quoted string or a template literal parses cleanly
   and is still a half-merged file. Only the three labelled markers are scanned,
@@ -175,7 +183,7 @@ from 494 to 643 seconds in the same load window, still 19 pass, 0 fail.
 * **TypeScript and JavaScript no shim reaches are skipped.** The type checker
   and the test suite own those.
 * **Skipped files are not marker-scanned.** A half-merged `.md`, `.json` or
-  `.tmpl` is invisible here.
+  `.tmpl` is invisible here, unless a bun payload imports it.
 * **A parse is not a run.** A hook that parses and then fails at runtime is out
   of scope.
 * **A shim that reaches bun any other way** than `bun "$HERE/<path>"` has its

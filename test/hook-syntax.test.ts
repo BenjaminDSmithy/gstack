@@ -205,10 +205,17 @@ for (const hook of WIRED) {
     const payload = payloadOf(fs.readFileSync(path.join(ROOT, hook.rel), 'utf-8'));
     const payloadRel = payload ? path.join(path.dirname(hook.rel), payload) : null;
 
-    test('the pristine scratch copy is GREEN, and everything that runs was parsed', () => {
+    test('the pristine scratch copy is GREEN, and everything that runs was parsed', async () => {
+      // The shim, plus every local file its payload's build pulls in, the
+      // payload included: the list asked of bun's build API directly.
+      let expected = 1;
+      if (payloadRel) {
+        const built = await Bun.build({ entrypoints: [path.join(SCRATCH, payloadRel)], target: 'bun', packages: 'external', metafile: true });
+        expected += Object.keys(built.metafile!.inputs).length;
+      }
       const r = runGate(['--report', path.join(SCRATCH, hook.rel)]);
       expect(r.code).toBe(0);
-      expect(r.output).toBe(`hook-syntax: ${payload ? 2 : 1} checked, 0 skipped`);
+      expect(r.output).toBe(`hook-syntax: ${expected} checked, 0 skipped`);
     }, TEST_TIMEOUT_MS);
 
     test('control: a harmless edit through the same harness stays GREEN', () => {
@@ -918,6 +925,78 @@ describe('hook-syntax: bun payloads', () => {
     expect(r.output).toContain('FAILS TO PARSE');
   }, TEST_TIMEOUT_MS);
 
+  // A marker inside a template literal or a comment parses cleanly, and the
+  // sweep skips a .ts no shim names, so the import list bun's own build
+  // reports is what carries an imported module to the marker scan.
+  const conflictedLiteral = (name: string) => `export const ${name} = \`\n${LT} HEAD\na\n${EQ}\nb\n${GT} other\n\`;\n`;
+
+  test('conflict markers in a module the payload imports fail, naming that module', () => {
+    fixture('import-markers/hook', SHIM('hook.ts'));
+    fixture('import-markers/hook.ts', "import { msg } from './lib/helper';\nconsole.log(msg);\n");
+    const helper = fixture('import-markers/lib/helper.ts', conflictedLiteral('msg'));
+    const r = runGate([path.join(FX, 'fx', 'import-markers/hook')]);
+    expect(r.code).toBe(1);
+    expect(r.output).toContain(`UNRESOLVED CONFLICT MARKERS in ${fs.realpathSync(helper)}`);
+  }, TEST_TIMEOUT_MS);
+
+  test('markers inside a comment of an imported module fail too', () => {
+    fixture('import-comment/hook', SHIM('hook.ts'));
+    fixture('import-comment/hook.ts', "import { ok } from './ok';\nconsole.log(ok);\n");
+    const mod = fixture('import-comment/ok.ts', `/*\n${LT} HEAD\none\n${EQ}\ntwo\n${GT} other\n*/\nexport const ok = 1;\n`);
+    const r = runGate([path.join(FX, 'fx', 'import-comment/hook')]);
+    expect(r.code).toBe(1);
+    expect(r.output).toContain(`UNRESOLVED CONFLICT MARKERS in ${fs.realpathSync(mod)}`);
+  }, TEST_TIMEOUT_MS);
+
+  test('an imported module under a non-ASCII directory is found and named', () => {
+    fixture('import-unicode/hook', SHIM('hook.ts'));
+    fixture('import-unicode/hook.ts', "import { msg } from './ünï dir/helper';\nconsole.log(msg);\n");
+    const helper = fixture('import-unicode/ünï dir/helper.ts', conflictedLiteral('msg'));
+    const r = runGate([path.join(FX, 'fx', 'import-unicode/hook')]);
+    expect(r.code).toBe(1);
+    expect(r.output).toContain(`UNRESOLVED CONFLICT MARKERS in ${fs.realpathSync(helper)}`);
+  }, TEST_TIMEOUT_MS);
+
+  test('markers in the payload itself are named once', () => {
+    fixture('payload-markers/hook', SHIM('hook.ts'));
+    fixture('payload-markers/hook.ts', `${conflictedLiteral('msg')}console.log(msg);\n`);
+    const r = runGate([path.join(FX, 'fx', 'payload-markers/hook')]);
+    expect(r.code).toBe(1);
+    expect(r.output.split('UNRESOLVED CONFLICT MARKERS').length - 1).toBe(1);
+  }, TEST_TIMEOUT_MS);
+
+  test('control: an imported module that only spells a marker in an escaped string stays GREEN', () => {
+    // bun re-prints such a string as a template literal with the marker at
+    // column 0 of its bundle; the module's own bytes hold no marker line.
+    fixture('import-escaped/hook', SHIM('hook.ts'));
+    fixture('import-escaped/hook.ts', "import { isConflicted } from './detect';\nconsole.log(isConflicted(''));\n");
+    fixture('import-escaped/detect.ts', `export const isConflicted = (s: string) => ("\\n" + s).includes("\\n${LT} ");\n`);
+    const r = runGate([path.join(FX, 'fx', 'import-escaped/hook')]);
+    expect(r.output).toBe('');
+    expect(r.code).toBe(0);
+  }, TEST_TIMEOUT_MS);
+
+  test('control: an imported template literal holding an unlabelled run stays GREEN', () => {
+    fixture('import-banner/hook', SHIM('hook.ts'));
+    fixture('import-banner/hook.ts', "import { banner } from './banner';\nconsole.log(banner);\n");
+    fixture('import-banner/banner.ts', `export const banner = \`\n${LT}\n${EQ}\n${GT}\n\`;\n`);
+    const r = runGate([path.join(FX, 'fx', 'import-banner/hook')]);
+    expect(r.output).toBe('');
+    expect(r.code).toBe(0);
+  }, TEST_TIMEOUT_MS);
+
+  test('a bun that cannot list imports says so, and is not a pass for them', () => {
+    // A fake bun: answers the probe, and has a build API without a metafile.
+    const bin = fixture('no-metafile/bun', '#!/bin/sh\ncase "$1" in --version) echo 9.9.9 ;; -e) echo NO_METAFILE ;; esac\nexit 0\n');
+    fs.chmodSync(bin, 0o755);
+    fixture('no-metafile/tree/hook', SHIM('hook.ts'));
+    fixture('no-metafile/tree/hook.ts', "import { a } from './a';\nconsole.log(a);\n");
+    const r = runGate([path.join(FX, 'fx', 'no-metafile/tree/hook')], { HOOK_SYNTAX_BUN: bin });
+    expect(r.code).toBe(0);
+    expect(r.output).toContain('cannot list what');
+    expect(r.output).toContain('NOT marker-scanned');
+  }, TEST_TIMEOUT_MS);
+
   test('a local import that does not exist fails', () => {
     fixture('missing-import/hook', SHIM('hook.ts'));
     fixture('missing-import/hook.ts', "import { gone } from './gone';\nconsole.log(gone);\n");
@@ -940,6 +1019,18 @@ describe('hook-syntax: bun payloads', () => {
     const r = runGate(['--report', path.join(FX, 'fx', 'noext/hook')]);
     expect(r.code).toBe(1);
     expect(r.output).toContain('payload-no-extension');
+    // Parsed as TypeScript, the way `bun <file>` runs it: the diagnostic is
+    // the syntax error, not a complaint about the file type.
+    expect(r.output).toMatch(/payload-no-extension:1:\d+/);
+  }, TEST_TIMEOUT_MS);
+
+  test('control: a valid extension-less payload, and what it imports, are GREEN and checked', () => {
+    fixture('noext-ok/hook', SHIM('payload-no-extension'));
+    fixture('noext-ok/payload-no-extension', "import { y } from './lib';\nconst x: number = y;\nconsole.log(x);\n");
+    fixture('noext-ok/lib.ts', 'export const y: number = 2;\n');
+    const r = runGate(['--report', path.join(FX, 'fx', 'noext-ok/hook')]);
+    expect(r.code).toBe(0);
+    expect(r.output).toBe('hook-syntax: 3 checked, 0 skipped');
   }, TEST_TIMEOUT_MS);
 
   test('a commented-out bun invocation is not a payload', () => {
