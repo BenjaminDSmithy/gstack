@@ -70,7 +70,7 @@ PARENT=""
 TREE=""
 GATE_PID=""
 cleanup() {
-  [ -n "$GATE_PID" ] && kill -TERM "$GATE_PID" 2>/dev/null
+  [ -n "$GATE_PID" ] && { kill -TERM -- "-$GATE_PID" 2>/dev/null || kill -TERM "$GATE_PID" 2>/dev/null; }
   if [ -n "$TREE" ]; then
     git -C "$REPO" worktree unlock "$TREE" >/dev/null 2>&1
     git -C "$REPO" worktree remove --force "$TREE" >/dev/null 2>&1
@@ -131,16 +131,19 @@ GATE_BASH=/bin/bash
 [ -x "$GATE_BASH" ] || GATE_BASH="${BASH:-bash}"
 
 # Polled rather than waited on, so a hung checker cannot hold the caller (and
-# the session-update lock it keeps alive) forever.
+# the session-update lock it keeps alive) forever. Job control is on just for
+# the launch, so the checker leads its own process group and a timeout or a
+# signal stops its children (bun, python, a nested bash) with it.
+set -m
 ( cd "$TREE" && exec "$GATE_BASH" "$CHECKER" --report . ) >"$PARENT/report" 2>&1 &
 GATE_PID=$!
+set +m
 WAITED=0
 TIMED_OUT=0
 while kill -0 "$GATE_PID" 2>/dev/null; do
   if [ "$WAITED" -ge "$LIMIT" ]; then
     TIMED_OUT=1
-    pkill -TERM -P "$GATE_PID" 2>/dev/null
-    kill -TERM "$GATE_PID" 2>/dev/null
+    kill -TERM -- "-$GATE_PID" 2>/dev/null || kill -TERM "$GATE_PID" 2>/dev/null
     break
   fi
   sleep 1
