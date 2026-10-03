@@ -160,6 +160,9 @@ if [ "$TIMED_OUT" -eq 1 ]; then
 fi
 case "$RC" in
   0)
+    # Silent on a healthy tree; anything else it said (a coverage gap such as
+    # "bun absent ... NOT checked") is passed on, never swallowed.
+    grep -v '^hook-syntax: [0-9]* \(checked\|nested\)' "$PARENT/report" >&2
     COVERAGE=$(grep -m1 '^hook-syntax: [0-9]* checked' "$PARENT/report" 2>/dev/null)
     echo "HOOK_GATE clean $SHA: ${COVERAGE:-hook-syntax: no coverage line} ($FROM checker)"
     ;;

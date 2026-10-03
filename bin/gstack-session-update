@@ -502,7 +502,9 @@ CALLER_PID=$(gstack_harness_pid "$PPID")
     [ "$GATE_ERR" = /dev/null ] || rm -f "$GATE_ERR"
     case "$GATE_EXIT" in
       0)
-        [ -n "$GATE_VERDICT" ] && log_entry "HOOK_GATE_PASSED incoming=$INCOMING verdict=$GATE_VERDICT"
+        # A pass can still carry a coverage gap ("bun absent ... NOT checked");
+        # it goes into the log, not away.
+        [ -n "$GATE_VERDICT" ] && log_entry "HOOK_GATE_PASSED incoming=$INCOMING verdict=$GATE_VERDICT${GATE_REPORT:+ report=$GATE_REPORT}"
         ;;
       1)
         log_entry "HOOK_SYNTAX_BLOCKED head=$OLD_HEAD incoming=$INCOMING verdict=${GATE_VERDICT:-none} report=${GATE_REPORT:-none}"

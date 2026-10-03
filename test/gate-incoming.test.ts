@@ -42,6 +42,10 @@ const LT = '<'.repeat(7);
 const HOOK = 'hosts/claude/hooks/demo-hook';
 const GOOD_HOOK = '#!/bin/bash\necho ok\n';
 const BROKEN_HOOK = '#!/bin/bash\nif then fi\n';
+// A checker that passes with a coverage gap, the way hook-syntax.sh reports an
+// absent bun.
+const GAP_CHECKER =
+  "#!/bin/bash\necho 'hook-syntax: bun absent — hosts/x.ts NOT checked' >&2\necho 'hook-syntax: 3 checked, 1 skipped' >&2\nexit 0\n";
 
 // No global or system git config: a global core.hooksPath would make the
 // hooks-isolation case pass without proving anything.
@@ -220,6 +224,17 @@ describe('gstack-gate-incoming: gate only', () => {
     } finally {
       try { process.kill(sleeper, 'SIGKILL'); } catch { /* already gone */ }
     }
+  }, TEST_TIMEOUT_MS);
+
+  test('a clean verdict still passes on what the checker said besides coverage', () => {
+    const fx = makeFixture();
+    advance(fx, { 'scripts/hook-syntax.sh': GAP_CHECKER });
+    git(fx.install, 'fetch', '-q');
+    const r = runHelper(fx, [fx.install, 'origin/main']);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toContain('hook-syntax: 3 checked, 1 skipped');
+    expect(r.stderr).toContain('NOT checked');
+    expect(r.stderr).not.toContain('3 checked');
   }, TEST_TIMEOUT_MS);
 
   test('a revision that names no commit is no verdict', () => {
@@ -410,6 +425,17 @@ describe('gstack-session-update gates the incoming tree before it moves the chec
     expect(log).toMatch(/HOOK_GATE_INCONCLUSIVE head=\S+ incoming=\S+ exit=2 /);
     expect(log).not.toContain('UPDATING');
     expect(head(fx)).toBe(before);
+  }, TEST_TIMEOUT_MS);
+
+  test('a pass that carries a coverage gap logs the gap', async () => {
+    const fx = makeFixture();
+    const sha = advance(fx, { 'scripts/hook-syntax.sh': GAP_CHECKER });
+    expect(runSessionUpdate(fx).status).toBe(0);
+    const log = await waitForLog(fx);
+    const line = log.split('\n').find((l) => l.includes('HOOK_GATE_PASSED')) ?? '';
+    expect(line, log).toContain(`incoming=${sha}`);
+    expect(line).toContain('report=');
+    expect(line).toContain('NOT checked');
   }, TEST_TIMEOUT_MS);
 
   test('a conflicting autostash pop leaves no conflict markers live, keeps the stash, and still sets up', async () => {
