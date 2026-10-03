@@ -12,7 +12,7 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, rmSync
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { ensureSourceRegistered, probeSource, sourcePageCount } from "../lib/gbrain-sources";
+import { ensureSourceRegistered, probeSource, sourcePageCount, sourceStrategy, setSourceStrategy } from "../lib/gbrain-sources";
 
 interface FakeGbrainSetup {
   bindir: string;
@@ -36,10 +36,13 @@ interface FakeGbrainSetup {
  *                                                       (#1985: remove WITHOUT
  *                                                       --confirm-destructive
  *                                                       fails like gbrain >= 0.42)
+ *   gbrain sources set-strategy <id> <s>              → set the row's strategy
+ *                                                       (exit 2 bad value,
+ *                                                       exit 4 unknown id)
  *   gbrain --version                                  → echo "gbrain 0.42.40.0"
  * Anything else exits 1.
  */
-function makeFakeGbrain(initialState: { sources: Array<{ id: string; local_path: string; federated?: boolean; page_count?: number }> }): FakeGbrainSetup {
+function makeFakeGbrain(initialState: { sources: Array<{ id: string; local_path: string; federated?: boolean; page_count?: number; strategy?: string | null }> }): FakeGbrainSetup {
   const tmp = mkdtempSync(join(tmpdir(), "gbrain-sources-test-"));
   const bindir = join(tmp, "bin");
   mkdirSync(bindir, { recursive: true });
@@ -73,6 +76,19 @@ case "$1 $2" in
     done
     NEW=$(jq --arg id "$ID" --arg path "$PATH_VAL" --argjson fed "$FED" \
       '.sources += [{id: $id, local_path: $path, federated: $fed, page_count: 0}]' "${statePath}")
+    echo "$NEW" > "${statePath}"
+    exit 0
+    ;;
+  "sources set-strategy")
+    case "$4" in
+      markdown|code|auto) : ;;
+      *) echo "Error: invalid strategy \\"$4\\"." >&2; exit 2 ;;
+    esac
+    if ! jq -e --arg id "$3" '.sources | any(.id == $id)' "${statePath}" >/dev/null; then
+      echo "Error: source \\"$3\\" not found." >&2
+      exit 4
+    fi
+    NEW=$(jq --arg id "$3" --arg s "$4" '.sources |= map(if .id == $id then .strategy = $s else . end)' "${statePath}")
     echo "$NEW" > "${statePath}"
     exit 0
     ;;
@@ -355,6 +371,49 @@ describe("sourcePageCount", () => {
   it("returns null when page_count is missing from the source object", () => {
     const fake = makeFakeGbrain({ sources: [{ id: "no-count", local_path: "/x" } as { id: string; local_path: string }] });
     expect(sourcePageCount("no-count", fake.env)).toBeNull();
+    fake.cleanup();
+  });
+});
+
+describe("sourceStrategy", () => {
+  it("returns the persisted strategy", () => {
+    const fake = makeFakeGbrain({ sources: [{ id: "src", local_path: "/x", strategy: "auto" }] });
+    expect(sourceStrategy("src", fake.env)).toBe("auto");
+    fake.cleanup();
+  });
+
+  it("returns unset when nothing is persisted or gbrain ignores the value", () => {
+    const fake = makeFakeGbrain({
+      sources: [
+        { id: "none", local_path: "/x", strategy: null },
+        { id: "bogus", local_path: "/y", strategy: "everything" },
+      ],
+    });
+    expect(sourceStrategy("none", fake.env)).toBe("unset");
+    expect(sourceStrategy("bogus", fake.env)).toBe("unset");
+    fake.cleanup();
+  });
+
+  it("returns unsupported when the row has no strategy key or the source is absent", () => {
+    const fake = makeFakeGbrain({ sources: [{ id: "old-gbrain", local_path: "/x", page_count: 3 }] });
+    expect(sourceStrategy("old-gbrain", fake.env)).toBe("unsupported");
+    expect(sourceStrategy("missing", fake.env)).toBe("unsupported");
+    fake.cleanup();
+  });
+});
+
+describe("setSourceStrategy", () => {
+  it("persists the strategy so sourceStrategy reads it back", () => {
+    const fake = makeFakeGbrain({ sources: [{ id: "src", local_path: "/x", strategy: null }] });
+    expect(setSourceStrategy("src", "code", fake.env)).toBeNull();
+    expect(sourceStrategy("src", fake.env)).toBe("code");
+    expect(readFileSync(fake.logPath, "utf-8")).toContain("sources set-strategy src code");
+    fake.cleanup();
+  });
+
+  it("returns gbrain's last stderr line when the write fails", () => {
+    const fake = makeFakeGbrain({ sources: [] });
+    expect(setSourceStrategy("missing", "code", fake.env)).toBe('Error: source "missing" not found.');
     fake.cleanup();
   });
 });
