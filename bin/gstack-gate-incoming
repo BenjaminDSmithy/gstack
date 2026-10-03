@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# gstack-gate-incoming — run the hook parse gate on a commit BEFORE it becomes
+# the registered checkout, and optionally fast-forward to it.
+#
+# Usage:
+#   gstack-gate-incoming <checkout> <commit>
+#   gstack-gate-incoming --fast-forward <checkout> <commit>
+#
+# Claude Code runs gstack's hooks by path, straight out of the checkout
+# ./setup registered, so whatever moves that checkout changes every session's
+# hooks the moment it writes. ./setup's own gate runs after the move: it guards
+# the next install, not the running one. An updater calls this instead of
+# `git pull`. It checks <commit> out into a throwaway worktree, runs
+# scripts/hook-syntax.sh over it and removes the worktree again. With
+# --fast-forward it then moves the checkout to that exact commit, and only on a
+# clean verdict. See docs/hook-syntax-gate.md.
+#
+# The checker comes from the incoming tree, because that is the copy its own
+# ./setup will run. A tree that predates the gate is checked by this install's
+# copy instead. Either runs under /bin/bash, else $BASH — setup's rule: never a
+# bare PATH bash, which on macOS is Homebrew's 5.x.
+#
+# --fast-forward moves nothing when <commit> is already HEAD or behind it, and
+# refuses a merge in progress or a checkout that has diverged. Local edits are
+# carried over with --autostash. A stash pop that conflicts writes conflict
+# markers into the live tree, and git still exits 0 for it, so the result is
+# judged by the unmerged entries: the tree is reset to the commit the gate
+# passed and the stash is KEPT, never dropped (its id is printed).
+#
+# Exit:
+#   0  clean (with --fast-forward: the checkout is at <commit>, or already
+#      contains it)
+#   1  a file in the incoming tree does not parse, or is half-merged; the
+#      report on stderr names it. Nothing moved
+#   2  no verdict: the commit, the worktree or a checker could not be reached,
+#      the checker exited something other than 0 or 1, or it ran past
+#      GSTACK_HOOK_GATE_TIMEOUT seconds (default 600). No verdict is never a
+#      pass. Nothing moved
+#   3  --fast-forward only: the checkout cannot be fast-forwarded (diverged,
+#      mid-merge, or git refused); the FF line says where HEAD is
+#
+# stdout carries the verdict lines (HOOK_GATE, FF, AUTOSTASH_KEPT); the
+# checker's report and git's errors go to stderr.
+
+set -u
+
+FAST_FORWARD=0
+if [ "${1:-}" = "--fast-forward" ]; then
+  FAST_FORWARD=1
+  shift
+fi
+if [ "$#" -ne 2 ]; then
+  echo "usage: gstack-gate-incoming [--fast-forward] <checkout> <commit>" >&2
+  exit 2
+fi
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$1"
+REV="$2"
+LIMIT="${GSTACK_HOOK_GATE_TIMEOUT:-600}"
+case "$LIMIT" in ''|*[!0-9]*) LIMIT=600 ;; esac
+
+SHA=$(git -C "$REPO" rev-parse --verify -q "$REV^{commit}" 2>/dev/null)
+if [ -z "$SHA" ]; then
+  echo "HOOK_GATE no-verdict: $REV does not name a commit in $REPO"
+  exit 2
+fi
+
+PARENT=""
+TREE=""
+GATE_PID=""
+cleanup() {
+  [ -n "$GATE_PID" ] && kill -TERM "$GATE_PID" 2>/dev/null
+  if [ -n "$TREE" ]; then
+    git -C "$REPO" worktree unlock "$TREE" >/dev/null 2>&1
+    git -C "$REPO" worktree remove --force "$TREE" >/dev/null 2>&1
+  fi
+  [ -n "$PARENT" ] && rm -rf "$PARENT"
+}
+trap cleanup EXIT
+trap 'exit 2' HUP INT TERM
+
+if [ "$FAST_FORWARD" -eq 1 ]; then
+  HEAD_SHA=$(git -C "$REPO" rev-parse --verify -q HEAD 2>/dev/null)
+  if [ -z "$HEAD_SHA" ]; then
+    echo "FF refused: $REPO has no HEAD commit"
+    exit 3
+  fi
+  if [ "$HEAD_SHA" = "$SHA" ] || git -C "$REPO" merge-base --is-ancestor "$SHA" "$HEAD_SHA" 2>/dev/null; then
+    echo "FF current $HEAD_SHA: already contains $SHA"
+    exit 0
+  fi
+  if ! git -C "$REPO" merge-base --is-ancestor "$HEAD_SHA" "$SHA" 2>/dev/null; then
+    echo "FF refused: not a fast-forward; HEAD $HEAD_SHA has commits that $SHA does not"
+    exit 3
+  fi
+  # Someone's merge in progress: the conflict recovery below must never
+  # mistake it for an autostash pop of ours.
+  if [ -n "$(git -C "$REPO" ls-files -u 2>/dev/null | head -1)" ]; then
+    echo "FF refused: $REPO has unmerged files from a merge in progress; resolve them first"
+    exit 3
+  fi
+fi
+
+PARENT=$(mktemp -d "${TMPDIR:-/tmp}/gstack-gate-incoming.XXXXXX" 2>/dev/null) || PARENT=""
+if [ -z "$PARENT" ]; then
+  echo "HOOK_GATE no-verdict $SHA: could not create a scratch directory"
+  exit 2
+fi
+
+# Hooks off: a post-checkout hook in the install would run against the
+# throwaway. Locked, so an idle-worktree GC cannot reap it mid-check.
+TREE="$PARENT/tree"
+if ! git -C "$REPO" -c core.hooksPath=/dev/null worktree add -q --detach "$TREE" "$SHA" >"$PARENT/add.log" 2>&1; then
+  echo "HOOK_GATE no-verdict $SHA: git worktree add failed: $(head -c 300 "$PARENT/add.log" | tr '\n' ' ')"
+  exit 2
+fi
+git -C "$REPO" worktree lock --reason "gstack-gate-incoming: throwaway check of $SHA" "$TREE" >/dev/null 2>&1
+
+CHECKER="$TREE/scripts/hook-syntax.sh"
+FROM="incoming"
+if [ ! -r "$CHECKER" ]; then
+  CHECKER="$HERE/../scripts/hook-syntax.sh"
+  FROM="installed"
+fi
+if [ ! -r "$CHECKER" ]; then
+  echo "HOOK_GATE no-verdict $SHA: no scripts/hook-syntax.sh in the incoming tree or in this install"
+  exit 2
+fi
+GATE_BASH=/bin/bash
+[ -x "$GATE_BASH" ] || GATE_BASH="${BASH:-bash}"
+
+# Polled rather than waited on, so a hung checker cannot hold the caller (and
+# the session-update lock it keeps alive) forever.
+( cd "$TREE" && exec "$GATE_BASH" "$CHECKER" --report . ) >"$PARENT/report" 2>&1 &
+GATE_PID=$!
+WAITED=0
+TIMED_OUT=0
+while kill -0 "$GATE_PID" 2>/dev/null; do
+  if [ "$WAITED" -ge "$LIMIT" ]; then
+    TIMED_OUT=1
+    pkill -TERM -P "$GATE_PID" 2>/dev/null
+    kill -TERM "$GATE_PID" 2>/dev/null
+    break
+  fi
+  sleep 1
+  WAITED=$((WAITED + 1))
+done
+wait "$GATE_PID"
+RC=$?
+GATE_PID=""
+
+if [ "$TIMED_OUT" -eq 1 ]; then
+  cat "$PARENT/report" >&2
+  echo "HOOK_GATE no-verdict $SHA: the $FROM checker ran past ${LIMIT}s and was stopped"
+  exit 2
+fi
+case "$RC" in
+  0)
+    COVERAGE=$(grep -m1 '^hook-syntax: [0-9]* checked' "$PARENT/report" 2>/dev/null)
+    echo "HOOK_GATE clean $SHA: ${COVERAGE:-hook-syntax: no coverage line} ($FROM checker)"
+    ;;
+  1)
+    grep -v '^hook-syntax: [0-9]* \(checked\|nested\)' "$PARENT/report" >&2
+    echo "HOOK_GATE blocked $SHA: a file in the incoming tree does not parse, or is half-merged"
+    exit 1
+    ;;
+  *)
+    cat "$PARENT/report" >&2
+    echo "HOOK_GATE no-verdict $SHA: $GATE_BASH exited $RC on the $FROM checker, which exits only 0 or 1"
+    exit 2
+    ;;
+esac
+
+[ "$FAST_FORWARD" -eq 1 ] || exit 0
+
+# --autostash: locally patched TRACKED files are the norm on an install —
+# skill-prefix mode rewrites frontmatter names and `gstack-config
+# gbrain-refresh` renders brain blocks into SKILL.md — and a bare --ff-only
+# refuses over them (#2566). The merge names the exact commit the gate passed.
+STASH_BEFORE=$(git -C "$REPO" rev-parse -q --verify refs/stash 2>/dev/null)
+git -C "$REPO" merge --ff-only --autostash -q "$SHA" >/dev/null 2>"$PARENT/merge.err"
+MERGE_RC=$?
+STASH_AFTER=$(git -C "$REPO" rev-parse -q --verify refs/stash 2>/dev/null)
+if [ -n "$(git -C "$REPO" ls-files -u 2>/dev/null | head -1)" ] \
+  && [ -n "$STASH_AFTER" ] && [ "$STASH_AFTER" != "$STASH_BEFORE" ]; then
+  git -C "$REPO" reset -q --hard
+  echo "AUTOSTASH_KEPT $STASH_AFTER: local edits conflicted with $SHA; the tree was reset to it and the edits kept in that stash"
+  MERGE_RC=0
+fi
+NOW=$(git -C "$REPO" rev-parse --verify -q HEAD 2>/dev/null)
+if [ "$MERGE_RC" -ne 0 ] || [ "$NOW" != "$SHA" ]; then
+  cat "$PARENT/merge.err" >&2
+  echo "FF refused: git merge --ff-only exited $MERGE_RC; HEAD is ${NOW:-unknown}: $(head -c 200 "$PARENT/merge.err" | tr '\n' ' ')"
+  exit 3
+fi
+echo "FF moved $HEAD_SHA..$SHA"
+exit 0
