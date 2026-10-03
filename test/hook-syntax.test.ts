@@ -635,6 +635,26 @@ describe('hook-syntax: per-file verdicts', () => {
     expect(r.code).toBe(1);
     expect(r.output).toContain('UNREADABLE');
   }, TEST_TIMEOUT_MS);
+
+  test('a one-line data file is read only as far as a #! line reaches', () => {
+    // Every file in the tree has its first line read. Uncapped, that read
+    // costs time that grows faster than the line: a 210 KB single-line JSON
+    // in this repo took over a minute under a UTF-8 locale. An 8 MB line does
+    // not finish inside SPAWN_TIMEOUT_MS uncapped; capped, it is one more
+    // skipped file.
+    fixture('long-first-line/ok.sh', '#!/bin/bash\nexit 0\n');
+    fixture('long-first-line/one-line.json', 'a'.repeat(8 * 1024 * 1024));
+    const r = runGate(['--report', path.join(FX, 'fx', 'long-first-line')]);
+    expect(r.code).toBe(0);
+    expect(r.output).toContain('1 checked, 1 skipped');
+  }, TEST_TIMEOUT_MS);
+
+  test('the first-line read is capped at a #! length', () => {
+    const m = GATE_SRC.match(/IFS= read -r -n (\d+) line < "\$1"/);
+    expect(m).not.toBeNull();
+    expect(Number(m![1])).toBeGreaterThanOrEqual(128);
+    expect(Number(m![1])).toBeLessThanOrEqual(1024);
+  });
 });
 
 // ── the one rule that reads a name ─────────────────────────────────────────
