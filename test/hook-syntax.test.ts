@@ -234,7 +234,7 @@ for (const hook of WIRED) {
     test('RED: a half-merged copy that still parses is caught', () => {
       withEdit(hook.rel, halfMerge, (p) => {
         // Guard the premise: a parse alone would MISS this.
-        expect(spawnSync('/bin/bash', ['-n', p]).status).toBe(0);
+        expect(spawnSync('/bin/bash', ['-n', p], { timeout: SPAWN_TIMEOUT_MS }).status).toBe(0);
         const r = runGate([p]);
         expect(r.code).toBe(1);
         expect(r.output).toContain('UNRESOLVED CONFLICT MARKERS');
@@ -385,8 +385,8 @@ describe('hook-syntax: per-file verdicts', () => {
     // `;;&` is bash 4+. It parses under a PATH bash 5 and is a syntax error
     // under the /bin/bash 3.2 that macOS runs a `#!/bin/bash` hook with.
     const body = 'case a in a) echo;;& esac\n';
-    const sys = spawnSync('/bin/bash', ['-c', 'echo "${BASH_VERSINFO[0]}"'], { encoding: 'utf-8' }).stdout.trim();
-    const envBash = spawnSync('bash', ['-c', 'echo "${BASH_VERSINFO[0]}"'], { encoding: 'utf-8' }).stdout.trim();
+    const sys = spawnSync('/bin/bash', ['-c', 'echo "${BASH_VERSINFO[0]}"'], { encoding: 'utf-8', timeout: SPAWN_TIMEOUT_MS }).stdout.trim();
+    const envBash = spawnSync('bash', ['-c', 'echo "${BASH_VERSINFO[0]}"'], { encoding: 'utf-8', timeout: SPAWN_TIMEOUT_MS }).stdout.trim();
     const fixed = runGate([fixture('interp/fixed.sh', `#!/bin/bash\n${body}`)]);
     const viaEnv = runGate([fixture('interp/env.sh', `#!/usr/bin/env bash\n${body}`)]);
     expect(fixed.code).toBe(Number(sys) < 4 ? 1 : 0);
@@ -445,7 +445,7 @@ describe('hook-syntax: conflict markers', () => {
 
   test('markers inside a heredoc body fail, though the file parses', () => {
     const p = fixture('heredoc-conflict.sh', `#!/bin/bash\n${CONFLICT_HEREDOC}`);
-    expect(spawnSync('/bin/bash', ['-n', p]).status).toBe(0); // guard the premise
+    expect(spawnSync('/bin/bash', ['-n', p], { timeout: SPAWN_TIMEOUT_MS }).status).toBe(0); // guard the premise
     const r = runGate([p]);
     expect(r.code).toBe(1);
     expect(r.output).toContain('UNRESOLVED CONFLICT MARKERS');
@@ -470,8 +470,8 @@ describe('hook-syntax: conflict markers', () => {
   test('the trailing label is what separates a conflict from a rule', () => {
     const bare = fixture('bare.sh', `#!/bin/bash\ncat <<'EOF'\n${LT}\na\nEOF\n`);
     const labelled = fixture('labelled.sh', `#!/bin/bash\ncat <<'EOF'\n${LT} HEAD\na\nEOF\n`);
-    expect(spawnSync('/bin/bash', ['-n', bare]).status).toBe(0);
-    expect(spawnSync('/bin/bash', ['-n', labelled]).status).toBe(0);
+    expect(spawnSync('/bin/bash', ['-n', bare], { timeout: SPAWN_TIMEOUT_MS }).status).toBe(0);
+    expect(spawnSync('/bin/bash', ['-n', labelled], { timeout: SPAWN_TIMEOUT_MS }).status).toBe(0);
     const clean = runGate([bare]);
     expect(clean.output).toBe('');
     expect(clean.code).toBe(0);
@@ -509,7 +509,7 @@ describe('hook-syntax: honest coverage', () => {
   }, TEST_TIMEOUT_MS);
 
   test('python files are compiled, and no .pyc is written', () => {
-    if (spawnSync('python3', ['--version']).status !== 0) return;
+    if (spawnSync('python3', ['--version'], { timeout: SPAWN_TIMEOUT_MS }).status !== 0) return;
     const ok = fixture('py/fine.py', '#!/usr/bin/env python3\nprint("ok")\n');
     const bad = fixture('py/broken.py', '#!/usr/bin/env python3\ndef f(:\n');
     const good = runGate([ok]);
@@ -524,7 +524,7 @@ describe('hook-syntax: honest coverage', () => {
   test('an invalid escape in python fails; the raw-string spelling does not', () => {
     // Both directions, or the rule would simply ban docstrings that mention a
     // regex. Python reports an invalid escape as SyntaxWarning from 3.12 on.
-    const v = spawnSync('python3', ['-c', 'import sys; print(sys.version_info[1] if sys.version_info[0] == 3 else 0)'], { encoding: 'utf-8' });
+    const v = spawnSync('python3', ['-c', 'import sys; print(sys.version_info[1] if sys.version_info[0] == 3 else 0)'], { encoding: 'utf-8', timeout: SPAWN_TIMEOUT_MS });
     if (v.status !== 0 || Number(v.stdout.trim()) < 12) return;
     const bad = runGate([fixture('py/escape.py', '#!/usr/bin/env python3\n"""matches \\s+"""\n')]);
     const raw = runGate([fixture('py/raw.py', '#!/usr/bin/env python3\nr"""matches \\s+"""\n')]);
