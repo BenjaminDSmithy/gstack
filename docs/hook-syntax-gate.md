@@ -97,8 +97,8 @@ was. It is the one write the setup block makes before the gate's verdict.
 ## What it checks
 
 The sweep reads the first line of every file in the tree (up to 512 characters,
-so a one-line data file costs no more than a script) and dispatches on the
-**shebang**, never on an extension:
+and never past a run of NUL bytes, so a one-line data file or a binary costs no
+more than a script) and dispatches on the **shebang**, never on an extension:
 
 * **Shell** — `-n` under the interpreter the shebang names, because that is the
   one that runs it. `#!/bin/bash` is bash 3.2 on macOS and `#!/usr/bin/env bash`

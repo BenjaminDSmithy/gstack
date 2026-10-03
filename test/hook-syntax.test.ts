@@ -666,11 +666,38 @@ describe('hook-syntax: per-file verdicts', () => {
     expect(r.output).toContain('1 checked, 1 skipped');
   }, TEST_TIMEOUT_MS);
 
-  test('the first-line read is capped at a #! length', () => {
-    const m = GATE_SRC.match(/IFS= read -r -n (\d+) line < "\$1"/);
-    expect(m).not.toBeNull();
-    expect(Number(m![1])).toBeGreaterThanOrEqual(128);
-    expect(Number(m![1])).toBeLessThanOrEqual(1024);
+  test('a shebang behind a run of NUL bytes is not read', () => {
+    // The kernel reads a shebang from a file's first bytes only. bash 4 and
+    // later drop NUL bytes from a read without counting them toward -n, so a
+    // read keyed on newline ran on through the NULs and classified the
+    // shebang after them. Run under /bin/bash and under the PATH bash: on CI
+    // /bin/bash is 5, and a macOS PATH bash is usually Homebrew's 5. A 3.2
+    // read stops at the NULs on either branch, so 3.2 alone proves nothing;
+    // it still has to give the right answer.
+    const bashes = [...new Set(['/bin/bash', spawnCaptured('/bin/bash', ['-c', 'command -v bash']).stdout.trim()])].filter(Boolean);
+    expect(bashes.length).toBeGreaterThanOrEqual(1);
+    const dir = path.join(FX, 'fx', 'nul-prefix');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'ok.sh'), '#!/bin/bash\nexit 0\n');
+    fs.writeFileSync(path.join(dir, 'nul-led'), Buffer.concat([Buffer.alloc(8192), Buffer.from('#!/bin/bash\nif true; then\n')]));
+    for (const bash of bashes) {
+      const r = spawnCaptured(bash, [GATE, '--report', dir], { env: process.env });
+      expect(r.status).toBe(0);
+      expect(`${r.stdout}${r.stderr}`).toContain('1 checked, 1 skipped');
+    }
+  }, TEST_TIMEOUT_MS);
+
+  test('the first-line read is capped at a #! length, and stops at a NUL from bash 4 on', () => {
+    for (const re of [/IFS= read -r -d '' -n (\d+) line < "\$1"/, /IFS= read -r -n (\d+) line < "\$1"/]) {
+      const m = GATE_SRC.match(re);
+      expect(m).not.toBeNull();
+      expect(Number(m![1])).toBeGreaterThanOrEqual(128);
+      expect(Number(m![1])).toBeLessThanOrEqual(1024);
+    }
+    // NUL-delimited, so the newline cut must follow that read; and only from
+    // bash 4 on, where NULs are not counted toward -n.
+    expect(GATE_SRC).toContain('line="${line%%"$HOOK_SYNTAX_NL"*}"');
+    expect(GATE_SRC).toContain('if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then\n  HOOK_SYNTAX_READ_TO_NUL=1');
   });
 });
 
