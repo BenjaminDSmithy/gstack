@@ -56,6 +56,7 @@ typing it out, so a hook added to either is covered without editing the test.
 | --- | --- | --- |
 | `test/hook-syntax.test.ts` | every `bun run test`, and the required free-suite CI check | fails the suite, naming the file and line |
 | `./setup` | every install, including the one `/gstack-upgrade` runs | **refuses**: nothing is sourced, run, created, linked or registered |
+| `bin/gstack-gate-incoming` | team mode's `bin/gstack-session-update` and `/gstack-upgrade`, on the incoming commit, **before** the checkout moves | **holds**: the checkout stays on its old commit; see [Gating the incoming tree](#gating-the-incoming-tree) |
 
 The setup block sits directly after `setup` resolves its own directory — above
 the first `source`, the first `bun` call and the first `mkdir`/`ln`/`cp`. The
@@ -183,30 +184,93 @@ from 494 to 643 seconds in the same load window, still 19 pass, 0 fail.
   `.git/hooks/`, untracked, so there is nothing in the tree to wire. The free
   suite and `./setup` carry the weight.
 
-## The hole that remains
+## Gating the incoming tree
 
 Hooks are registered **by path**, so for a registered checkout the working tree
 *is* the deployed hook. Whatever moves that tree changes every session's hooks
-the moment it writes, before any test or `./setup` run can look:
+the moment it writes, and `./setup`'s refusal comes after: it guards the next
+install, not the running one. So the two jobs that move a registered checkout
+check the incoming commit first, through `bin/gstack-gate-incoming`:
 
-* `git merge`, `git rebase` or `git stash pop` run by hand in the registered
-  checkout write conflict markers straight into it — the 2026-08-27 shape.
-* `/gstack-upgrade` pulls first and runs `./setup` second. A refusal there
-  prints `SETUP_FAILED` with the previous commit, but the pulled tree is
-  already the one `settings.json` points at.
-* Team mode's `bin/gstack-session-update` pulls, then runs `./setup -q` with
-  its output discarded. A refusal is logged as `SETUP_FAILED`; the pulled tree
-  stays in place.
+```bash
+bin/gstack-gate-incoming [--fast-forward] <checkout> <commit>
+```
 
-What keeps a broken hook out of the pulled tree in the first place is this
-test running on every pull request in the required free-suite check — `setup`'s
-refusal is the second line, and it guards the next install, not the running
-one. Closing the hole for good means checking the **incoming** tree before it
-is switched in: gate it in a throwaway worktree, then fast-forward the
-registered checkout to the commit that passed. Any job that moves a registered
-checkout should do that. The alternative — Claude Code failing open on a hook
-that will not parse — is a change to the hook runner, not to this repository,
-and trades a safety guard silently not running for the machine staying usable.
+It checks `<commit>` out into a throwaway worktree under `$TMPDIR` (the
+install's own git hooks off, the worktree locked against idle-worktree GC),
+runs `scripts/hook-syntax.sh --report .` there, and removes the worktree
+whatever the outcome. The checker is the incoming tree's own copy, because that
+is the one its `./setup` will run; a tree that predates the gate is checked by
+the installed copy instead, never waved through. It runs under `/bin/bash`,
+else `$BASH`, like `setup`. A checker that runs past
+`GSTACK_HOOK_GATE_TIMEOUT` seconds (default 600) is stopped.
+
+| Exit | Means | The checkout |
+| --- | --- | --- |
+| 0 | clean; with `--fast-forward`, now at `<commit>` (or it already contained it) | moved only to the commit that passed |
+| 1 | a file in the incoming tree does not parse, or is half-merged; the report names it | not moved |
+| 2 | no verdict: the commit, the worktree or a checker could not be reached, the checker exited neither 0 nor 1, or it timed out | not moved |
+| 3 | `--fast-forward` only: diverged, a merge in progress, or git refused | not moved |
+
+`--fast-forward` refuses before it gates when there is nothing it may take: a
+diverged checkout, or unmerged files from someone's merge in progress. Local
+edits are carried over with `--autostash`. A stash pop that conflicts writes
+conflict markers into the live tree, and git (2.56, measured 2026-10-04) still
+exits 0 for it, so the helper judges by the unmerged entries and the new
+stash: it resets the tree to the commit the gate passed and **keeps** the
+stash, printing its id. It never drops a stash.
+
+* **Team mode** — `bin/gstack-session-update` fetches (the receipted egress
+  step), resolves `@{upstream}`, and hands that commit to
+  `gstack-gate-incoming --fast-forward`. It logs `HOOK_SYNTAX_BLOCKED` or
+  `HOOK_GATE_INCONCLUSIVE` with the old and incoming commits and the head of
+  the report, and leaves the checkout alone; the next throttle window tries
+  again. A passed gate logs `HOOK_GATE_PASSED`; a recovered pop logs
+  `AUTOSTASH_CONFLICT_RECOVERED … kept_stash=<id>`. `./setup -q`'s output goes
+  to `analytics/session-update-setup.log`, and `SETUP_FAILED` names its exit.
+* **`/gstack-upgrade`** — a git install fetches, then runs
+  `gstack-gate-incoming --fast-forward` on `origin/main`; a refusal prints
+  `HOOK_GATE_REFUSED` and stops before `./setup`. The divergence fallback gates
+  `origin/main` again before it stashes or resets, and resets to the exact
+  commit that passed. A vendored install gates the fresh clone before it
+  replaces the install.
+
+`test/gate-incoming.test.ts` pins each of these against real git: a broken
+hook upstream leaves the checkout on its old commit and says why, a clean one
+is fast-forwarded to, no verdict holds, a conflicting pop leaves no markers and
+keeps the stash, and a merge in progress is left exactly as it was.
+
+Ten named regressions were injected into the helper, one at a time, against
+the whole file; every one is killed (measured 2026-10-04):
+
+| Injected regression | Cases that fail |
+| --- | --- |
+| no verdict read as a pass | 2 |
+| gate skipped in `--fast-forward` | 8 |
+| exit 1 read as a pass | 6 |
+| a tree without a checker passes | 1 |
+| watchdog removed | 1 |
+| install git hooks run on the throwaway | 1 |
+| worktree cleanup removed | 5 |
+| diverged checkout not refused | 2 |
+| merge-in-progress check removed | 1 |
+| autostash conflict recovery removed | 2 |
+
+## The hole that remains
+
+* **Moves made by hand.** `git merge`, `git rebase` or `git stash pop` run in
+  the registered checkout write conflict markers straight into it — the
+  2026-08-27 shape. Nothing runs before them.
+* **A `./setup` that fails for another reason** after a gated fast-forward
+  leaves the new tree in place, as before. Its hooks passed the gate; what
+  failed is the install around them.
+* **Claude Code itself.** Failing open on a hook that will not parse is a
+  change to the hook runner, not to this repository, and trades a safety guard
+  silently not running for the machine staying usable.
+
+What keeps a broken hook out of upstream in the first place is the free-suite
+test running on every pull request; the incoming gate is the line between
+upstream and a running install, and `setup` is the line after that.
 
 ## Mutation results
 
