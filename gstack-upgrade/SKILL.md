@@ -184,7 +184,7 @@ _GATE=~/.claude/skills/gstack/bin/gstack-gate-incoming
 [ -x "$_GATE" ] || _GATE="$INSTALL_DIR/bin/gstack-gate-incoming"
 _GATE_TMP=""
 if [ ! -x "$_GATE" ] && git cat-file -e origin/main:bin/gstack-gate-incoming 2>/dev/null; then
-  _GATE_TMP=$(mktemp) && git show origin/main:bin/gstack-gate-incoming > "$_GATE_TMP" && _GATE="$_GATE_TMP"
+  _GATE_TMP=$(mktemp "${TMPDIR:-/tmp}/gstack-gate-copy.XXXXXX") && git show origin/main:bin/gstack-gate-incoming > "$_GATE_TMP" && [ -s "$_GATE_TMP" ] && _GATE="$_GATE_TMP"
 fi
 _GATE_SH=/bin/bash; [ -x "$_GATE_SH" ] || _GATE_SH=bash
 "$_GATE_SH" "$_GATE" --fast-forward "$INSTALL_DIR" origin/main
@@ -251,11 +251,14 @@ cd -- "${INSTALL_DIR:?INSTALL_DIR is not set: re-run Step 2 and substitute the p
 INCOMING=$(git rev-parse --verify 'origin/main^{commit}') || exit 1
 _GATE=~/.claude/skills/gstack/bin/gstack-gate-incoming
 [ -x "$_GATE" ] || _GATE="$INSTALL_DIR/bin/gstack-gate-incoming"
+_GATE_TMP=""
 if [ ! -x "$_GATE" ] && git cat-file -e "$INCOMING:bin/gstack-gate-incoming" 2>/dev/null; then
-  _GATE=$(mktemp) && git show "$INCOMING:bin/gstack-gate-incoming" > "$_GATE"
+  _GATE_TMP=$(mktemp "${TMPDIR:-/tmp}/gstack-gate-copy.XXXXXX") && git show "$INCOMING:bin/gstack-gate-incoming" > "$_GATE_TMP" && [ -s "$_GATE_TMP" ] && _GATE="$_GATE_TMP"
 fi
 _GATE_SH=/bin/bash; [ -x "$_GATE_SH" ] || _GATE_SH=bash
-"$_GATE_SH" "$_GATE" "$INSTALL_DIR" "$INCOMING" || { echo "HOOK_GATE_REFUSED: nothing stashed or reset (gate exit $?)" >&2; exit 1; }
+"$_GATE_SH" "$_GATE" "$INSTALL_DIR" "$INCOMING"; _RC=$?
+[ -z "$_GATE_TMP" ] || rm -f "$_GATE_TMP"
+[ "$_RC" -eq 0 ] || { echo "HOOK_GATE_REFUSED: nothing stashed or reset (gate exit $_RC)" >&2; exit 1; }
 STASH_OUTPUT=$(git stash 2>&1)
 git reset --hard "$INCOMING"
 ./setup --refresh-registered
