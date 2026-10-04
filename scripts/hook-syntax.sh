@@ -419,10 +419,9 @@ _hook_syntax_check_bun() {
 # names somewhere else, and the path is not followed.
 _hook_syntax_payloads() {
   [ "${#HOOK_SYNTAX_SHELLS[@]}" -gt 0 ] || return 0
-  local hits rest hit shim f text var rel dir payload rc=0
+  local hits rest hit shim f text var rel rc=0
   local comment_re='^[[:space:]]*#'
   local bun_re='bun[[:space:]]+(run[[:space:]]+)?"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/([^"]+)"'
-  local own_dir_re='="\$\(cd "\$\(dirname "\$(0|\{BASH_SOURCE\[0\]\}|BASH_SOURCE)"\)"'
   hits=$(LC_ALL=C grep -HE 'bun[[:space:]]+(run[[:space:]]+)?"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/' -- "${HOOK_SYNTAX_SHELLS[@]}" 2>/dev/null)
   [ -n "$hits" ] || return 0
   rest="$hits"
@@ -441,25 +440,39 @@ _hook_syntax_payloads() {
     [ -n "$shim" ] || continue
     text="${hit#"$shim:"}"
     [[ $text =~ $comment_re ]] && continue
-    [[ $text =~ $bun_re ]] || continue
-    var="${BASH_REMATCH[2]}"
-    rel="${BASH_REMATCH[3]}"
-    if [ "$var" != HERE ]; then
-      LC_ALL=C grep -qE "^[[:space:]]*(export[[:space:]]+|readonly[[:space:]]+|local[[:space:]]+)?$var$own_dir_re" -- "$shim" 2>/dev/null || continue
-    fi
-    dir="${shim%/*}"
-    [ "$dir" = "$shim" ] && dir='.'
-    payload="$dir/$rel"
-    _hook_syntax_seen "$payload" && continue
-    _hook_syntax_mark "$payload"
-    if [ ! -r "$payload" ]; then
-      printf 'hook-syntax: MISSING PAYLOAD %s — handed to bun by %s\n' "$payload" "$shim" >&2
-      rc=1
-      continue
-    fi
-    _hook_syntax_check_bun "$payload" || rc=1
+    # Every `bun "$VAR/..."` on the line, not only the first: a line can hand
+    # bun two paths, and one that is not followed must not hide the next.
+    while [[ $text =~ $bun_re ]]; do
+      var="${BASH_REMATCH[2]}"
+      rel="${BASH_REMATCH[3]}"
+      text="${text#*"${BASH_REMATCH[0]}"}"
+      _hook_syntax_payload "$shim" "$var" "$rel" || rc=1
+    done
   done
   return "$rc"
+}
+
+# One `bun "$VAR/<rel>"` in a shim. $1 = shim, $2 = VAR, $3 = rel. VAR other
+# than HERE is followed only when the shim assigns it exactly its own directory,
+# `VAR="$(cd "$(dirname "$0")" && pwd)"` (or `pwd -P`, or BASH_SOURCE); an
+# assignment that goes on past the `)"`, such as `.../sub"`, names somewhere
+# else.
+_hook_syntax_payload() {
+  local shim="$1" var="$2" rel="$3" dir payload
+  local own_dir_re='="\$\(cd "\$\(dirname "\$(0|\{BASH_SOURCE\[0\]\}|BASH_SOURCE)"\)" && pwd( -P)?\)"([[:space:];|&]|$)'
+  if [ "$var" != HERE ]; then
+    LC_ALL=C grep -qE "^[[:space:]]*(export[[:space:]]+|readonly[[:space:]]+|local[[:space:]]+)?$var$own_dir_re" -- "$shim" 2>/dev/null || return 0
+  fi
+  dir="${shim%/*}"
+  [ "$dir" = "$shim" ] && dir='.'
+  payload="$dir/$rel"
+  _hook_syntax_seen "$payload" && return 0
+  _hook_syntax_mark "$payload"
+  if [ ! -r "$payload" ]; then
+    printf 'hook-syntax: MISSING PAYLOAD %s — handed to bun by %s\n' "$payload" "$shim" >&2
+    return 1
+  fi
+  _hook_syntax_check_bun "$payload"
 }
 
 # Parse one file. $1 = path. Queues it for the content scans; does not run them.
