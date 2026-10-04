@@ -194,6 +194,7 @@ _GATE_RC=$?
 [ -z "$_GATE_TMP" ] || rm -f "$_GATE_TMP"
 if [ "$_GATE_RC" -eq 126 ] || [ "$_GATE_RC" -eq 127 ]; then
   _HINT="no copy exists in the running skill, this install or $UPSTREAM_REF"
+  git cat-file -e "$INCOMING:bin/gstack-gate-incoming" 2>/dev/null && _HINT="$UPSTREAM_REF has one, but copying it under ${TMPDIR:-/tmp} failed; point TMPDIR at a writable directory and rerun"
   git cat-file -e HEAD:bin/gstack-gate-incoming 2>/dev/null && _HINT="restore it: git -C \"$INSTALL_DIR\" checkout -- bin/gstack-gate-incoming"
   echo "HOOK_GATE_HELPER_MISSING: gstack-gate-incoming could not run (exit $_GATE_RC); $_HINT; install unchanged at $PRE_UPGRADE_COMMIT" >&2
   exit 1

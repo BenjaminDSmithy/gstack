@@ -646,6 +646,28 @@ describe('/gstack-upgrade Step 4 gates origin/main before the install moves', ()
     expect(fs.existsSync(fx.mark)).toBe(false);
   }, TEST_TIMEOUT_MS);
 
+  test('an origin/main helper that cannot be copied out names TMPDIR, not a missing copy', () => {
+    const fx = makeFixture();
+    const old = advance(fx, { 'bin/gstack-gate-incoming': null }, 'predates the helper');
+    git(fx.install, 'pull', '-q', '--ff-only');
+    expect(head(fx)).toBe(old);
+    advance(fx, { 'bin/gstack-gate-incoming': fs.readFileSync(HELPER, 'utf-8'), VERSION: '1.1.0\n' }, 'ships the helper');
+    // mktemp fails in a TMPDIR that does not exist, so origin/main's copy never
+    // reaches disk even though it exists.
+    const r = spawnSync('bash', ['-c', blockAfter('**For git installs**')], {
+      cwd: fx.base,
+      encoding: 'utf8',
+      env: { ...GIT_ENV, HOME: path.join(fx.base, 'home'), INSTALL_DIR: fx.install, TMPDIR: path.join(fx.base, 'no-such-tmp'), SETUP_MARK: fx.mark },
+      timeout: SPAWN_TIMEOUT_MS,
+    });
+    expect(r.status, `${r.stdout}${r.stderr}`).toBe(1);
+    expect(r.stderr).toContain('HOOK_GATE_HELPER_MISSING');
+    expect(r.stderr).toContain('origin/main has one, but copying it under');
+    expect(r.stderr).not.toContain('no copy exists');
+    expect(head(fx)).toBe(old);
+    expect(fs.existsSync(fx.mark)).toBe(false);
+  }, TEST_TIMEOUT_MS);
+
   test('an origin/main helper copy runs even where the temp dir will not exec it', () => {
     const fx = makeFixture();
     const sha = advance(fx, { VERSION: '1.1.0\n' });
