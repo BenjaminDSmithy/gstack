@@ -189,8 +189,10 @@ from 494 to 643 seconds in the same load window, still 19 pass, 0 fail.
 Hooks are registered **by path**, so for a registered checkout the working tree
 *is* the deployed hook. Whatever moves that tree changes every session's hooks
 the moment it writes, and `./setup`'s refusal comes after: it guards the next
-install, not the running one. So the two jobs that move a registered checkout
-check the incoming commit first, through `bin/gstack-gate-incoming`:
+install, not the running one. So the jobs that move a registered checkout check
+the incoming commit first: team mode's session-update and `/gstack-upgrade`
+through `bin/gstack-gate-incoming`, and `contrib/fork-sync` (a fork's own
+upgrader) by running the gate on its rebased tree before it switches.
 
 ```bash
 bin/gstack-gate-incoming [--fast-forward] <checkout> <commit>
@@ -221,7 +223,10 @@ conflicts writes conflict markers into the live tree, and git (2.56, measured
 alone. It resets the tree to the commit the gate passed and **keeps** the
 autostash commit: in `refs/stash` as git leaves it, or, when git could not
 store it there (a held `refs/stash.lock` prints `error: cannot store <id>`),
-under `refs/gstack-autostash/<UTC time>`, and prints its id. If it cannot find
+under `refs/gstack-autostash/<UTC time>`, and prints its id. A new
+`refs/stash` is checked first because it reads the same in every language; the
+merge itself runs in the C locale, so git's messages, the fallback, do too (a
+German git words them `Automatischen Stash erzeugt`). If it cannot find
 or anchor that commit it resets nothing, exits 3 and leaves the markers for a
 person, because resetting would lose the edits. It never drops a stash.
 
@@ -250,13 +255,15 @@ hook upstream leaves the checkout on its old commit and says why, a clean one
 is fast-forwarded to, no verdict holds, a conflicting pop leaves no markers and
 keeps the stash, and a merge in progress is left exactly as it was.
 
-Ten named regressions were injected into the helper, one at a time, against
-the whole file; every one is killed (measured 2026-10-04):
+Seventeen named regressions were injected into the helper, one at a time,
+against the whole of `test/gate-incoming.test.ts`, each edit asserted to have
+applied (measured 2026-10-04 on the helper at 07b73562b; that run's test
+file differed only in how it detects a German git). Sixteen are killed:
 
 | Injected regression | Cases that fail |
 | --- | --- |
 | no verdict read as a pass | 2 |
-| gate skipped in `--fast-forward` | 8 |
+| gate skipped in `--fast-forward` | 12 |
 | exit 1 read as a pass | 6 |
 | a tree without a checker passes | 1 |
 | watchdog removed | 1 |
@@ -264,7 +271,19 @@ the whole file; every one is killed (measured 2026-10-04):
 | worktree cleanup removed | 5 |
 | diverged checkout not refused | 2 |
 | merge-in-progress check removed | 1 |
-| autostash conflict recovery removed | 2 |
+| autostash conflict recovery removed | 4 |
+| merge names the caller's ref, not the gated SHA | 1 |
+| checker not in its own process group | 1 |
+| report dropped on a pass | 2 |
+| merge not in the C locale | 1 |
+| autostash not anchored when git could not store it | 1 |
+| report paths left pointing into the throwaway | 1 |
+| `refs/stash` not consulted first | 0 (survives) |
+
+The survivor is equivalent under these tests: with the merge in the C locale,
+the `Created autostash` line on stdout names the same commit a new
+`refs/stash` does, so taking that ref first changes no outcome the tests can
+see. It stays first because it reads the same whatever git's language.
 
 ## The hole that remains
 
@@ -274,9 +293,10 @@ the whole file; every one is killed (measured 2026-10-04):
 * **Local edits carried over by `--autostash`.** They are re-applied on top
   of the commit that passed and are not gated before they go live; a locally
   edited hook that no longer parses on the new base reaches every session
-  until `./setup`'s own gate refuses the install (team mode logs that as
-  `SETUP_FAILED`). Install edits are normally regenerable SKILL.md renders, not
-  hooks.
+  until a person fixes it. `./setup`'s own gate then refuses the install (team
+  mode logs that as `SETUP_FAILED`), but a refusal only reports: nothing takes
+  the hook back out. Install edits are normally regenerable SKILL.md renders,
+  not hooks.
 * **A `./setup` that fails for another reason** after a gated fast-forward
   leaves the new tree in place, as before. Its hooks passed the gate; what
   failed is the install around them.
