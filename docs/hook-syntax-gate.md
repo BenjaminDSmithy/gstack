@@ -253,10 +253,12 @@ gap.
   commit that passed. A vendored install gates the fresh clone before it
   replaces the install. The helper is taken from the running skill, then the
   install, then the incoming tree (origin/main's copy, or the fresh clone's),
-  and always run through bash, so a temp dir mounted noexec cannot stop it. On
-  hosts whose renders spell the running skill's path as `$GSTACK_ROOT`, that
-  first tier resolves only where the variable is set in the block's shell; the
-  other two still apply.
+  and always run through bash, so a temp dir mounted noexec cannot stop it.
+  Every block sets the running skill's root (`$_RT`) for its own host: the
+  Claude install, `${CODEX_HOME:-~/.codex}/skills/gstack`, or the Factory,
+  Cursor, Kiro or OpenCode runtime root. Step 2 follows a runtime root's
+  `bin/` link back to its checkout, so the gate and the fast-forward act on
+  the checkout, and `./setup --host <host>` rebuilds the runtime root.
 
 `test/gate-incoming.test.ts` pins each of these against real git: a broken
 hook upstream leaves the checkout on its old commit and says why, a clean one
