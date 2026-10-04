@@ -43,7 +43,8 @@ instead: it rebases onto upstream in a throwaway worktree, gates the result,
 and lands it. Check first:
 
 ```bash
-_GD=$(git -C "$HOME/.claude/skills/gstack" rev-parse --show-toplevel 2>/dev/null)
+_RT="$HOME/.claude/skills/gstack"
+_GD=$(git -C "$_RT/bin" rev-parse --show-toplevel 2>/dev/null)
 if [ -n "$_GD" ] && [ -f "$_GD/contrib/fork-sync/fork-sync.ts" ] && git -C "$_GD" remote get-url upstream >/dev/null 2>&1; then
   echo "FORK_INSTALL=$_GD"
   bun "$_GD/contrib/fork-sync/fork-sync.ts" status --brief 2>/dev/null || true
@@ -68,7 +69,8 @@ First, check if auto-upgrade is enabled:
 ```bash
 _AUTO=""
 [ "${GSTACK_AUTO_UPGRADE:-}" = "1" ] && _AUTO="true"
-[ -z "$_AUTO" ] && _AUTO=$(~/.claude/skills/gstack/bin/gstack-config get auto_upgrade 2>/dev/null || true)
+_RT="$HOME/.claude/skills/gstack"
+[ -z "$_AUTO" ] && _AUTO=$("$_RT/bin/gstack-config" get auto_upgrade 2>/dev/null || true)
 echo "AUTO_UPGRADE=$_AUTO"
 ```
 
@@ -82,7 +84,8 @@ echo "AUTO_UPGRADE=$_AUTO"
 
 **If "Always keep me up to date":**
 ```bash
-~/.claude/skills/gstack/bin/gstack-config set auto_upgrade true
+_RT="$HOME/.claude/skills/gstack"
+"$_RT/bin/gstack-config" set auto_upgrade true
 ```
 Tell user: "Auto-upgrade enabled. Future updates will install automatically." Then proceed to Step 2.
 
@@ -109,7 +112,8 @@ Tell user the snooze duration: "Next reminder in 24h" (or 48h or 1 week, dependi
 
 **If "Never ask again":**
 ```bash
-~/.claude/skills/gstack/bin/gstack-config set update_check false
+_RT="$HOME/.claude/skills/gstack"
+"$_RT/bin/gstack-config" set update_check false
 ```
 Tell user: "Update checks disabled. Run `~/.claude/skills/gstack/bin/gstack-config set update_check true` to re-enable."
 Continue with the current skill.
@@ -117,30 +121,48 @@ Continue with the current skill.
 ### Step 2: Detect install type
 
 ```bash
-if [ -d "$HOME/.claude/skills/gstack/.git" ]; then
+_RT="$HOME/.claude/skills/gstack"
+_LOCAL=".claude/skills/gstack"
+# A host runtime root or a repo-local sidecar holds only runtime assets: its
+# bin/ links into the source checkout. Follow that link, so the upgrade moves
+# the checkout and setup rebuilds the runtime root, never the reverse.
+_RT_SRC=""
+[ -L "$_RT/bin" ] && _RT_SRC=$(cd -P "$_RT/bin" 2>/dev/null && cd .. && pwd -P)
+_LOCAL_SRC=""
+[ -L "$_LOCAL/bin" ] && _LOCAL_SRC=$(cd -P "$_LOCAL/bin" 2>/dev/null && cd .. && pwd -P)
+if [ -e "$_RT/.git" ]; then
   INSTALL_TYPE="global-git"
-  INSTALL_DIR="$HOME/.claude/skills/gstack"
+  INSTALL_DIR="$_RT"
+elif [ -n "$_RT_SRC" ] && [ -e "$_RT_SRC/.git" ]; then
+  INSTALL_TYPE="global-git"
+  INSTALL_DIR="$_RT_SRC"
 elif [ -d "$HOME/.gstack/repos/gstack/.git" ]; then
   INSTALL_TYPE="global-git"
   INSTALL_DIR="$HOME/.gstack/repos/gstack"
-elif [ -d ".claude/skills/gstack/.git" ]; then
+elif [ -e "$_LOCAL/.git" ]; then
   INSTALL_TYPE="local-git"
-  INSTALL_DIR=".claude/skills/gstack"
-elif [ -d ".agents/skills/gstack/.git" ]; then
+  INSTALL_DIR="$_LOCAL"
+elif [ -n "$_LOCAL_SRC" ] && [ -e "$_LOCAL_SRC/.git" ]; then
+  INSTALL_TYPE="local-git"
+  INSTALL_DIR="$_LOCAL_SRC"
+elif [ -e ".agents/skills/gstack/.git" ]; then
   INSTALL_TYPE="local-git"
   INSTALL_DIR=".agents/skills/gstack"
-elif [ -d ".claude/skills/gstack" ]; then
+elif [ -f "$_LOCAL/setup" ] && [ -f "$_LOCAL/VERSION" ]; then
   INSTALL_TYPE="vendored"
-  INSTALL_DIR=".claude/skills/gstack"
-elif [ -d "$HOME/.claude/skills/gstack" ]; then
+  INSTALL_DIR="$_LOCAL"
+elif [ -n "$_RT_SRC" ] && [ -f "$_RT_SRC/setup" ] && [ -f "$_RT_SRC/VERSION" ]; then
   INSTALL_TYPE="vendored-global"
-  INSTALL_DIR="$HOME/.claude/skills/gstack"
+  INSTALL_DIR="$_RT_SRC"
+elif [ -f "$_RT/setup" ] && [ -f "$_RT/VERSION" ]; then
+  INSTALL_TYPE="vendored-global"
+  INSTALL_DIR="$_RT"
 elif _SRC=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT 2>/dev/null) && _SRC=$(awk -F '\t' '$(1) == "claude" && $(6) != "-" { print $(6); exit }' "$_SRC/installs.tsv" 2>/dev/null) && [ -d "$_SRC/.git" ]; then
   # The install registry names the checkout setup activated for this host (e.g. a ~/gstack clone).
   INSTALL_TYPE="global-git"
   INSTALL_DIR="$_SRC"
 else
-  echo "ERROR: gstack not found"
+  echo "ERROR: gstack not found (checked $_RT, $_LOCAL and the install registry)"
   exit 1
 fi
 INSTALL_DIR=$(cd -- "$INSTALL_DIR" && pwd -P) || { echo "ERROR: cannot enter the gstack install directory" >&2; exit 1; }
@@ -180,7 +202,8 @@ git checkout -- 'SKILL.md' '*/SKILL.md' '*/sections/*.md' 2>/dev/null || true
 PRE_UPGRADE_COMMIT=$(git rev-parse HEAD)
 echo "PRE_UPGRADE_COMMIT=$PRE_UPGRADE_COMMIT"
 git fetch origin || { echo "FETCH_FAILED: nothing changed (still $PRE_UPGRADE_COMMIT)" >&2; exit 1; }
-_GATE=~/.claude/skills/gstack/bin/gstack-gate-incoming
+_RT="$HOME/.claude/skills/gstack"
+_GATE="$_RT/bin/gstack-gate-incoming"
 [ -x "$_GATE" ] || _GATE="$INSTALL_DIR/bin/gstack-gate-incoming"
 _GATE_TMP=""
 if [ ! -x "$_GATE" ] && git cat-file -e origin/main:bin/gstack-gate-incoming 2>/dev/null; then
@@ -250,7 +273,8 @@ The block re-gates `origin/main` before any stash or reset:
 cd -- "${INSTALL_DIR:?INSTALL_DIR is not set: re-run Step 2 and substitute the printed path}" || exit 1
 { [ -f VERSION ] && [ -f setup ] && [ -f bin/gstack-config ] && [ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ]; } || { echo "ERROR: $INSTALL_DIR is not a gstack checkout; nothing was changed. Re-run Step 2." >&2; exit 1; }
 INCOMING=$(git rev-parse --verify 'origin/main^{commit}') || exit 1
-_GATE=~/.claude/skills/gstack/bin/gstack-gate-incoming
+_RT="$HOME/.claude/skills/gstack"
+_GATE="$_RT/bin/gstack-gate-incoming"
 [ -x "$_GATE" ] || _GATE="$INSTALL_DIR/bin/gstack-gate-incoming"
 _GATE_TMP=""
 if [ ! -x "$_GATE" ] && git cat-file -e "$INCOMING:bin/gstack-gate-incoming" 2>/dev/null; then
@@ -277,7 +301,8 @@ If `$STASH_OUTPUT` contains "Saved working directory", warn the user: "Note: loc
 [ -e "$INSTALL_DIR.bak" ] && { echo "ERROR: stale backup exists at $INSTALL_DIR.bak (from a previous failed upgrade?) — inspect it, salvage/remove it, then re-run." >&2; exit 1; }
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gstack-upgrade.XXXXXX") || { echo "ERROR: mktemp failed — aborting upgrade (install untouched)." >&2; exit 1; }
 git clone --depth 1 https://github.com/garrytan/gstack.git "$TMP_DIR/gstack" || { echo "ERROR: clone failed — aborting upgrade (install untouched)." >&2; rm -rf "$TMP_DIR"; exit 1; }
-_GATE=~/.claude/skills/gstack/bin/gstack-gate-incoming
+_RT="$HOME/.claude/skills/gstack"
+_GATE="$_RT/bin/gstack-gate-incoming"
 [ -x "$_GATE" ] || _GATE="$INSTALL_DIR/bin/gstack-gate-incoming"
 [ -x "$_GATE" ] || _GATE="$TMP_DIR/gstack/bin/gstack-gate-incoming"
 _GATE_SH=/bin/bash; [ -x "$_GATE_SH" ] || _GATE_SH=bash
@@ -309,13 +334,15 @@ Use the install directory from Step 2. Check if there's also a local vendored co
 _RESOLVED_PRIMARY=$(cd -- "${INSTALL_DIR:?INSTALL_DIR is not set: re-run Step 2 and substitute the printed path}" && pwd -P) || exit 1
 _ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 LOCAL_GSTACK=""
-if [ -n "$_ROOT" ] && [ -d "$_ROOT/.claude/skills/gstack" ]; then
+# A root whose bin/ is a link is a runtime sidecar setup built, not a copy.
+if [ -n "$_ROOT" ] && [ -d "$_ROOT/.claude/skills/gstack" ] && [ ! -L "$_ROOT/.claude/skills/gstack/bin" ]; then
   _RESOLVED_LOCAL=$(cd "$_ROOT/.claude/skills/gstack" && pwd -P)
   if [ "$_RESOLVED_LOCAL" != "$_RESOLVED_PRIMARY" ]; then
     LOCAL_GSTACK="$_ROOT/.claude/skills/gstack"
   fi
 fi
-_TEAM_MODE=$(~/.claude/skills/gstack/bin/gstack-config get team_mode 2>/dev/null || echo "false")
+_RT="$HOME/.claude/skills/gstack"
+_TEAM_MODE=$("$_RT/bin/gstack-config" get team_mode 2>/dev/null || echo "false")
 echo "LOCAL_GSTACK=$LOCAL_GSTACK"
 echo "TEAM_MODE=$_TEAM_MODE"
 ```
@@ -464,7 +491,8 @@ When invoked directly as `/gstack-upgrade` (not from a preamble):
 
 1. Force a fresh update check (bypass cache):
 ```bash
-~/.claude/skills/gstack/bin/gstack-update-check --force 2>/dev/null || \
+_RT="$HOME/.claude/skills/gstack"
+"$_RT/bin/gstack-update-check" --force 2>/dev/null || \
 .claude/skills/gstack/bin/gstack-update-check --force 2>/dev/null || true
 ```
 Use the output to determine if an upgrade is available.
