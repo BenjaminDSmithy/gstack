@@ -179,6 +179,8 @@ HOOK_SYNTAX_NESTED=0
 # Paths already checked this run, newline-delimited, so a payload reached
 # through its shim is not checked again when the sweep walks past it.
 HOOK_SYNTAX_SEEN=""
+# Payloads already built as entry points this run, kept the same way.
+HOOK_SYNTAX_ENTRIES=""
 
 # Directories never descended into: vendored and generated trees carry other
 # people's scripts, and a finding in one is noise this gate cannot act on.
@@ -371,17 +373,23 @@ _hook_syntax_unskip() {
 # memory, and queue each of those files for the content scans. $1 = payload.
 # Silent on success.
 _hook_syntax_check_bun() {
-  local out line rc=0
-  _hook_syntax_unskip "$1"
-  # The payload's own bytes are marker-scanned whatever the probe says.
-  HOOK_SYNTAX_PARSED+=("$1")
+  local out line rc=0 queued=0
+  # A payload an earlier payload imported is counted and queued already; it is
+  # still built here as an entry point of its own.
+  _hook_syntax_seen "$1" && queued=1
+  if [ "$queued" -eq 0 ]; then
+    _hook_syntax_mark "$1"
+    _hook_syntax_unskip "$1"
+    # The payload's own bytes are marker-scanned whatever the probe says.
+    HOOK_SYNTAX_PARSED+=("$1")
+  fi
   if ! _hook_syntax_probe "$HOOK_SYNTAX_BUN" --version; then
     # Otherwise a coverage gap: every shim exits cleanly when bun is absent,
     # and what the payload imports cannot be listed without it.
     _hook_syntax_gap "$HOOK_SYNTAX_BUN" "$1" 1
     return
   fi
-  HOOK_SYNTAX_CHECKED=$((HOOK_SYNTAX_CHECKED + 1))
+  [ "$queued" -eq 1 ] || HOOK_SYNTAX_CHECKED=$((HOOK_SYNTAX_CHECKED + 1))
   if ! out=$("$HOOK_SYNTAX_BUN" -e "$HOOK_SYNTAX_BUN_JS" "$1" 2>&1); then
     printf 'hook-syntax: FAILS TO PARSE %s\n' "$1" >&2
     printf '%s\n' "$out" >&2
@@ -467,8 +475,13 @@ _hook_syntax_payload() {
   dir="${shim%/*}"
   [ "$dir" = "$shim" ] && dir='.'
   payload="$dir/$rel"
-  _hook_syntax_seen "$payload" && return 0
-  _hook_syntax_mark "$payload"
+  # Entry points are tracked apart from the content-scan list: a file another
+  # payload imported as a text asset is on that list unparsed, and must still
+  # be parsed when a shim runs it.
+  case "$HOOK_SYNTAX_ENTRIES" in
+    *"$HOOK_SYNTAX_NL$payload$HOOK_SYNTAX_NL"*) return 0 ;;
+  esac
+  HOOK_SYNTAX_ENTRIES="$HOOK_SYNTAX_ENTRIES$HOOK_SYNTAX_NL$payload$HOOK_SYNTAX_NL"
   if [ ! -r "$payload" ]; then
     printf 'hook-syntax: MISSING PAYLOAD %s — handed to bun by %s\n' "$payload" "$shim" >&2
     return 1
