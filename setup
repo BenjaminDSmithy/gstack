@@ -2723,13 +2723,60 @@ if [ "$INSTALL_CODEX" -eq 1 ]; then
   create_agents_sidecar "$SOURCE_GSTACK_DIR"
 fi
 
+# ─── The canonical tree hooks are registered from ────────────────────────────
+# Resolved here, before the migrations, and used by the hook registration in
+# # 10 (its comment says why registration is canonical-only).
+CANONICAL_GSTACK_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/gstack"
+# Split-brain guard: the installer currently hardcodes $HOME/.claude/skills
+# (setup:1601 TODO), so a CLAUDE_CONFIG_DIR override can name a root that was
+# never installed. Fall back to where the install actually lives — both are
+# stable, neither is the running tree, so canonical-only still holds.
+if [ ! -x "$CANONICAL_GSTACK_ROOT/bin/gstack-session-update" ] \
+   && [ -x "$HOME/.claude/skills/gstack/bin/gstack-session-update" ]; then
+  CANONICAL_GSTACK_ROOT="$HOME/.claude/skills/gstack"
+fi
+
+# The canonical install is the tree every hook below is registered from, and it
+# is not always the tree the hook parse gate at the top of this file swept. Run
+# from a second checkout or a worktree, setup leaves a global link that points
+# at another checkout alone, and never replaces a real directory there, so
+# ~/.claude/skills/gstack can still resolve into a tree this run never checked.
+# Gate that tree too, with this run's checker, before a single hook path into
+# it is registered or re-pointed; nothing is written to it. It runs before the
+# migrations (# 8), because one of them registers a hook too. If it fails, no
+# migration runs (the next ./setup runs them), no hook is registered or
+# re-pointed in this run, the rest of setup completes, and setup exits 1 at the
+# end.
+_CANONICAL_HOOKS_REFUSED=0
+_CANONICAL_REAL=""
+# Only a Claude install registers hooks (# 10).
+if [ "$INSTALL_CLAUDE" -eq 1 ] && [ -x "$SOURCE_GSTACK_DIR/bin/gstack-settings-hook" ]; then
+  _CANONICAL_REAL="$(cd "$CANONICAL_GSTACK_ROOT" 2>/dev/null && pwd -P || true)"
+fi
+if [ -n "$_CANONICAL_REAL" ] && [ "$_CANONICAL_REAL" != "$SOURCE_GSTACK_DIR" ]; then
+  _canonical_rc=0
+  "$_HOOK_SYNTAX_BASH" "$SOURCE_GSTACK_DIR/scripts/hook-syntax.sh" "$_CANONICAL_REAL" || _canonical_rc=$?
+  if [ "$_canonical_rc" -ne 0 ]; then
+    _CANONICAL_HOOKS_REFUSED=1
+    echo "" >&2
+    echo "REFUSING TO REGISTER HOOKS: $CANONICAL_GSTACK_ROOT resolves to $_CANONICAL_REAL," >&2
+    echo "a different checkout from this one, and the hook parse gate failed on it" >&2
+    echo "(exit $_canonical_rc, details above). Every gstack hook is registered from that" >&2
+    echo "tree, so this run registered and re-pointed none, and ran no migration." >&2
+    echo "Fix that checkout, or make this one the global install (./setup --global)," >&2
+    echo "then re-run ./setup." >&2
+  fi
+fi
+
 # 8. Run pending version migrations
 # Migrations handle state fixes that ./setup alone can't cover (stale config,
 # orphaned files, directory structure changes). Each migration is idempotent.
 MIGRATIONS_DIR="$SOURCE_GSTACK_DIR/gstack-upgrade/migrations"
 CURRENT_VERSION=$(cat "$SOURCE_GSTACK_DIR/VERSION" 2>/dev/null || echo "unknown")
 LAST_SETUP_VERSION=$(cat "$HOME/.gstack/.last-setup-version" 2>/dev/null || echo "0.0.0.0")
-if [ -d "$MIGRATIONS_DIR" ] && [ "$CURRENT_VERSION" != "unknown" ] && [ "$LAST_SETUP_VERSION" != "$CURRENT_VERSION" ]; then
+# A canonical tree the gate refused above runs no migration: one registers a
+# hook itself, and the refusal promises none was registered.
+if [ "${_CANONICAL_HOOKS_REFUSED:-0}" -eq 0 ] && [ -d "$MIGRATIONS_DIR" ] && [ "$CURRENT_VERSION" != "unknown" ] && [ "$LAST_SETUP_VERSION" != "$CURRENT_VERSION" ]; then
   # Fresh install (no marker file) — skip migrations, just write marker
   if [ ! -f "$HOME/.gstack/.last-setup-version" ]; then
     : # fall through to marker write below
@@ -2750,7 +2797,11 @@ if [ -d "$MIGRATIONS_DIR" ] && [ "$CURRENT_VERSION" != "unknown" ] && [ "$LAST_S
   fi
 fi
 mkdir -p "$HOME/.gstack"
-if [ "$CURRENT_VERSION" != "unknown" ]; then
+if [ "${_CANONICAL_HOOKS_REFUSED:-0}" -eq 1 ]; then
+  # Refused above: the marker stays where it was, so the next ./setup runs
+  # every migration this one skipped.
+  :
+elif [ "$CURRENT_VERSION" != "unknown" ]; then
   echo "$CURRENT_VERSION" > "$HOME/.gstack/.last-setup-version"
 fi
 
@@ -2788,44 +2839,8 @@ SETTINGS_HOOK="$SOURCE_GSTACK_DIR/bin/gstack-settings-hook"
 #
 # WARNING for future code AND migrations (the v1.58.0.0.sh defect class):
 # NEVER register ${SCRIPT_DIR}/$SOURCE_GSTACK_DIR-relative hook paths.
-CANONICAL_GSTACK_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/gstack"
-# Split-brain guard: the installer currently hardcodes $HOME/.claude/skills
-# (setup:1601 TODO), so a CLAUDE_CONFIG_DIR override can name a root that was
-# never installed. Fall back to where the install actually lives — both are
-# stable, neither is the running tree, so canonical-only still holds.
-if [ ! -x "$CANONICAL_GSTACK_ROOT/bin/gstack-session-update" ] \
-   && [ -x "$HOME/.claude/skills/gstack/bin/gstack-session-update" ]; then
-  CANONICAL_GSTACK_ROOT="$HOME/.claude/skills/gstack"
-fi
-
-# The canonical install is the tree every hook below is registered from, and it
-# is not always the tree the hook parse gate at the top of this file swept. Run
-# from a second checkout or a worktree, setup leaves a global link that points
-# at another checkout alone, and never replaces a real directory there, so
-# ~/.claude/skills/gstack can still resolve into a tree this run never checked.
-# Gate that tree too, with this run's checker, before a single hook path into
-# it is registered or re-pointed; nothing is written to it. If it fails, no
-# hook is registered or re-pointed in this run, the rest of setup completes,
-# and setup exits 1 at the end.
-_CANONICAL_HOOKS_REFUSED=0
-_CANONICAL_REAL=""
-if [ -x "$SETTINGS_HOOK" ]; then
-  _CANONICAL_REAL="$(cd "$CANONICAL_GSTACK_ROOT" 2>/dev/null && pwd -P || true)"
-fi
-if [ -n "$_CANONICAL_REAL" ] && [ "$_CANONICAL_REAL" != "$SOURCE_GSTACK_DIR" ]; then
-  _canonical_rc=0
-  "$_HOOK_SYNTAX_BASH" "$SOURCE_GSTACK_DIR/scripts/hook-syntax.sh" "$_CANONICAL_REAL" || _canonical_rc=$?
-  if [ "$_canonical_rc" -ne 0 ]; then
-    _CANONICAL_HOOKS_REFUSED=1
-    echo "" >&2
-    echo "REFUSING TO REGISTER HOOKS: $CANONICAL_GSTACK_ROOT resolves to $_CANONICAL_REAL," >&2
-    echo "a different checkout from this one, and the hook parse gate failed on it" >&2
-    echo "(exit $_canonical_rc, details above). Every gstack hook is registered from that" >&2
-    echo "tree, so this run registered and re-pointed none." >&2
-    echo "Fix that checkout, or make this one the global install (./setup --global)," >&2
-    echo "then re-run ./setup." >&2
-  fi
-fi
+# CANONICAL_GSTACK_ROOT, and the parse gate on it, are resolved before the
+# migrations (# 8).
 
 # Echo the canonical path for a hook (repo-relative arg); fails when the hook
 # is not executable at the canonical install, or when that install failed the
@@ -3470,10 +3485,11 @@ if [ ${#_BACKED_UP_SKILL_MDS[@]} -gt 0 ]; then
   log "  Those were gstack-generated files you had edited; restore anything you meant to keep under a different skill name."
 fi
 
-# A canonical install that failed the hook parse gate (step 10) got no hook
-# registered or re-pointed. Everything else completed; say so last, and fail.
+# A canonical install that failed the hook parse gate (before # 8) got no hook
+# registered or re-pointed and ran no migration. Everything else completed;
+# say so last, and fail.
 if [ "${_CANONICAL_HOOKS_REFUSED:-0}" -eq 1 ]; then
   echo "" >&2
-  echo "setup finished WITHOUT registering hooks: $_CANONICAL_REAL failed the hook parse gate (see above)." >&2
+  echo "setup finished WITHOUT registering hooks or running migrations: $_CANONICAL_REAL failed the hook parse gate (see above)." >&2
   exit 1
 fi

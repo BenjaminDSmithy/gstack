@@ -1274,6 +1274,29 @@ describe.skipIf(process.platform === 'win32')('setup: the canonical tree hooks a
     const p = path.join(f.home, '.claude', 'settings.json');
     return fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : '';
   };
+  // A pending migration: the state root marked at the newest shipped
+  // migration, and one more in the running checkout that leaves a file when it
+  // runs. One shipped migration registers a hook, so a refused run runs none.
+  // The checkout's VERSION is moved one step past the newest migration: a
+  // release that ships a migration names it after itself, and setup runs none
+  // while the marker equals VERSION.
+  const marker = (f: Fixture) => path.join(f.home, '.gstack', '.last-setup-version');
+  const ran = (f: Fixture) => fs.existsSync(path.join(f.home, 'pending-migration-ran'));
+  const pendingMigration = (f: Fixture, src: string) => {
+    const dir = path.join(src, 'gstack-upgrade', 'migrations');
+    const cmp = (x: string, y: string) => {
+      const a = x.split('.').map(Number), b = y.split('.').map(Number);
+      for (let i = 0; i < Math.max(a.length, b.length); i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) - (b[i] ?? 0);
+      return 0;
+    };
+    const newest = fs.readdirSync(dir).filter(n => /^v[0-9.]+\.sh$/.test(n)).map(n => n.slice(1, -3)).sort(cmp).pop()!;
+    put(marker(f), `${newest}\n`);
+    put(path.join(dir, `v${newest}.1.sh`), '#!/bin/bash\ntouch "$HOME/pending-migration-ran"\n', 0o755);
+    const parts = newest.split('.').map(Number);
+    parts[parts.length - 1] += 1;
+    put(path.join(src, 'VERSION'), `${parts.join('.')}\n`);
+    return newest;
+  };
 
   // The fork's setup re-points a symlinked ~/.claude/skills/gstack at the
   // checkout it runs from, so the other tree is reached only when the global
@@ -1291,12 +1314,17 @@ describe.skipIf(process.platform === 'win32')('setup: the canonical tree hooks a
     // saved in config, so B must ask explicitly for there to be a hook at all.
     const hook = path.join(a, 'hosts/claude/hooks/timeline-stop-hook');
     put(hook, `${fs.readFileSync(hook, 'utf-8')}\n${CONFLICT_HEREDOC}`, 0o755);
+    const marked = pendingMigration(f, b);
     const r = setupIn(f, path.join(b, 'setup'), ['--timeline-stop-hook']);
     expect(r.status, r.stdout + r.stderr).toBe(1);
     expect(r.stderr).toContain('REFUSING TO REGISTER HOOKS');
     expect(r.stderr).toContain('UNRESOLVED CONFLICT MARKERS');
     expect(r.stderr).toContain('setup finished WITHOUT registering hooks');
     expect(settings(f)).not.toContain('timeline-stop-hook');
+    // No migration ran, and the marker did not move: the next ./setup runs it.
+    expect(ran(f)).toBe(false);
+    expect(fs.readFileSync(marker(f), 'utf-8').trim()).toBe(marked);
+    expect(r.stderr).toContain('ran no migration');
   }, 2 * SETUP_RUN_TIMEOUT_MS + 60_000);
 
   test('control: a healthy global checkout still gets its hooks from a second checkout', () => {
@@ -1304,10 +1332,13 @@ describe.skipIf(process.platform === 'win32')('setup: the canonical tree hooks a
     const a = makeSource(f, path.join(f.home, '.claude/skills/gstack'));
     const b = makeSource(f, path.join(f.home, 'src-b/gstack'));
     expect(setupIn(f, path.join(a, 'setup'), ['--no-timeline-stop-hook']).status).toBe(0);
+    pendingMigration(f, b);
     const r = setupIn(f, path.join(b, 'setup'), ['--timeline-stop-hook']);
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(r.stderr).not.toContain('REFUSING TO REGISTER HOOKS');
     expect(settings(f)).toContain(path.join(f.home, '.claude/skills/gstack/hosts/claude/hooks/timeline-stop-hook'));
+    expect(ran(f)).toBe(true);
+    expect(fs.readFileSync(marker(f), 'utf-8').trim()).toBe(fs.readFileSync(path.join(b, 'VERSION'), 'utf-8').trim());
   }, 2 * SETUP_RUN_TIMEOUT_MS + 60_000);
 });
 
