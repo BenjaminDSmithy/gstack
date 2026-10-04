@@ -1242,6 +1242,28 @@ describe('hook-syntax: bun payloads', () => {
     expect(r.output).toContain('hook.ts');
   }, TEST_TIMEOUT_MS);
 
+  test('a later bun call on a line, in a comment or a string, need not exist; when it does, it is parsed', () => {
+    // Only the first followed call on a line must ship. A trailing comment or
+    // a quoted fallback can name a file bash never runs.
+    const head = '#!/usr/bin/env bash\nHERE="$(cd "$(dirname "$0")" && pwd)"\n';
+    const lines = [
+      'exec bun "$HERE/hook.ts"  # was: bun "$HERE/old-hook.ts" before the rename',
+      'exec bun "$HERE/hook.ts" || echo \'fallback: bun "$HERE/legacy.ts"\'',
+    ];
+    lines.forEach((l, i) => {
+      fixture(`later-call-${i}/hook`, `${head}${l}\n`);
+      fixture(`later-call-${i}/hook.ts`, 'export const ok = 1;\n');
+      const r = runGate([path.join(FX, 'fx', `later-call-${i}/hook`)]);
+      expect([l, r.code, r.output]).toEqual([l, 0, '']);
+    });
+    fixture('later-call-both/hook', `${head}bun "$HERE/a.ts"; exec bun "$HERE/b.ts"\n`);
+    fixture('later-call-both/a.ts', 'export const ok = 1;\n');
+    fixture('later-call-both/b.ts', 'const broken: number = {\n');
+    const both = runGate([path.join(FX, 'fx', 'later-call-both/hook')]);
+    expect(both.code).toBe(1);
+    expect(both.output).toContain('b.ts');
+  }, TEST_TIMEOUT_MS);
+
   test('a payload another payload imports as text is still parsed, in either order', () => {
     // A text import is listed in the build's metafile but never parsed. Listed
     // first, it must not count as the second shim's payload already checked.
