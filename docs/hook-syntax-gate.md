@@ -8,9 +8,10 @@ not protect.
 ## Why a parse error is an outage
 
 Claude Code runs a hook by path, straight out of the checkout `./setup`
-registered. A shell hook that does not parse exits **2**, under `#!/bin/bash`
-and `#!/usr/bin/env bash` alike (`test/hook-syntax.test.ts` measures it for
-every wired hook), and exit 2 is the status Claude Code reads as "block". Per
+registered. A shell hook that does not parse exits **2** when bash reaches the
+break, under `#!/bin/bash` and `#!/usr/bin/env bash` alike
+(`test/hook-syntax.test.ts` measures it for every wired hook), and exit 2 is
+the status Claude Code reads as "block". Per
 the Claude Code hooks reference:
 
 | Event | What exit 2 does |
@@ -22,7 +23,14 @@ the Claude Code hooks reference:
 | SessionStart | shows stderr to the user |
 
 The fail-open patterns some shims use (`|| true; exit 0`) do not help: bash
-never reaches them, because it refuses the whole file before running a line.
+reads a file one command at a time and stops at the syntax error with exit 2,
+so a fail-open line after the error never runs. The complete top-level
+commands before the broken one have already run by then (bash reads a whole
+`if`, function body or `;`-joined line before running any of it), so a broken
+hook can leave side effects; and a shim whose
+break sits after its `exec` line hands off and exits normally, never reaching
+the error at all. Which broken file blocks and which slips through depends on
+where the break falls, so the gate refuses every file that does not parse.
 
 On 2026-08-27 a PreToolUse hook belonging to another repo sat on disk mid-merge,
 with unresolved conflict markers, and every Bash call on the machine — a bare
