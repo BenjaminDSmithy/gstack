@@ -493,6 +493,17 @@ describe('hook-syntax: line endings', () => {
     expect(r.output).toContain('CRLF LINE ENDINGS');
   }, TEST_TIMEOUT_MS);
 
+  test('a CR after an invalid UTF-8 byte is refused under a UTF-8 locale', () => {
+    // BSD grep in a UTF-8 locale skips a match that follows an invalid byte
+    // on the same line; the byte-level scans run in the C locale.
+    const latin = fixture('crlf/latin1.sh', '');
+    fs.writeFileSync(latin, Buffer.concat([Buffer.from('#!/bin/bash\n: "caf'), Buffer.from([0xe9]), Buffer.from('"; true\r\n')]));
+    expect(spawnSync('bash', ['-n', latin], { timeout: SPAWN_TIMEOUT_MS }).status).toBe(0); // guard the premise
+    const r = runGate(['--report', latin], { LC_ALL: 'en_US.UTF-8', LANG: 'en_US.UTF-8' });
+    expect(r.code).toBe(1);
+    expect(r.output).toContain('CRLF LINE ENDINGS');
+  }, TEST_TIMEOUT_MS);
+
   test("a CRLF shim's payload is still found and parsed", () => {
     fixture('crlf-shim/hook', SHIM('hook.ts').replace(/\n/g, '\r\n'));
     fixture('crlf-shim/hook.ts', 'export const ok = 1;\n');
