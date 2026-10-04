@@ -177,6 +177,9 @@ HOOK_SYNTAX_CHECKED=0
 HOOK_SYNTAX_SKIPPED=0
 HOOK_SYNTAX_NESTED=0
 
+# Set by _hook_syntax_payload when a `bun "$VAR/..."` names the shim's directory.
+HOOK_SYNTAX_FOLLOWED=0
+
 # Paths already checked this run, newline-delimited, so a payload reached
 # through its shim is not checked again when the sweep walks past it.
 HOOK_SYNTAX_SEEN=""
@@ -442,7 +445,7 @@ _hook_syntax_check_bun() {
 # names somewhere else, and the path is not followed.
 _hook_syntax_payloads() {
   [ "${#HOOK_SYNTAX_SHELLS[@]}" -gt 0 ] || return 0
-  local hits rest hit shim f text line var rel rc=0
+  local hits rest hit shim f text line var rel strict rc=0
   local comment_re='^[[:space:]]*#'
   local bun_re='bun[[:space:]]+(run[[:space:]]+)?"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/([^"]+)"'
   hits=$(LC_ALL=C grep -nHE 'bun[[:space:]]+(run[[:space:]]+)?"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/' -- "${HOOK_SYNTAX_SHELLS[@]}" 2>/dev/null)
@@ -466,19 +469,26 @@ _hook_syntax_payloads() {
     text="${text#*:}"
     [[ $text =~ $comment_re ]] && continue
     # Every `bun "$VAR/..."` on the line, not only the first: a line can hand
-    # bun two paths, and one that is not followed must not hide the next.
+    # bun two paths, and one that is not followed must not hide the next. Only
+    # the first followed one must exist; a later one may sit in a trailing
+    # comment or a quoted string, so it is parsed when it is there and skipped
+    # when it is not.
+    strict=1
     while [[ $text =~ $bun_re ]]; do
       var="${BASH_REMATCH[2]}"
       rel="${BASH_REMATCH[3]}"
       text="${text#*"${BASH_REMATCH[0]}"}"
-      _hook_syntax_payload "$shim" "$var" "$rel" "$line" || rc=1
+      HOOK_SYNTAX_FOLLOWED=0
+      _hook_syntax_payload "$shim" "$var" "$rel" "$line" "$strict" || rc=1
+      [ "$HOOK_SYNTAX_FOLLOWED" -eq 1 ] && strict=0
     done
   done
   return "$rc"
 }
 
 # One `bun "$VAR/<rel>"` in a shim. $1 = shim, $2 = VAR, $3 = rel, $4 = the
-# line the call is on. VAR other than HERE is followed only when its last
+# line the call is on, $5 = 1 when a missing payload is a failure (sets
+# HOOK_SYNTAX_FOLLOWED=1 when VAR names the shim's directory). VAR other than HERE is followed only when its last
 # assignment above that line is the shim's own directory:
 # `VAR="$(cd "$(dirname "$0")" && pwd)"`, with `pwd -P`, BASH_SOURCE, or a
 # redirect on the cd (`2>/dev/null`, `>/dev/null 2>&1`). An assignment that
@@ -486,7 +496,7 @@ _hook_syntax_payloads() {
 # (`VAR="$VAR/lib"`) names somewhere else. Straight-line reading: a branch or
 # a function body is not followed through.
 _hook_syntax_payload() {
-  local shim="$1" var="$2" rel="$3" at="$4" dir payload ln last=''
+  local shim="$1" var="$2" rel="$3" at="$4" strict="$5" dir payload ln last=''
   local assign_re="^[[:space:]]*(export[[:space:]]+|readonly[[:space:]]+|local[[:space:]]+)?$var="
   local own_dir_re='"\$\(cd "\$\(dirname "\$(0|\{BASH_SOURCE\[0\]\}|BASH_SOURCE)"\)"([[:space:]]+[0-9]*>&?[^[:space:]&;|]+)*[[:space:]]*&&[[:space:]]*pwd( -P)?\)"([[:space:];|&]|$)'
   local own_re="$assign_re$own_dir_re"
@@ -497,6 +507,7 @@ _hook_syntax_payload() {
     [ -n "$last" ] || return 0
     [[ $last =~ $own_re ]] || return 0
   fi
+  HOOK_SYNTAX_FOLLOWED=1
   dir="${shim%/*}"
   [ "$dir" = "$shim" ] && dir='.'
   payload="$dir/$rel"
@@ -508,6 +519,7 @@ _hook_syntax_payload() {
   esac
   HOOK_SYNTAX_ENTRIES="$HOOK_SYNTAX_ENTRIES$HOOK_SYNTAX_NL$payload$HOOK_SYNTAX_NL"
   if [ ! -r "$payload" ]; then
+    [ "$strict" -eq 1 ] || return 0
     printf 'hook-syntax: MISSING PAYLOAD %s — handed to bun by %s\n' "$payload" "$shim" >&2
     return 1
   fi
