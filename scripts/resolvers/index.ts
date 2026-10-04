@@ -29,7 +29,7 @@ import { generateAntiShortcutClause, generateSpecReviewLoop, generateBenefitsFro
 import { generateCodexSecondOpinion, generateAdversarialStep, generateCodexPlanReview, generateCodexDocReview } from './outside-voice-steps';
 import { generateImplementationModelHandoff } from './plan-review';
 import { generateScopeDrift, generateCrossReviewDedup, generateSharedCodeReuse } from './review-scope';
-import { generateSlugEval, generateSlugSetup, generateBaseBranchDetect, generateDeployBootstrap, generateQAMethodology, generateCoAuthorTrailer, generateChangelogWorkflow, generateCodexWebSearchFlag, generateCodexModelConfigFlag, generateCodexReviewModelConfigFlag, generateClaudeModelFlag, generateSetupCommand } from './utility';
+import { generateSlugEval, generateSlugSetup, generateBaseBranchDetect, generateDeployBootstrap, generateQAMethodology, generateCoAuthorTrailer, generateChangelogWorkflow, generateCodexWebSearchFlag, generateCodexModelConfigFlag, generateCodexReviewModelConfigFlag, generateClaudeModelFlag, generateSetupCommand, generateUpgradeRoot, generateUpgradeRootPath, generateUpgradeDetectInstall } from './utility';
 import { generateLearningsSearch, generateLearningsLog } from './learnings';
 import { generateConfidenceCalibration } from './confidence';
 import { generateGateScanBlock } from './gate-scan';
@@ -151,6 +151,9 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   FLAKE_FIX_NUMBER: generateFlakeFixNumber,
   CO_AUTHOR_TRAILER: generateCoAuthorTrailer,
   SETUP_COMMAND: generateSetupCommand,
+  UPGRADE_ROOT: generateUpgradeRoot,
+  UPGRADE_ROOT_PATH: generateUpgradeRootPath,
+  UPGRADE_DETECT_INSTALL: generateUpgradeDetectInstall,
   LEARNINGS_SEARCH: generateLearningsSearch,
   LEARNINGS_LOG: generateLearningsLog,
   CONFIDENCE_CALIBRATION: generateConfidenceCalibration,
