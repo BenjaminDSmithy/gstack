@@ -223,10 +223,11 @@ conflicts writes conflict markers into the live tree, and git (2.56, measured
 alone. It resets the tree to the commit the gate passed and **keeps** the
 autostash commit: in `refs/stash` as git leaves it, or, when git could not
 store it there (a held `refs/stash.lock` prints `error: cannot store <id>`),
-under `refs/gstack-autostash/<UTC time>`, and prints its id. A new
-`refs/stash` is checked first because it reads the same in every language; the
-merge itself runs in the C locale, so git's messages, the fallback, do too (a
-German git words them `Automatischen Stash erzeugt`). If it cannot find
+under `refs/gstack-autostash/<UTC time>`, and prints its id. It reads the id
+git prints first, with the merge in the C locale so the wording is fixed (a
+German git says `Automatischen Stash erzeugt`). `refs/stash` changing across
+the merge is only the fallback: it is shared with every worktree, and a
+sibling's `git stash push` inside the merge window moves it too. If it cannot find
 or anchor that commit it resets nothing, exits 3 and leaves the markers for a
 person, because resetting would lose the edits. It never drops a stash.
 
@@ -248,23 +249,27 @@ gap.
   `HOOK_GATE_REFUSED` and stops before `./setup`. The divergence fallback gates
   `origin/main` again before it stashes or resets, and resets to the exact
   commit that passed. A vendored install gates the fresh clone before it
-  replaces the install.
+  replaces the install. The helper is taken from the running skill, then the
+  install, then the incoming tree (origin/main's copy, or the fresh clone's),
+  and always run through bash, so a temp dir mounted noexec cannot stop it. On
+  hosts whose renders spell the running skill's path as `$GSTACK_ROOT`, that
+  first tier resolves only where the variable is set in the block's shell; the
+  other two still apply.
 
 `test/gate-incoming.test.ts` pins each of these against real git: a broken
 hook upstream leaves the checkout on its old commit and says why, a clean one
 is fast-forwarded to, no verdict holds, a conflicting pop leaves no markers and
 keeps the stash, and a merge in progress is left exactly as it was.
 
-Seventeen named regressions were injected into the helper, one at a time,
+Eighteen named regressions were injected into the helper, one at a time,
 against the whole of `test/gate-incoming.test.ts`, each edit asserted to have
-applied (measured 2026-10-04 on the helper at 07b73562b; that run's test
-file differed only in how it detects a German git). Sixteen are killed:
+applied (measured 2026-10-04 on the helper at 140e26f91). Seventeen are killed:
 
 | Injected regression | Cases that fail |
 | --- | --- |
 | no verdict read as a pass | 2 |
-| gate skipped in `--fast-forward` | 12 |
-| exit 1 read as a pass | 6 |
+| gate skipped in `--fast-forward` | 13 |
+| exit 1 read as a pass | 7 |
 | a tree without a checker passes | 1 |
 | watchdog removed | 1 |
 | install git hooks run on the throwaway | 1 |
@@ -278,12 +283,12 @@ file differed only in how it detects a German git). Sixteen are killed:
 | merge not in the C locale | 1 |
 | autostash not anchored when git could not store it | 1 |
 | report paths left pointing into the throwaway | 1 |
-| `refs/stash` not consulted first | 0 (survives) |
+| `refs/stash` preferred over git's printed id | 1 |
+| `refs/stash` fallback removed | 0 (survives) |
 
-The survivor is equivalent under these tests: with the merge in the C locale,
-the `Created autostash` line on stdout names the same commit a new
-`refs/stash` does, so taking that ref first changes no outcome the tests can
-see. It stays first because it reads the same whatever git's language.
+The survivor is equivalent under these tests: in the C locale git always
+prints the autostash id, so the `refs/stash` fallback never runs. It stays for
+a git that prints neither line.
 
 ## The hole that remains
 
