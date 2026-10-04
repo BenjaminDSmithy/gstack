@@ -629,6 +629,41 @@ describe('/gstack-upgrade Step 4 gates origin/main before the install moves', ()
     expect(fs.existsSync(fx.mark)).toBe(false);
   }, TEST_TIMEOUT_MS);
 
+  test('an origin/main helper copy runs even where the temp dir will not exec it', () => {
+    const fx = makeFixture();
+    const sha = advance(fx, { VERSION: '1.1.0\n' });
+    fs.rmSync(path.join(fx.install, 'bin', 'gstack-gate-incoming'));
+    // chmod is a no-op here, so the extracted copy keeps mktemp's 0600: only
+    // a block that runs it through bash, not by exec, gets past this.
+    const shim = path.join(fx.base, 'chmod-shim');
+    write(shim, 'chmod', '#!/bin/sh\nexit 0\n', 0o755);
+    const r = spawnSync('bash', ['-c', blockAfter('**For git installs**')], {
+      cwd: fx.base,
+      encoding: 'utf8',
+      env: { ...GIT_ENV, HOME: path.join(fx.base, 'home'), PATH: `${shim}:${process.env.PATH}`, INSTALL_DIR: fx.install, TMPDIR: fx.tmp, SETUP_MARK: fx.mark },
+      timeout: SPAWN_TIMEOUT_MS,
+    });
+    expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
+    expect(r.stdout).toContain('FF_OK');
+    expect(head(fx)).toBe(sha);
+  }, TEST_TIMEOUT_MS);
+
+  test("the fallback re-gate also takes origin/main's helper copy", () => {
+    const fx = makeFixture();
+    write(fx.install, 'local.txt', 'mine\n');
+    git(fx.install, 'add', 'local.txt');
+    git(fx.install, 'commit', '-q', '-m', 'local commit');
+    const before = head(fx);
+    advance(fx, { [HOOK]: BROKEN_HOOK });
+    fs.rmSync(path.join(fx.install, 'bin', 'gstack-gate-incoming'));
+    git(fx.install, 'fetch', '-q');
+    const fallback = runBlock(fx, 'The block re-gates `origin/main`');
+    expect(fallback.code).toBe(1);
+    // The copy ran and refused the broken hook: a verdict, not a missing helper.
+    expect(fallback.stderr).toContain('HOOK_GATE_REFUSED: nothing stashed or reset (gate exit 1)');
+    expect(head(fx)).toBe(before);
+  }, TEST_TIMEOUT_MS);
+
   test('a diverged install routes to the fallback, whose re-gate refuses a broken origin/main before any reset', () => {
     const fx = makeFixture();
     write(fx.install, 'local.txt', 'mine\n');
