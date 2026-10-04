@@ -13,7 +13,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { execFile, spawnSync } from 'child_process';
 import { promisify } from 'util';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { createHash } from 'crypto';
@@ -183,7 +183,7 @@ describe.skipIf(IS_WINDOWS)('C9: destructive upgrade/spec fences refuse bad path
   const UNUSABLE: Kind[] = ['unset', 'empty', 'nonexistent', 'unreadable'];
   const cases: Array<{ name: string; doc: 'upgrade' | 'spec'; marker: string; target: string; kinds?: Kind[]; others: (wd: ReturnType<typeof world>, h: HostRender) => Record<string, string> }> = [
     { name: 'ff-only upgrade', doc: 'upgrade', marker: 'bash bin/gstack-ff-update', target: 'INSTALL_DIR', others: () => ({}) },
-    { name: 'reset fallback', doc: 'upgrade', marker: 'git reset --hard "${UPSTREAM_REF:?UPSTREAM_REF is not set: substitute the value Step 4 printed}"', target: 'INSTALL_DIR', others: () => ({}) },
+    { name: 'reset fallback', doc: 'upgrade', marker: 'git reset --hard "$INCOMING"', target: 'INSTALL_DIR', others: () => ({}) },
     { name: 'vendored swap', doc: 'upgrade', marker: 'git clone --depth 1', target: 'INSTALL_DIR', others: () => ({}) },
     { name: 'local copy detection', doc: 'upgrade', marker: '_RESOLVED_PRIMARY=', target: 'INSTALL_DIR', kinds: UNUSABLE, others: () => ({}) },
     { name: 'team-mode removal', doc: 'upgrade', marker: 'git rm -r --cached', target: 'LOCAL_GSTACK', others: () => ({}) },
@@ -221,6 +221,9 @@ describe.skipIf(IS_WINDOWS)('C9: destructive upgrade/spec fences refuse bad path
   async function controls(h: HostRender): Promise<string[]> {
     const wd = world(h);
     const problems: string[] = [];
+    // The fast-forward runs through the hook parse gate; a passing stub stands
+    // in for it here (test/gate-incoming.test.ts covers the real helper).
+    writeFileSync(join(wd.gstack, 'bin', 'gstack-gate-incoming'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     const ff = await run(wd, fence(h.upgrade, 'bash bin/gstack-ff-update'), { INSTALL_DIR: wd.gstack });
     if (!ff.stdout.includes('FF_OK') || !ff.gitCalls.some(c => c.startsWith('fetch'))) problems.push(`${h.host}: ff-only upgrade did not run: ${ff.stderr}`);
     const local = join(wd.project, h.localDir);
@@ -265,7 +268,8 @@ describe.skipIf(IS_WINDOWS)('DX-7: Step 2 finds the registered source checkout f
     const cwd = mkdtempSync(join(w, 'cwd-'));
     const run = () => spawnSync('env', ['-i', `HOME=${home}`, `PATH=${process.env.PATH}`, 'bash', '-c', step2], { cwd, encoding: 'utf8', timeout: 20_000 });
     const r = run();
-    expect(r.stdout.trim(), r.stderr).toBe(`Install type: global-git at ${clone}`);
+    // Step 2 prints the physical path (pwd -P), as every later block uses it.
+    expect(r.stdout.trim(), r.stderr).toBe(`Install type: global-git at ${realpathSync(clone)}`);
     rmSync(join(state, 'installs.tsv'));
     expect(run().stdout).toContain('ERROR: gstack not found');
   });

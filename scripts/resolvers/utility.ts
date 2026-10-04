@@ -426,13 +426,15 @@ elif [ -n "$_RT_SRC" ] && [ -f "$_RT_SRC/setup" ] && [ -f "$_RT_SRC/VERSION" ]; 
 elif [ -f "$_RT/setup" ] && [ -f "$_RT/VERSION" ]; then
   INSTALL_TYPE="vendored-global"
   INSTALL_DIR="$_RT"
-elif [ -e "$HOME/gstack/.git" ] && [ -f "$HOME/gstack/setup" ] && [ -f "$HOME/gstack/VERSION" ]; then
+elif _SRC=$(${ctx.paths.binDir}/gstack-paths --get GSTACK_STATE_ROOT 2>/dev/null) && _SRC=$(awk -F '\\t' '$(1) == "${ctx.host}" && $(6) != "-" { print $(6); exit }' "$_SRC/installs.tsv" 2>/dev/null) && [ -d "$_SRC/.git" ]; then
+  # The install registry names the checkout setup activated for this host (e.g. a ~/gstack clone).
   INSTALL_TYPE="global-git"
-  INSTALL_DIR="$HOME/gstack"
+  INSTALL_DIR="$_SRC"
 else
-  echo "ERROR: gstack not found (checked $_RT, $_LOCAL and $HOME/gstack)"
+  echo "ERROR: gstack not found (checked $_RT, $_LOCAL and the install registry)"
   exit 1
 fi
+INSTALL_DIR=$(cd -- "$INSTALL_DIR" && pwd -P) || { echo "ERROR: cannot enter the gstack install directory" >&2; exit 1; }
 echo "Install type: $INSTALL_TYPE at $INSTALL_DIR"`;
 }
 

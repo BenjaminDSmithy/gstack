@@ -3,11 +3,16 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
+import { generateUpgradeRoot } from '../scripts/resolvers/utility';
+import type { TemplateContext } from '../scripts/resolvers/types';
 
 const template = readFileSync(join(import.meta.dir, '../gstack-upgrade/SKILL.md.tmpl'), 'utf8');
 const blockAfter = (marker: string) => {
   const section = template.slice(template.indexOf(marker));
-  return section.match(/```bash\n([\s\S]*?)\n```/)![1].replaceAll('{{SETUP_COMMAND}}', './setup');
+  // Render as the Claude host does: the block runs exactly as installed.
+  return section.match(/```bash\n([\s\S]*?)\n```/)![1]
+    .replaceAll('{{SETUP_COMMAND}}', './setup')
+    .replaceAll('{{UPGRADE_ROOT}}', generateUpgradeRoot({ host: 'claude' } as TemplateContext));
 };
 
 describe.skipIf(process.platform === 'win32')('upgrade setup recovery (real shell)', () => {
