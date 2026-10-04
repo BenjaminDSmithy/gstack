@@ -186,9 +186,10 @@ _GATE=~/.claude/skills/gstack/bin/gstack-gate-incoming
 [ -x "$_GATE" ] || _GATE="$INSTALL_DIR/bin/gstack-gate-incoming"
 _GATE_TMP=""
 if [ ! -x "$_GATE" ] && git cat-file -e origin/main:bin/gstack-gate-incoming 2>/dev/null; then
-  _GATE_TMP=$(mktemp) && git show origin/main:bin/gstack-gate-incoming > "$_GATE_TMP" && chmod +x "$_GATE_TMP" && _GATE="$_GATE_TMP"
+  _GATE_TMP=$(mktemp) && git show origin/main:bin/gstack-gate-incoming > "$_GATE_TMP" && _GATE="$_GATE_TMP"
 fi
-"$_GATE" --fast-forward "$INSTALL_DIR" origin/main
+_GATE_SH=/bin/bash; [ -x "$_GATE_SH" ] || _GATE_SH=bash
+"$_GATE_SH" "$_GATE" --fast-forward "$INSTALL_DIR" origin/main
 _FF_RC=$?
 [ -z "$_GATE_TMP" ] || rm -f "$_GATE_TMP"
 if [ "$_FF_RC" -eq 0 ]; then
@@ -253,7 +254,11 @@ cd -- "${INSTALL_DIR:?INSTALL_DIR is not set: re-run Step 2 and substitute the p
 INCOMING=$(git rev-parse --verify 'origin/main^{commit}') || exit 1
 _GATE=~/.claude/skills/gstack/bin/gstack-gate-incoming
 [ -x "$_GATE" ] || _GATE="$INSTALL_DIR/bin/gstack-gate-incoming"
-"$_GATE" "$INSTALL_DIR" "$INCOMING" || { echo "HOOK_GATE_REFUSED: nothing stashed or reset (gate exit $?)" >&2; exit 1; }
+if [ ! -x "$_GATE" ] && git cat-file -e "$INCOMING:bin/gstack-gate-incoming" 2>/dev/null; then
+  _GATE=$(mktemp) && git show "$INCOMING:bin/gstack-gate-incoming" > "$_GATE"
+fi
+_GATE_SH=/bin/bash; [ -x "$_GATE_SH" ] || _GATE_SH=bash
+"$_GATE_SH" "$_GATE" "$INSTALL_DIR" "$INCOMING" || { echo "HOOK_GATE_REFUSED: nothing stashed or reset (gate exit $?)" >&2; exit 1; }
 STASH_OUTPUT=$(git stash 2>&1)
 git reset --hard "$INCOMING"
 ./setup --refresh-registered
@@ -274,7 +279,8 @@ git clone --depth 1 https://github.com/garrytan/gstack.git "$TMP_DIR/gstack" || 
 _GATE=~/.claude/skills/gstack/bin/gstack-gate-incoming
 [ -x "$_GATE" ] || _GATE="$INSTALL_DIR/bin/gstack-gate-incoming"
 [ -x "$_GATE" ] || _GATE="$TMP_DIR/gstack/bin/gstack-gate-incoming"
-"$_GATE" "$TMP_DIR/gstack" HEAD || { echo "ERROR: the hook parse gate refused the new version or could not run (exit $?) — aborting upgrade (install untouched)." >&2; rm -rf "$TMP_DIR"; exit 1; }
+_GATE_SH=/bin/bash; [ -x "$_GATE_SH" ] || _GATE_SH=bash
+"$_GATE_SH" "$_GATE" "$TMP_DIR/gstack" HEAD || { echo "ERROR: the hook parse gate refused the new version or could not run (exit $?) — aborting upgrade (install untouched)." >&2; rm -rf "$TMP_DIR"; exit 1; }
 mv "$INSTALL_DIR" "$INSTALL_DIR.bak" || { rm -rf "$TMP_DIR"; exit 1; }
 if mv "$TMP_DIR/gstack" "$INSTALL_DIR"; then
   if (cd "$INSTALL_DIR" && ./setup --refresh-registered); then
