@@ -538,7 +538,9 @@ _hook_syntax_walk() {
   # One physical spelling of the root. find does not descend a symlinked
   # starting point on its own, and the live install (~/.claude/skills/gstack)
   # is one; every path the sweep compares below must share this prefix.
-  dir="$(cd "$dir" 2>/dev/null && pwd -P)" || {
+  # CDPATH is cleared for the cd: with it exported, cd prints the directory it
+  # found, and the captured root would hold that line and pwd's.
+  dir="$(CDPATH='' cd "$dir" 2>/dev/null && pwd -P)" || {
     printf 'hook-syntax: cannot enter %s\n' "$1" >&2
     return 1
   }
@@ -638,7 +640,7 @@ hook_syntax_check_file() {
 # $1 = directory; the repo root (the directory holding scripts/) by default.
 hook_syntax_check_tree() {
   local dir="${1:-}" rc=0
-  [ -n "$dir" ] || dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)"
+  [ -n "$dir" ] || dir="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)"
   _hook_syntax_walk "$dir" || rc=1
   _hook_syntax_finish || rc=1
   return "$rc"
@@ -661,7 +663,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   fi
   _rc=0
   if [ "$#" -eq 0 ]; then
-    _hook_syntax_walk "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)" || _rc=1
+    _hook_syntax_walk "$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)" || _rc=1
   else
     for _f in "$@"; do
       # A directory is swept. Reading one as a file would find no shebang and

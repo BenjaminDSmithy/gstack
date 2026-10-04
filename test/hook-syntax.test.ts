@@ -598,6 +598,19 @@ describe('hook-syntax: sweep mechanics', () => {
     expect(r.output).toContain('broken.sh');
   }, TEST_TIMEOUT_MS);
 
+  test('a relative directory is swept with CDPATH exported', () => {
+    // With CDPATH set, cd prints the directory it resolved; a root captured
+    // through $(cd ... && pwd -P) would then hold two lines and match nothing.
+    fixture('cdpath/sub/ok.sh', '#!/bin/bash\nexit 0\n');
+    fixture('cdpath/sub/broken.sh', '#!/bin/bash\nif true; then\n');
+    const cwd = path.join(FX, 'fx', 'cdpath');
+    const r = spawnCaptured('/bin/bash', [GATE, '--report', 'sub'], { cwd, env: { ...process.env, CDPATH: '.' } });
+    const output = `${r.stdout}${r.stderr}`;
+    expect(codeOf(r)).toBe(1);
+    expect(output).toContain('broken.sh');
+    expect(output).toContain('2 checked, 0 skipped');
+  }, TEST_TIMEOUT_MS);
+
   test('a nested checkout is another branch, and is not swept', () => {
     // e.g. .claude/worktrees/<name>: a conflict there must not refuse this
     // install. A worktree's .git is a file, a clone's a directory; both count.
