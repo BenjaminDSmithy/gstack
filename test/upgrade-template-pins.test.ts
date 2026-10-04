@@ -15,7 +15,7 @@ describe('gstack-upgrade template: the gated fast-forward precedes the gated res
   const reset = () => tmpl.indexOf('git reset --hard "$INCOMING"');
 
   test('the hook-gated fast-forward runs before any reset --hard', () => {
-    const ff = tmpl.indexOf('"$_GATE" --fast-forward "$INSTALL_DIR" origin/main');
+    const ff = tmpl.indexOf('"$_GATE_SH" "$_GATE" --fast-forward "$INSTALL_DIR" origin/main');
     expect(ff).toBeGreaterThan(-1);
     expect(reset()).toBeGreaterThan(-1);
     expect(ff).toBeLessThan(reset());
@@ -29,7 +29,7 @@ describe('gstack-upgrade template: the gated fast-forward precedes the gated res
 
   test('the fallback re-gates origin/main before it stashes or resets', () => {
     const fallback = tmpl.slice(tmpl.indexOf('The block re-gates `origin/main`'));
-    const gate = fallback.indexOf('"$_GATE" "$INSTALL_DIR" "$INCOMING"');
+    const gate = fallback.indexOf('"$_GATE_SH" "$_GATE" "$INSTALL_DIR" "$INCOMING"');
     expect(gate).toBeGreaterThan(-1);
     expect(gate).toBeLessThan(fallback.indexOf('git stash'));
     expect(gate).toBeLessThan(fallback.indexOf('git reset --hard "$INCOMING"'));
@@ -37,7 +37,7 @@ describe('gstack-upgrade template: the gated fast-forward precedes the gated res
 
   test('the vendored path gates the clone before it replaces the install', () => {
     const vendored = tmpl.slice(tmpl.indexOf('**For vendored installs**'));
-    const gate = vendored.indexOf('"$_GATE" "$TMP_DIR/gstack" HEAD');
+    const gate = vendored.indexOf('"$_GATE_SH" "$_GATE" "$TMP_DIR/gstack" HEAD');
     expect(gate).toBeGreaterThan(-1);
     expect(gate).toBeLessThan(vendored.indexOf('mv "$INSTALL_DIR" "$INSTALL_DIR.bak"'));
   });
