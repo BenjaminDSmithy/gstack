@@ -432,6 +432,20 @@ describe('gstack-gate-incoming --fast-forward', () => {
     expect(git(fx.install, 'stash', 'show', '-p', kept![1])).toContain('# top LOCAL');
   }, TEST_TIMEOUT_MS);
 
+  test('the fast-forward works on a git that only takes a numeric core.abbrev', () => {
+    const fx = makeFixture();
+    const sha = advance(fx, { VERSION: '1.1.0\n' });
+    git(fx.install, 'fetch', '-q');
+    // git 2.27-2.30: any non-numeric core.abbrev other than "auto" is a fatal
+    // bad numeric config value.
+    const shim = path.join(fx.base, 'old-git');
+    const realGit = execFileSync('bash', ['-c', 'command -v git'], { encoding: 'utf8', timeout: 30_000 }).trim();
+    write(shim, 'git', `#!/bin/bash\nfor a in "$@"; do case "$a" in core.abbrev=[0-9]*|core.abbrev=auto) ;; core.abbrev=*) echo "fatal: bad numeric config value" >&2; exit 128;; esac; done\nexec "${realGit}" "$@"\n`, 0o755);
+    const r = runHelper(fx, ['--fast-forward', fx.install, 'origin/main'], { PATH: `${shim}:${process.env.PATH}` });
+    expect(r.code, `${r.stdout}${r.stderr}`).toBe(0);
+    expect(head(fx)).toBe(sha);
+  }, TEST_TIMEOUT_MS);
+
   test('the move names the gated commit, not a ref that changed while the gate ran', () => {
     const fx = makeFixture();
     // A: the commit to gate. Its checker moves origin/main mid-gate to B, a
