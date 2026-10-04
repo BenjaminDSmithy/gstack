@@ -327,7 +327,7 @@ _hook_syntax_markers() {
   local hits f rest hit found rc=0
   # Judged on output, not exit status: grep exits 2 when any one file errors,
   # even after printing matches in the rest.
-  hits=$(grep -nHE '^([<]{7}|[>]{7}|[|]{7}) ' -- "$@" 2>/dev/null)
+  hits=$(LC_ALL=C grep -nHE '^([<]{7}|[>]{7}|[|]{7}) ' -- "$@" 2>/dev/null)
   [ -n "$hits" ] || return 0
   for f in "$@"; do
     found=0
@@ -423,7 +423,7 @@ _hook_syntax_payloads() {
   local comment_re='^[[:space:]]*#'
   local bun_re='bun[[:space:]]+(run[[:space:]]+)?"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/([^"]+)"'
   local own_dir_re='="\$\(cd "\$\(dirname "\$(0|\{BASH_SOURCE\[0\]\}|BASH_SOURCE)"\)"'
-  hits=$(grep -HE 'bun[[:space:]]+(run[[:space:]]+)?"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/' -- "${HOOK_SYNTAX_SHELLS[@]}" 2>/dev/null)
+  hits=$(LC_ALL=C grep -HE 'bun[[:space:]]+(run[[:space:]]+)?"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/' -- "${HOOK_SYNTAX_SHELLS[@]}" 2>/dev/null)
   [ -n "$hits" ] || return 0
   rest="$hits"
   while [ -n "$rest" ]; do
@@ -445,7 +445,7 @@ _hook_syntax_payloads() {
     var="${BASH_REMATCH[2]}"
     rel="${BASH_REMATCH[3]}"
     if [ "$var" != HERE ]; then
-      grep -qE "^[[:space:]]*(export[[:space:]]+|readonly[[:space:]]+|local[[:space:]]+)?$var$own_dir_re" -- "$shim" 2>/dev/null || continue
+      LC_ALL=C grep -qE "^[[:space:]]*(export[[:space:]]+|readonly[[:space:]]+|local[[:space:]]+)?$var$own_dir_re" -- "$shim" 2>/dev/null || continue
     fi
     dir="${shim%/*}"
     [ "$dir" = "$shim" ] && dir='.'
@@ -598,8 +598,10 @@ _hook_syntax_walk() {
 _hook_syntax_carriage_returns() {
   [ "$#" -gt 0 ] || return 0
   local hits f rest rc=0
-  # Judged on output, like the marker scan.
-  hits=$(grep -l $'\r' -- "$@" 2>/dev/null)
+  # Judged on output, like the marker scan. Every scan here matches bytes, so
+  # grep runs in the C locale: under a UTF-8 locale BSD grep misses a CR that
+  # follows an invalid UTF-8 byte on the same line.
+  hits=$(LC_ALL=C grep -l $'\r' -- "$@" 2>/dev/null)
   [ -n "$hits" ] || return 0
   rest="$hits"
   while [ -n "$rest" ]; do
