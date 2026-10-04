@@ -225,8 +225,9 @@ autostash commit: in `refs/stash` as git leaves it, or, when git could not
 store it there (a held `refs/stash.lock` prints `error: cannot store <id>`),
 under `refs/gstack-autostash/<UTC time>`, and prints its id. It reads the id
 git prints first, with the merge in the C locale so the wording is fixed (a
-German git says `Automatischen Stash erzeugt`) and with `core.abbrev=no` so the
-id is whole whatever the user's abbreviation length. `refs/stash` changing across
+German git says `Automatischen Stash erzeugt`) and with `core.abbrev=40` so the
+id is whole whatever the user's abbreviation length (40, not `no`, which git
+before 2.31 rejects). `refs/stash` changing across
 the merge is only the fallback: it is shared with every worktree, and a
 sibling's `git stash push` inside the merge window moves it too. If it cannot find
 or anchor that commit it resets nothing, exits 3 and leaves the markers for a
