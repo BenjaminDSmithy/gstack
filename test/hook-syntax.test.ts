@@ -1187,6 +1187,27 @@ describe('hook-syntax: bun payloads', () => {
     expect(r.code).toBe(0);
   }, TEST_TIMEOUT_MS);
 
+  test('a variable assigned a path below the shim\'s directory is not followed', () => {
+    // `$(cd ... && pwd -P)/sub` is somewhere else. Read as the shim's own
+    // directory it named a payload that is not there, refusing a valid hook.
+    const shim = '#!/usr/bin/env bash\nD="$(cd "$(dirname "$0")" && pwd -P)/sub"\nexec bun "$D/payload.ts"\n';
+    const p = fixture('sub-var/hook', shim);
+    fixture('sub-var/sub/payload.ts', 'export const ok = 1;\n');
+    const r = runGate([p]);
+    expect(r.output).toBe('');
+    expect(r.code).toBe(0);
+  }, TEST_TIMEOUT_MS);
+
+  test('a payload after a bun call that is not followed, on the same line, is still found', () => {
+    const shim = '#!/usr/bin/env bash\nHERE="$(cd "$(dirname "$0")" && pwd)"\nbun "$HOME/elsewhere.ts"; exec bun "$HERE/hook.ts"\n';
+    fixture('same-line/hook', shim);
+    fixture('same-line/hook.ts', 'const broken: number = {\n');
+    const r = runGate([path.join(FX, 'fx', 'same-line/hook')]);
+    expect(r.code).toBe(1);
+    expect(r.output).toContain('FAILS TO PARSE');
+    expect(r.output).toContain('hook.ts');
+  }, TEST_TIMEOUT_MS);
+
   test('a payload a shim names but does not ship is a failure', () => {
     const r = runGate([fixture('missing/hook', SHIM('gone.ts'))]);
     expect(r.code).toBe(1);
