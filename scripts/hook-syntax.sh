@@ -82,8 +82,9 @@
 # `bash -n` on the shim proves the shim parses and says nothing about the file
 # that runs. So every shell file this run parsed is searched for the paths it
 # hands to bun, and each of those is parsed too. `$HERE` is the usual name;
-# any variable the shim sets from its own directory (`$(cd "$(dirname "$0")"`
-# or `"${BASH_SOURCE[0]}"`) counts the same, which is how /autoplan's hook
+# a variable whose last assignment above the call is the shim's own directory,
+# `VAR="$(cd "$(dirname "$0")" && pwd)"` (`pwd -P`, `${BASH_SOURCE[0]}` and a
+# redirect on the cd allowed), counts the same, which is how /autoplan's hook
 # names its payload. The payload is found from the
 # shim's own content, never guessed from `*.ts`, so a renamed or extension-less
 # payload cannot slip past, and a `.ts` nothing wired reaches is reported as
@@ -441,10 +442,10 @@ _hook_syntax_check_bun() {
 # names somewhere else, and the path is not followed.
 _hook_syntax_payloads() {
   [ "${#HOOK_SYNTAX_SHELLS[@]}" -gt 0 ] || return 0
-  local hits rest hit shim f text var rel rc=0
+  local hits rest hit shim f text line var rel rc=0
   local comment_re='^[[:space:]]*#'
   local bun_re='bun[[:space:]]+(run[[:space:]]+)?"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/([^"]+)"'
-  hits=$(LC_ALL=C grep -HE 'bun[[:space:]]+(run[[:space:]]+)?"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/' -- "${HOOK_SYNTAX_SHELLS[@]}" 2>/dev/null)
+  hits=$(LC_ALL=C grep -nHE 'bun[[:space:]]+(run[[:space:]]+)?"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/' -- "${HOOK_SYNTAX_SHELLS[@]}" 2>/dev/null)
   [ -n "$hits" ] || return 0
   rest="$hits"
   while [ -n "$rest" ]; do
@@ -461,6 +462,8 @@ _hook_syntax_payloads() {
     done
     [ -n "$shim" ] || continue
     text="${hit#"$shim:"}"
+    line="${text%%:*}"
+    text="${text#*:}"
     [[ $text =~ $comment_re ]] && continue
     # Every `bun "$VAR/..."` on the line, not only the first: a line can hand
     # bun two paths, and one that is not followed must not hide the next.
@@ -468,22 +471,31 @@ _hook_syntax_payloads() {
       var="${BASH_REMATCH[2]}"
       rel="${BASH_REMATCH[3]}"
       text="${text#*"${BASH_REMATCH[0]}"}"
-      _hook_syntax_payload "$shim" "$var" "$rel" || rc=1
+      _hook_syntax_payload "$shim" "$var" "$rel" "$line" || rc=1
     done
   done
   return "$rc"
 }
 
-# One `bun "$VAR/<rel>"` in a shim. $1 = shim, $2 = VAR, $3 = rel. VAR other
-# than HERE is followed only when the shim assigns it exactly its own directory,
-# `VAR="$(cd "$(dirname "$0")" && pwd)"` (or `pwd -P`, or BASH_SOURCE); an
-# assignment that goes on past the `)"`, such as `.../sub"`, names somewhere
-# else.
+# One `bun "$VAR/<rel>"` in a shim. $1 = shim, $2 = VAR, $3 = rel, $4 = the
+# line the call is on. VAR other than HERE is followed only when its last
+# assignment above that line is the shim's own directory:
+# `VAR="$(cd "$(dirname "$0")" && pwd)"`, with `pwd -P`, BASH_SOURCE, or a
+# redirect on the cd (`2>/dev/null`, `>/dev/null 2>&1`). An assignment that
+# goes on past the `)"`, such as `.../sub"`, or a later one above the call
+# (`VAR="$VAR/lib"`) names somewhere else. Straight-line reading: a branch or
+# a function body is not followed through.
 _hook_syntax_payload() {
-  local shim="$1" var="$2" rel="$3" dir payload
-  local own_dir_re='="\$\(cd "\$\(dirname "\$(0|\{BASH_SOURCE\[0\]\}|BASH_SOURCE)"\)" && pwd( -P)?\)"([[:space:];|&]|$)'
+  local shim="$1" var="$2" rel="$3" at="$4" dir payload ln last=''
+  local assign_re="^[[:space:]]*(export[[:space:]]+|readonly[[:space:]]+|local[[:space:]]+)?$var="
+  local own_dir_re='"\$\(cd "\$\(dirname "\$(0|\{BASH_SOURCE\[0\]\}|BASH_SOURCE)"\)"([[:space:]]+[0-9]*>&?[^[:space:]&;|]+)*[[:space:]]*&&[[:space:]]*pwd( -P)?\)"([[:space:];|&]|$)'
+  local own_re="$assign_re$own_dir_re"
   if [ "$var" != HERE ]; then
-    LC_ALL=C grep -qE "^[[:space:]]*(export[[:space:]]+|readonly[[:space:]]+|local[[:space:]]+)?$var$own_dir_re" -- "$shim" 2>/dev/null || return 0
+    while IFS= read -r ln; do
+      [ "${ln%%:*}" -lt "$at" ] && last="${ln#*:}"
+    done < <(LC_ALL=C grep -nE "$assign_re" -- "$shim" 2>/dev/null)
+    [ -n "$last" ] || return 0
+    [[ $last =~ $own_re ]] || return 0
   fi
   dir="${shim%/*}"
   [ "$dir" = "$shim" ] && dir='.'
