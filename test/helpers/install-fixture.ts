@@ -85,9 +85,10 @@ export function setVersion(source: string, version: string) {
   put(join(source, 'VERSION'), `${version}\n`);
 }
 
+/** One ./setup run. Setup sweeps the tree with the hook parse gate before it installs anything, which costs seconds more under load; the bound only catches a hang. */
 export function runSetup(f: Fixture, setupPath: string, args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}): SpawnSyncReturns<string> {
   return spawnSync('bash', [setupPath, ...args, '--no-plan-tune-hooks'], {
-    cwd: opts.cwd ?? f.home, env: { ...f.env, ...opts.env }, encoding: 'utf8', timeout: 60_000, input: '',
+    cwd: opts.cwd ?? f.home, env: { ...f.env, ...opts.env }, encoding: 'utf8', timeout: 120_000, input: '',
   });
 }
 
