@@ -66,9 +66,11 @@ function git(cwd: string, ...args: string[]): string {
 type Fx = { base: string; seed: string; install: string; state: string; tmp: string; mark: string };
 
 const made: string[] = [];
+// Each fixture holds three repos; removing them all outlasts bun's 5s hook
+// default on a loaded machine.
 afterAll(() => {
   for (const dir of made) fs.rmSync(dir, { recursive: true, force: true });
-});
+}, 60_000);
 
 function write(root: string, rel: string, body: string, mode = 0o644) {
   fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
