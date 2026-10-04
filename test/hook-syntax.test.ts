@@ -1208,6 +1208,26 @@ describe('hook-syntax: bun payloads', () => {
     expect(r.output).toContain('hook.ts');
   }, TEST_TIMEOUT_MS);
 
+  test('a payload another payload imports as text is still parsed, in either order', () => {
+    // A text import is listed in the build's metafile but never parsed. Listed
+    // first, it must not count as the second shim's payload already checked.
+    for (const [first, second] of [['a-hook', 'b-hook'], ['b-hook', 'a-hook']]) {
+      const dir = `text-import-${first}`;
+      fixture(`${dir}/a-hook`, SHIM('a.ts'));
+      fixture(`${dir}/a.ts`, "import b from './b.ts' with { type: 'text' };\nconsole.log(b.length);\n");
+      fixture(`${dir}/b-hook`, SHIM('b.ts'));
+      fixture(`${dir}/b.ts`, 'const broken: number = {\n');
+      // Through the real path: bun lists imports by real path, and a TMPDIR
+      // behind a symlink (/var, /tmp on macOS) would spell the shims' payloads
+      // differently, so the two would never meet and the case could not fail.
+      const real = fs.realpathSync(path.join(FX, 'fx', dir));
+      const r = runGate(['--report', path.join(real, first), path.join(real, second)]);
+      expect(r.code, `${first} then ${second}\n${r.output}`).toBe(1);
+      expect(r.output).toContain('FAILS TO PARSE');
+      expect(r.output).toContain('b.ts');
+    }
+  }, TEST_TIMEOUT_MS);
+
   test('a payload a shim names but does not ship is a failure', () => {
     const r = runGate([fixture('missing/hook', SHIM('gone.ts'))]);
     expect(r.code).toBe(1);
