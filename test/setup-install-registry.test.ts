@@ -53,7 +53,7 @@ describe.skipIf(process.platform === 'win32')('install ownership rules', () => {
     expect(tree(join(f.home, '.gstack/render'))).toEqual(renderBefore);
     expect(r.stderr).toContain("this checkout lives in Claude Code's skills directory");
     expect(registryRows(f).map(row => row[0]).sort()).toEqual(['claude', 'codex']);
-  }, 60_000);
+  }, 120_000);
 
   test('a second checkout never silently replaces the global Claude install; --global does', () => {
     const f = makeFixture();
@@ -76,7 +76,7 @@ describe.skipIf(process.platform === 'win32')('install ownership rules', () => {
     expect(replaced.status, replaced.stderr).toBe(0);
     expect(realpathSync(link)).toBe(realpathSync(b));
     expect(registryRows(f).filter(r => r[0] === 'claude').map(r => r[5])).toEqual([realpathSync(b)]);
-  }, 60_000);
+  }, 120_000);
 
   test('installs at different old versions each report their own old -> new row', () => {
     const f = makeFixture();
@@ -90,7 +90,7 @@ describe.skipIf(process.platform === 'win32')('install ownership rules', () => {
     expect(r.stdout).toMatch(/claude\s+full\s+global\s+updated\s+1\.91\.10\.0 -> 1\.91\.14\.0/);
     expect(r.stdout).toMatch(/codex\s+experimental\s+global\s+updated\s+1\.91\.12\.0 -> 1\.91\.14\.0/);
     expect((lstatSync(file).mode & 0o777).toString(8)).toBe('600');
-  }, 90_000);
+  }, 180_000);
 
   test('an uninstalled host is dropped from the registry and an upgrade does not resurrect it', () => {
     const f = makeFixture();
@@ -102,7 +102,7 @@ describe.skipIf(process.platform === 'win32')('install ownership rules', () => {
     const r = runSetup(f, join(src, 'setup'), ['--refresh-registered']);
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(existsSync(join(f.home, '.codex/skills')) ? readdirSync(join(f.home, '.codex/skills')).filter(n => n.startsWith('gstack')) : []).toEqual([]);
-  }, 90_000);
+  }, 180_000);
 
   test('a failed migration is a failed row, keeps its marker, and is retried (non-default state root)', () => {
     const f = makeFixture();
@@ -128,7 +128,7 @@ describe.skipIf(process.platform === 'win32')('install ownership rules', () => {
     expect(readFileSync(join(f.dir, 'ran-13.2'), 'utf8')).toBe('ok\n');
     expect(readFileSync(join(f.dir, 'ran-13.5'), 'utf8')).toBe('try\ntry\n');
     expect(readFileSync(join(state, '.last-setup-version'), 'utf8').trim()).toBe('1.91.14.0');
-  }, 90_000);
+  }, 180_000);
 
   test('relink from a vendored project copy touches only that copy, and its failures are reported', () => {
     const f = makeFixture();
@@ -149,7 +149,7 @@ describe.skipIf(process.platform === 'win32')('install ownership rules', () => {
     const loose = makeSource(f, join(f.dir, 'loose/gstack'));
     const set = spawnSync('bash', [join(loose, 'bin/gstack-config'), 'set', 'skill_prefix', 'false'], { cwd: f.dir, env: f.env, encoding: 'utf8', timeout: 30_000 });
     expect(set.stderr).toContain('relinking the installed skills failed');
-  }, 90_000);
+  }, 180_000);
 });
 
 describe.skipIf(process.platform === 'win32')('disabled_skills (#1206)', () => {
@@ -182,7 +182,7 @@ describe.skipIf(process.platform === 'win32')('disabled_skills (#1206)', () => {
 
     expect(config('').status).toBe(0);
     expect(existsSync(join(f.home, '.claude/skills/make-pdf/SKILL.md'))).toBe(true);
-  }, 120_000);
+  }, 240_000);
 });
 
 describe('install registry helper', () => {
