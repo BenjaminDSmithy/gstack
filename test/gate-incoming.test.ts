@@ -649,6 +649,8 @@ describe('/gstack-upgrade Step 4 gates origin/main before the install moves', ()
     expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
     expect(r.stdout).toContain('FF_OK');
     expect(head(fx)).toBe(sha);
+    // The extracted copy is removed, never left in TMPDIR.
+    expect(fs.readdirSync(fx.tmp).filter((n) => n.startsWith('gstack-gate-copy.'))).toEqual([]);
   }, TEST_TIMEOUT_MS);
 
   test("the fallback re-gate also takes origin/main's helper copy", () => {
@@ -665,6 +667,7 @@ describe('/gstack-upgrade Step 4 gates origin/main before the install moves', ()
     // The copy ran and refused the broken hook: a verdict, not a missing helper.
     expect(fallback.stderr).toContain('HOOK_GATE_REFUSED: nothing stashed or reset (gate exit 1)');
     expect(head(fx)).toBe(before);
+    expect(fs.readdirSync(fx.tmp).filter((n) => n.startsWith('gstack-gate-copy.'))).toEqual([]);
   }, TEST_TIMEOUT_MS);
 
   test('a diverged install routes to the fallback, whose re-gate refuses a broken origin/main before any reset', () => {
