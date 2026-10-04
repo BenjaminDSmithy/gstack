@@ -214,9 +214,12 @@ one load window, `setup-codex-scope.test.ts` went from 494 to 643 seconds, still
 * **A parse is not a run.** A hook that parses and then fails at runtime is out
   of scope.
 * **A shim that reaches bun any other way** than `bun "$VAR/<path>"`, with
-  `VAR` set from the shim's own directory (`$HERE`, or `/autoplan`'s
-  `$_AUTOPLAN_HOOK_DIR`), has its payload unchecked; the shim itself is still
-  parsed.
+  `VAR` either `$HERE` or a variable whose last assignment above the call is
+  the shim's own directory (`VAR="$(cd "$(dirname "$0")" && pwd)"`, as
+  `/autoplan`'s `$_AUTOPLAN_HOOK_DIR` is), has its payload unchecked; the shim
+  itself is still parsed. `$HERE` is taken to be the shim's directory however
+  it is set, and the shim is read top to bottom: a branch or a function body is
+  not followed through.
 * **An interpreter that is absent or cannot run** (`python3`, `bun`, a `PATH`
   bash) is reported as a coverage gap for the parse, never counted as a pass
   and never as a parse failure; the content scans still run. A shell or bun

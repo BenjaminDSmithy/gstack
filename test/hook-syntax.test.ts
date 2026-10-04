@@ -1198,6 +1198,40 @@ describe('hook-syntax: bun payloads', () => {
     expect(r.code).toBe(0);
   }, TEST_TIMEOUT_MS);
 
+  test('an own-directory variable set with a redirect on the cd, or extra spaces, is followed', () => {
+    // bin/gstack-brain-enqueue spells it `$(cd "$(dirname "$0")" 2>/dev/null && pwd)`.
+    const forms = [
+      'D="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"',
+      'D="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"',
+      'D="$(cd "$(dirname "$0")"  &&  pwd)" || exit 0',
+    ];
+    forms.forEach((assign, i) => {
+      fixture(`redirect-var-${i}/hook`, `#!/usr/bin/env bash\n${assign}\nexec bun "$D/payload.ts"\n`);
+      fixture(`redirect-var-${i}/payload.ts`, 'const broken: number = {\n');
+      const r = runGate([path.join(FX, 'fx', `redirect-var-${i}/hook`)]);
+      expect([assign, r.code], r.output).toEqual([assign, 1]);
+      expect(r.output).toContain('FAILS TO PARSE');
+    });
+  }, TEST_TIMEOUT_MS);
+
+  test('a variable reassigned above the call is not followed; one reassigned below it is', () => {
+    // `D="$D/lib"` names lib/, where the shim's directory has no payload.
+    const shim = '#!/usr/bin/env bash\nD="$(cd "$(dirname "$0")" && pwd)"\nD="$D/lib"\nexec bun "$D/payload.ts"\n';
+    const p = fixture('reassigned-var/hook', shim);
+    fixture('reassigned-var/lib/payload.ts', 'export const ok = 1;\n');
+    const r = runGate([p]);
+    expect(r.output).toBe('');
+    expect(r.code).toBe(0);
+    // setup's shape: SOURCE_GSTACK_DIR is its own directory when bun runs the
+    // payload, and is reassigned only further down.
+    const later = '#!/usr/bin/env bash\nD="$(cd "$(dirname "$0")" && pwd -P)"\nbun "$D/payload.ts"\nD="$D/migrated"\n';
+    fixture('reassigned-later/hook', later);
+    fixture('reassigned-later/payload.ts', 'const broken: number = {\n');
+    const l = runGate([path.join(FX, 'fx', 'reassigned-later/hook')]);
+    expect(l.code).toBe(1);
+    expect(l.output).toContain('FAILS TO PARSE');
+  }, TEST_TIMEOUT_MS);
+
   test('a payload after a bun call that is not followed, on the same line, is still found', () => {
     const shim = '#!/usr/bin/env bash\nHERE="$(cd "$(dirname "$0")" && pwd)"\nbun "$HOME/elsewhere.ts"; exec bun "$HERE/hook.ts"\n';
     fixture('same-line/hook', shim);
