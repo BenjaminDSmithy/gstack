@@ -405,6 +405,30 @@ describe('gstack-gate-incoming --fast-forward', () => {
     }
   }, TEST_TIMEOUT_MS);
 
+  test("git's own autostash id wins over a refs/stash a sibling moved", () => {
+    const fx = makeFixture();
+    const sha = advance(fx, { 'SKILL.md': '# top v2\nname: qa\nbody line\n' });
+    git(fx.install, 'fetch', '-q');
+    // A sibling worktree's stash, stored right after the merge: refs/stash
+    // then changed across the merge, but not to the autostash.
+    write(fx.install, 'VERSION', '9.9.9\n');
+    const sibling = git(fx.install, 'stash', 'create');
+    git(fx.install, 'checkout', '-q', '--', 'VERSION');
+    write(fx.install, 'SKILL.md', '# top LOCAL\nname: qa\nbody line\n');
+    const shim = path.join(fx.base, 'git-shim');
+    const realGit = execFileSync('bash', ['-c', 'command -v git'], { encoding: 'utf8', timeout: 30_000 }).trim();
+    write(shim, 'git', `#!/bin/bash\n"${realGit}" "$@"; rc=$?\ncase " $* " in *" merge "*) "${realGit}" -C "$SIBLING_REPO" stash store -m sibling "$SIBLING" >/dev/null 2>&1;; esac\nexit $rc\n`, 0o755);
+    const r = runHelper(fx, ['--fast-forward', fx.install, 'origin/main'],
+      { PATH: `${shim}:${process.env.PATH}`, SIBLING_REPO: fx.install, SIBLING: sibling });
+    expect(r.code, r.stderr).toBe(0);
+    expect(head(fx)).toBe(sha);
+    expect(git(fx.install, 'rev-parse', 'refs/stash')).toBe(sibling);
+    const kept = r.stdout.match(/^AUTOSTASH_KEPT ([0-9a-f]{40}):/m);
+    expect(kept, r.stdout).not.toBeNull();
+    expect(kept![1]).not.toBe(sibling);
+    expect(git(fx.install, 'stash', 'show', '-p', kept![1])).toContain('# top LOCAL');
+  }, TEST_TIMEOUT_MS);
+
   test('the move names the gated commit, not a ref that changed while the gate ran', () => {
     const fx = makeFixture();
     // A: the commit to gate. Its checker moves origin/main mid-gate to B, a
