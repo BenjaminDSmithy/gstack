@@ -24,6 +24,8 @@ import { execFileSync, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { generateUpgradeRoot } from '../scripts/resolvers/utility';
+import type { TemplateContext } from '../scripts/resolvers/types';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const HELPER = path.join(ROOT, 'bin', 'gstack-gate-incoming');
@@ -562,7 +564,10 @@ describe('gstack-session-update gates the incoming tree before it moves the chec
 function blockAfter(marker: string): string {
   const at = TEMPLATE.indexOf(marker);
   if (at < 0) throw new Error(`marker not in gstack-upgrade/SKILL.md.tmpl: ${marker}`);
-  return TEMPLATE.slice(at).match(/```bash\n([\s\S]*?)\n```/)![1].replaceAll('{{SETUP_COMMAND}}', './setup');
+  // Render as the Claude host does: the block runs exactly as installed.
+  return TEMPLATE.slice(at).match(/```bash\n([\s\S]*?)\n```/)![1]
+    .replaceAll('{{SETUP_COMMAND}}', './setup')
+    .replaceAll('{{UPGRADE_ROOT}}', generateUpgradeRoot({ host: 'claude' } as TemplateContext));
 }
 
 // HOME is the fixture's, so ~/.claude/skills/gstack (the running skill the
