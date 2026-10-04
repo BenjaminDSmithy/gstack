@@ -1,5 +1,45 @@
 # Changelog
 
+## [1.91.21.0] - 2026-10-05
+
+**`./setup` refuses to wire in a hook that does not parse.**
+**A half-merged hook no longer gets installed and blocks every tool call on your machine.**
+
+Claude Code runs gstack's hooks straight out of the install `./setup` registered. A shell hook exits 2 when bash reaches a line that does not parse, and for a PreToolUse hook exit 2 means "block this tool call", in every Claude Code session that uses that settings file. Until now `./setup` registered whatever the tree held. Now it first parses every shell and Python script in the tree (by shebang, plus any shebang-less `*.sh`) and every TypeScript payload a hook hands to bun, and refuses to install if one fails, naming the file, and the line for a parse error or a conflict marker. It does this before it sources, builds, links or registers anything.
+
+### The numbers that matter
+
+Measured with `./setup --host claude --plan-tune-hooks` in a scratch `HOME`, on a `git archive` of each tree with the compiled binaries stubbed, with one closing quote removed from `hosts/claude/hooks/question-preference-hook`. macOS, `/bin/bash` 3.2, Bun 1.4.2, on a shared 18-core machine at load average 36 to 53.
+
+| | Before (measured on 1.91.19.0) | With this release |
+| --- | --- | --- |
+| `./setup` with that broken PreToolUse hook | exit 0, hook registered | exit 1, nothing registered |
+| The registered hook, run the way Claude Code runs it | exit 2, blocks the call | never registered |
+| Files in gstack's own tree parsed before install | 0 | 158 |
+| Healthy `./setup` (3 runs each) | 10 to 11 s | 15 s |
+
+The broken-hook row is the outage this closes: one missing quote used to turn into a block on every matching tool call until someone found the file by hand. The cost is about one fork per file parsed and one Bun build per hook payload, so it grows with machine load; these runs shared the machine with other work.
+
+### What this means for you
+
+On a healthy tree, `./setup` registers what it did before, a few seconds later. If an edit or a merge ever leaves a hook broken, `./setup` tells you which file and stops instead of wiring it in. Check a tree by hand from its root with `/bin/bash scripts/hook-syntax.sh`, or point it at another tree or file. One gap remains, and `docs/hook-syntax-gate.md` names it: the checkout your hooks are registered from is the live hook, so a hand-run merge, rebase or stash pop there, or the pull `/gstack-upgrade` and team mode's auto-update make before they run `./setup`, is live before setup can refuse it.
+
+### Itemized changes
+
+#### Added
+- `scripts/hook-syntax.sh`, a parse gate. It reads each file's shebang and parses the file under the interpreter that shebang names (`#!/bin/bash` is bash 3.2 on macOS). A shebang-less `*.sh` is parsed as bash, because sourced libraries carry no shebang. Python is compiled with `SyntaxWarning` as an error. The TypeScript payload a hook shim hands to bun is built with Bun's bundler (npm packages left out), and every local file it imports is checked too, including /autoplan's PreToolUse hook. Conflict markers are refused anywhere in a file the gate checks, a heredoc, a template literal or a comment included, and so is a carriage return in a shell file. An interpreter that is missing or cannot run is reported as a coverage gap, naming each file it could not check; a shell or bun that exits 2 on every call is refused, because every hook it runs would block. `--report` prints how many files were checked and skipped.
+- `./setup` refuses when the gate fails, when the gate script is missing, and when it cannot run, each with its own message. When `~/.claude/skills/gstack` points at a different checkout from the one you run setup from, that checkout is checked too: if it fails, no hook is registered into it and no migration runs until a `./setup` that passes.
+- `scripts/heal-eol.sh`: before the gate, `./setup` rewrites tracked, unmodified shell scripts that an old `core.autocrlf=true` checkout left with CRLF line endings, keeping each file's mode.
+- `docs/hook-syntax-gate.md`: what the gate covers, what it costs, and the gap it leaves.
+
+#### Fixed
+- `.gitattributes` pins every tracked shell script to LF, including the extensionless hook shims in `hosts/*/hooks/` and every nested `bin/`. A pattern with a slash is anchored, so `bin/*` only ever covered the top-level `bin/`.
+
+#### For contributors
+- `test/hook-syntax.test.ts` derives the wired hooks from `KNOWN_HOOKS` in `bin/gstack-settings-hook` and from each skill's template and generated `SKILL.md` frontmatter. Each one must go red when broken and stay green when pristine. It also runs the real `./setup`: in a minimal tree, and with two checkouts where the global one is broken.
+- `test/team-mode.test.ts`'s setup fixture carries the gate script.
+
+Contributed by @BenjaminDSmithy.
 ## [1.91.19.0] - 2026-10-03
 
 **A check that did not run now says so, and memory stops losing transcripts.**
