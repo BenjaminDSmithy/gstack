@@ -58,7 +58,7 @@ a hook added to either is covered without editing the test.
 | --- | --- | --- |
 | `test/hook-syntax.test.ts` | every `bun run test`, and the required free-suite CI check | fails the suite, naming the file and line |
 | `./setup` | every install, including the one `/gstack-upgrade` runs | **refuses**: nothing is sourced, built, created, linked or registered (only the CRLF heal below runs first; the read-only `./setup --status` exits before the gate and installs nothing) |
-| `./setup`, before it registers hooks | when `~/.claude/skills/gstack` resolves to a checkout other than the one setup runs from | **registers and re-points no hook**, finishes the rest of the install, and exits 1 |
+| `./setup`, before its migrations and hook registration | when `~/.claude/skills/gstack` resolves to a checkout other than the one setup runs from | **runs no migration and registers and re-points no hook** (one migration registers a hook itself; the next `./setup` runs them all), finishes the rest of the install, and exits 1 |
 | `bin/gstack-gate-incoming` | team mode's `bin/gstack-session-update` and `/gstack-upgrade`, on the incoming commit, **before** the checkout moves | **holds**: the checkout stays on its old commit; see [Gating the incoming tree](#gating-the-incoming-tree) |
 
 The setup block sits directly after `setup` resolves its own directory — above
