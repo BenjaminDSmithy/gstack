@@ -200,10 +200,11 @@ esac
 # gbrain-refresh` renders brain blocks into SKILL.md — and a bare --ff-only
 # refuses over them (#2566). The merge names the exact commit the gate passed.
 STASH_BEFORE=$(git -C "$REPO" rev-parse -q --verify refs/stash 2>/dev/null)
-# The C locale and core.abbrev=no: the recovery below reads git's own
+# The C locale and core.abbrev=40: the recovery below reads git's own
 # messages, which a translated git (de_DE, zh_CN, ...) words differently and a
-# short core.abbrev truncates below what the patterns match.
-LC_ALL=C git -C "$REPO" -c core.abbrev=no merge --ff-only --autostash -q "$SHA" >"$PARENT/merge.out" 2>"$PARENT/merge.err"
+# short core.abbrev truncates below what the patterns match. 40, not "no":
+# git before 2.31 rejects "no" as a bad numeric value and dies on every merge.
+LC_ALL=C git -C "$REPO" -c core.abbrev=40 merge --ff-only --autostash -q "$SHA" >"$PARENT/merge.out" 2>"$PARENT/merge.err"
 MERGE_RC=$?
 # Unmerged entries now can only be our autostash pop (a merge already in
 # progress was refused above), and the conflict markers are live whatever
