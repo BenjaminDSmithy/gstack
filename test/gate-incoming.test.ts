@@ -405,8 +405,11 @@ describe('gstack-gate-incoming --fast-forward', () => {
     }
   }, TEST_TIMEOUT_MS);
 
-  test("git's own autostash id wins over a refs/stash a sibling moved", () => {
+  // A short core.abbrev must not truncate git's id below what recovery reads.
+  test.each([['default'], ['5']])("git's own autostash id wins over a refs/stash a sibling moved (core.abbrev %s)", (abbrev) => {
     const fx = makeFixture();
+    const abbrevEnv: Record<string, string> = abbrev === 'default' ? {} :
+      { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.abbrev', GIT_CONFIG_VALUE_0: abbrev };
     const sha = advance(fx, { 'SKILL.md': '# top v2\nname: qa\nbody line\n' });
     git(fx.install, 'fetch', '-q');
     // A sibling worktree's stash, stored right after the merge: refs/stash
@@ -419,7 +422,7 @@ describe('gstack-gate-incoming --fast-forward', () => {
     const realGit = execFileSync('bash', ['-c', 'command -v git'], { encoding: 'utf8', timeout: 30_000 }).trim();
     write(shim, 'git', `#!/bin/bash\n"${realGit}" "$@"; rc=$?\ncase " $* " in *" merge "*) "${realGit}" -C "$SIBLING_REPO" stash store -m sibling "$SIBLING" >/dev/null 2>&1;; esac\nexit $rc\n`, 0o755);
     const r = runHelper(fx, ['--fast-forward', fx.install, 'origin/main'],
-      { PATH: `${shim}:${process.env.PATH}`, SIBLING_REPO: fx.install, SIBLING: sibling });
+      { ...abbrevEnv, PATH: `${shim}:${process.env.PATH}`, SIBLING_REPO: fx.install, SIBLING: sibling });
     expect(r.code, r.stderr).toBe(0);
     expect(head(fx)).toBe(sha);
     expect(git(fx.install, 'rev-parse', 'refs/stash')).toBe(sibling);

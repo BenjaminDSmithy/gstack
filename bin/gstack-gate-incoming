@@ -200,9 +200,10 @@ esac
 # gbrain-refresh` renders brain blocks into SKILL.md — and a bare --ff-only
 # refuses over them (#2566). The merge names the exact commit the gate passed.
 STASH_BEFORE=$(git -C "$REPO" rev-parse -q --verify refs/stash 2>/dev/null)
-# The C locale: the recovery below reads git's own messages, and a translated
-# git (de_DE, zh_CN, ...) words them differently.
-LC_ALL=C git -C "$REPO" merge --ff-only --autostash -q "$SHA" >"$PARENT/merge.out" 2>"$PARENT/merge.err"
+# The C locale and core.abbrev=no: the recovery below reads git's own
+# messages, which a translated git (de_DE, zh_CN, ...) words differently and a
+# short core.abbrev truncates below what the patterns match.
+LC_ALL=C git -C "$REPO" -c core.abbrev=no merge --ff-only --autostash -q "$SHA" >"$PARENT/merge.out" 2>"$PARENT/merge.err"
 MERGE_RC=$?
 # Unmerged entries now can only be our autostash pop (a merge already in
 # progress was refused above), and the conflict markers are live whatever
@@ -215,8 +216,8 @@ MERGE_RC=$?
 # Anchor the commit before resetting; with no anchored commit, leave the tree
 # alone rather than lose the edits.
 if [ -n "$(git -C "$REPO" ls-files -u 2>/dev/null | head -1)" ]; then
-  KEPT=$(sed -n 's/^error: cannot store \([0-9a-f]\{7,\}\).*/\1/p' "$PARENT/merge.err" | head -1)
-  [ -n "$KEPT" ] || KEPT=$(sed -n 's/^Created autostash: \([0-9a-f]\{7,\}\).*/\1/p' "$PARENT/merge.out" | head -1)
+  KEPT=$(sed -n 's/^error: cannot store \([0-9a-f]\{4,\}\).*/\1/p' "$PARENT/merge.err" | head -1)
+  [ -n "$KEPT" ] || KEPT=$(sed -n 's/^Created autostash: \([0-9a-f]\{4,\}\).*/\1/p' "$PARENT/merge.out" | head -1)
   if [ -z "$KEPT" ]; then
     KEPT=$(git -C "$REPO" rev-parse -q --verify refs/stash 2>/dev/null)
     [ "$KEPT" != "$STASH_BEFORE" ] || KEPT=""
