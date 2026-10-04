@@ -28,7 +28,7 @@ import { generatePlanReviewApprovalCheck, generateExitPlanModeGate, generatePlan
 import { generateAntiShortcutClause, generateSpecReviewLoop, generateBenefitsFrom } from './spec-review';
 import { generateCodexSecondOpinion, generateAdversarialStep, generateCodexPlanReview, generateCodexDocReview } from './outside-voice-steps';
 import { generateScopeDrift, generateCrossReviewDedup, generateSharedCodeReuse } from './review-scope';
-import { generateSlugEval, generateSlugSetup, generateBaseBranchDetect, generateDeployBootstrap, generateQAMethodology, generateCoAuthorTrailer, generateChangelogWorkflow, generateCodexWebSearchFlag, generateCodexModelConfigFlag, generateCodexReviewModelConfigFlag, generateClaudeModelFlag, generateSetupCommand } from './utility';
+import { generateSlugEval, generateSlugSetup, generateBaseBranchDetect, generateDeployBootstrap, generateQAMethodology, generateCoAuthorTrailer, generateChangelogWorkflow, generateCodexWebSearchFlag, generateCodexModelConfigFlag, generateCodexReviewModelConfigFlag, generateClaudeModelFlag, generateSetupCommand, generateUpgradeRoot, generateUpgradeRootPath, generateUpgradeDetectInstall } from './utility';
 import { generateLearningsSearch, generateLearningsLog } from './learnings';
 import { generateConfidenceCalibration } from './confidence';
 import { generateInvokeSkill, generateAutoplanReviewFile, generateAutoplanSnapshotTool, generateAutoplanPublicationHook, generateCeoModeHandoffHook } from './composition';
@@ -132,6 +132,9 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   PLAN_VERIFICATION_EXEC: generatePlanVerificationExec,
   CO_AUTHOR_TRAILER: generateCoAuthorTrailer,
   SETUP_COMMAND: generateSetupCommand,
+  UPGRADE_ROOT: generateUpgradeRoot,
+  UPGRADE_ROOT_PATH: generateUpgradeRootPath,
+  UPGRADE_DETECT_INSTALL: generateUpgradeDetectInstall,
   LEARNINGS_SEARCH: generateLearningsSearch,
   LEARNINGS_LOG: generateLearningsLog,
   CONFIDENCE_CALIBRATION: generateConfidenceCalibration,

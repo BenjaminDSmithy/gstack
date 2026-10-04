@@ -357,6 +357,85 @@ export function generateSetupCommand(ctx: TemplateContext): string {
   return ctx.host === 'claude' ? './setup' : `./setup --host ${ctx.host}`;
 }
 
+/**
+ * Where the running host's gstack lives, as a shell expression. setup creates
+ * it: Claude's is the checkout itself (or a symlink to it); Codex, Factory,
+ * Cursor, Kiro and OpenCode get a runtime root whose bin/ links into the
+ * source checkout. Codex honours CODEX_HOME, as setup does.
+ */
+function upgradeRuntimeRoot(host: string): string {
+  if (host === 'codex') return '${CODEX_HOME:-$HOME/.codex}/skills/gstack';
+  const { getHostConfig } = require('../../hosts/index');
+  return `$HOME/${getHostConfig(host).globalRoot}`;
+}
+
+// gstack-upgrade runs each bash block in a fresh shell and has no preamble, so
+// every block that calls the running skill sets _RT itself. The paths are
+// emitted from the host config, so the host's pathRewrites never touch them.
+export function generateUpgradeRoot(ctx: TemplateContext): string {
+  return `_RT="${upgradeRuntimeRoot(ctx.host)}"`;
+}
+
+// The same root as a path a person can type, for the prose that tells the user
+// how to undo a setting.
+export function generateUpgradeRootPath(ctx: TemplateContext): string {
+  if (ctx.host === 'codex') return '${CODEX_HOME:-~/.codex}/skills/gstack';
+  const { getHostConfig } = require('../../hosts/index');
+  return `~/${getHostConfig(ctx.host).globalRoot}`;
+}
+
+export function generateUpgradeDetectInstall(ctx: TemplateContext): string {
+  const { getHostConfig } = require('../../hosts/index');
+  const local: string = getHostConfig(ctx.host).localSkillRoot;
+  const agentsLocal = local === '.agents/skills/gstack'
+    ? ''
+    : `elif [ -e ".agents/skills/gstack/.git" ]; then
+  INSTALL_TYPE="local-git"
+  INSTALL_DIR=".agents/skills/gstack"
+`;
+  return `${generateUpgradeRoot(ctx)}
+_LOCAL="${local}"
+# A host runtime root or a repo-local sidecar holds only runtime assets: its
+# bin/ links into the source checkout. Follow that link, so the upgrade moves
+# the checkout and setup rebuilds the runtime root, never the reverse.
+_RT_SRC=""
+[ -L "$_RT/bin" ] && _RT_SRC=$(cd -P "$_RT/bin" 2>/dev/null && cd .. && pwd -P)
+_LOCAL_SRC=""
+[ -L "$_LOCAL/bin" ] && _LOCAL_SRC=$(cd -P "$_LOCAL/bin" 2>/dev/null && cd .. && pwd -P)
+if [ -e "$_RT/.git" ]; then
+  INSTALL_TYPE="global-git"
+  INSTALL_DIR="$_RT"
+elif [ -n "$_RT_SRC" ] && [ -e "$_RT_SRC/.git" ]; then
+  INSTALL_TYPE="global-git"
+  INSTALL_DIR="$_RT_SRC"
+elif [ -d "$HOME/.gstack/repos/gstack/.git" ]; then
+  INSTALL_TYPE="global-git"
+  INSTALL_DIR="$HOME/.gstack/repos/gstack"
+elif [ -e "$_LOCAL/.git" ]; then
+  INSTALL_TYPE="local-git"
+  INSTALL_DIR="$_LOCAL"
+elif [ -n "$_LOCAL_SRC" ] && [ -e "$_LOCAL_SRC/.git" ]; then
+  INSTALL_TYPE="local-git"
+  INSTALL_DIR="$_LOCAL_SRC"
+${agentsLocal}elif [ -f "$_LOCAL/setup" ] && [ -f "$_LOCAL/VERSION" ]; then
+  INSTALL_TYPE="vendored"
+  INSTALL_DIR="$_LOCAL"
+elif [ -n "$_RT_SRC" ] && [ -f "$_RT_SRC/setup" ] && [ -f "$_RT_SRC/VERSION" ]; then
+  INSTALL_TYPE="vendored-global"
+  INSTALL_DIR="$_RT_SRC"
+elif [ -f "$_RT/setup" ] && [ -f "$_RT/VERSION" ]; then
+  INSTALL_TYPE="vendored-global"
+  INSTALL_DIR="$_RT"
+elif [ -e "$HOME/gstack/.git" ] && [ -f "$HOME/gstack/setup" ] && [ -f "$HOME/gstack/VERSION" ]; then
+  INSTALL_TYPE="global-git"
+  INSTALL_DIR="$HOME/gstack"
+else
+  echo "ERROR: gstack not found (checked $_RT, $_LOCAL and $HOME/gstack)"
+  exit 1
+fi
+echo "Install type: $INSTALL_TYPE at $INSTALL_DIR"`;
+}
+
 export function generateChangelogWorkflow(ctx: TemplateContext): string {
   return `## Step 13: CHANGELOG (auto-generate)
 
