@@ -373,7 +373,7 @@ _hook_syntax_unskip() {
 # memory, and queue each of those files for the content scans. $1 = payload.
 # Silent on success.
 _hook_syntax_check_bun() {
-  local out line rc=0 queued=0
+  local out line placed rc=0 queued=0
   # A payload an earlier payload imported is counted and queued already; it is
   # still built here as an entry point of its own.
   _hook_syntax_seen "$1" && queued=1
@@ -401,6 +401,15 @@ _hook_syntax_check_bun() {
   # or a comment parses cleanly, and the sweep alone would skip the file.
   while IFS= read -r line; do
     case "$line" in
+      [A-Za-z]:[\\/]*)
+        # Bun on Windows names a file by drive letter; under Git Bash, cygpath
+        # maps it. Unmapped, it falls through to the warning below.
+        if command -v cygpath >/dev/null 2>&1 && placed=$(cygpath -u "$line" 2>/dev/null) && [ -n "$placed" ]; then
+          line="$placed"
+        fi
+        ;;
+    esac
+    case "$line" in
       NO_METAFILE)
         printf 'hook-syntax: %s cannot list what %s imports — those files are NOT marker-scanned\n' "$HOOK_SYNTAX_BUN" "$1" >&2
         ;;
@@ -415,6 +424,10 @@ _hook_syntax_check_bun() {
         _hook_syntax_unskip "$line"
         HOOK_SYNTAX_CHECKED=$((HOOK_SYNTAX_CHECKED + 1))
         HOOK_SYNTAX_PARSED+=("$line")
+        ;;
+      '') ;;
+      *)
+        printf 'hook-syntax: cannot place %s, imported by %s — it is NOT marker-scanned\n' "$line" "$1" >&2
         ;;
     esac
   done < <(printf '%s\n' "$out")
