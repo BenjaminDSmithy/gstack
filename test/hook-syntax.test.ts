@@ -504,6 +504,22 @@ describe('hook-syntax: line endings', () => {
     expect(r.output).toContain('CRLF LINE ENDINGS');
   }, TEST_TIMEOUT_MS);
 
+  test('a payload named after an invalid UTF-8 byte on its line is followed under a UTF-8 locale', () => {
+    // bash's regex finds no match past an invalid byte in a UTF-8 locale.
+    fixture('latin1-call/hook', '');
+    const shim = path.join(FX, 'fx', 'latin1-call', 'hook');
+    fs.writeFileSync(shim, Buffer.concat([
+      Buffer.from('#!/usr/bin/env bash\nHERE="$(cd "$(dirname "$0")" && pwd)"\n: "caf'),
+      Buffer.from([0xe9]),
+      Buffer.from('"; exec bun "$HERE/hook.ts"\n'),
+    ]));
+    fixture('latin1-call/hook.ts', 'const broken: number = {\n');
+    const r = runGate([shim], { LC_ALL: 'en_US.UTF-8', LANG: 'en_US.UTF-8' });
+    expect(r.code, r.output).toBe(1);
+    expect(r.output).toContain('FAILS TO PARSE');
+    expect(r.output).toContain('hook.ts');
+  }, TEST_TIMEOUT_MS);
+
   test("a CRLF shim's payload is still found and parsed", () => {
     fixture('crlf-shim/hook', SHIM('hook.ts').replace(/\n/g, '\r\n'));
     fixture('crlf-shim/hook.ts', 'export const ok = 1;\n');

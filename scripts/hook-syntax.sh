@@ -179,6 +179,8 @@ HOOK_SYNTAX_NESTED=0
 
 # Set by _hook_syntax_payload when a `bun "$VAR/..."` names the shim's directory.
 HOOK_SYNTAX_FOLLOWED=0
+# Filled by _hook_syntax_bun_calls: one VAR<TAB>rel line per call.
+HOOK_SYNTAX_CALLS=''
 
 # Paths already checked this run, newline-delimited, so a payload reached
 # through its shim is not checked again when the sweep walks past it.
@@ -445,9 +447,7 @@ _hook_syntax_check_bun() {
 # names somewhere else, and the path is not followed.
 _hook_syntax_payloads() {
   [ "${#HOOK_SYNTAX_SHELLS[@]}" -gt 0 ] || return 0
-  local hits rest hit shim f text line var rel strict rc=0
-  local comment_re='^[[:space:]]*#'
-  local bun_re='bun[[:space:]]+(run[[:space:]]+)?"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/([^"]+)"'
+  local hits rest hit shim f text line calls call var rel strict rc=0 tab=$'\t'
   hits=$(LC_ALL=C grep -nHE 'bun[[:space:]]+(run[[:space:]]+)?"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/' -- "${HOOK_SYNTAX_SHELLS[@]}" 2>/dev/null)
   [ -n "$hits" ] || return 0
   rest="$hits"
@@ -466,24 +466,48 @@ _hook_syntax_payloads() {
     [ -n "$shim" ] || continue
     text="${hit#"$shim:"}"
     line="${text%%:*}"
-    text="${text#*:}"
-    [[ $text =~ $comment_re ]] && continue
+    _hook_syntax_bun_calls "${text#*:}"
     # Every `bun "$VAR/..."` on the line, not only the first: a line can hand
     # bun two paths, and one that is not followed must not hide the next. Only
     # the first followed one must exist; a later one may sit in a trailing
     # comment or a quoted string, so it is parsed when it is there and skipped
     # when it is not.
     strict=1
-    while [[ $text =~ $bun_re ]]; do
-      var="${BASH_REMATCH[2]}"
-      rel="${BASH_REMATCH[3]}"
-      text="${text#*"${BASH_REMATCH[0]}"}"
+    calls="$HOOK_SYNTAX_CALLS"
+    while [ -n "$calls" ]; do
+      call="${calls%%"$HOOK_SYNTAX_NL"*}"
+      calls="${calls#*"$HOOK_SYNTAX_NL"}"
+      var="${call%%"$tab"*}"
+      rel="${call#*"$tab"}"
       HOOK_SYNTAX_FOLLOWED=0
       _hook_syntax_payload "$shim" "$var" "$rel" "$line" "$strict" || rc=1
       [ "$HOOK_SYNTAX_FOLLOWED" -eq 1 ] && strict=0
     done
   done
   return "$rc"
+}
+
+# The `bun "$VAR/<rel>"` calls on one shim line, in order, as VAR<TAB>rel
+# lines in HOOK_SYNTAX_CALLS; none for a comment line. $1 = the line's text.
+# Read in the C locale, like the greps: under a UTF-8 locale bash's regex
+# finds no match past an invalid UTF-8 byte, so a call after one went unread.
+_hook_syntax_bun_calls() {
+  local LC_ALL=C text="$1"
+  local comment_re='^[[:space:]]*#'
+  local bun_re='bun[[:space:]]+(run[[:space:]]+)?"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/([^"]+)"'
+  HOOK_SYNTAX_CALLS=''
+  [[ $text =~ $comment_re ]] && return 0
+  while [[ $text =~ $bun_re ]]; do
+    HOOK_SYNTAX_CALLS="$HOOK_SYNTAX_CALLS${BASH_REMATCH[2]}"$'\t'"${BASH_REMATCH[3]}$HOOK_SYNTAX_NL"
+    text="${text#*"${BASH_REMATCH[0]}"}"
+  done
+  return 0
+}
+
+# $1 =~ $2 in the C locale. Returns the match status.
+_hook_syntax_match() {
+  local LC_ALL=C
+  [[ $1 =~ $2 ]]
 }
 
 # One `bun "$VAR/<rel>"` in a shim. $1 = shim, $2 = VAR, $3 = rel, $4 = the
@@ -505,7 +529,7 @@ _hook_syntax_payload() {
       [ "${ln%%:*}" -lt "$at" ] && last="${ln#*:}"
     done < <(LC_ALL=C grep -nE "$assign_re" -- "$shim" 2>/dev/null)
     [ -n "$last" ] || return 0
-    [[ $last =~ $own_re ]] || return 0
+    _hook_syntax_match "$last" "$own_re" || return 0
   fi
   HOOK_SYNTAX_FOLLOWED=1
   dir="${shim%/*}"
