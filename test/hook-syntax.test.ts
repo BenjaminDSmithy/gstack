@@ -1228,6 +1228,27 @@ describe('hook-syntax: bun payloads', () => {
     }
   }, TEST_TIMEOUT_MS);
 
+  test('an import bun names by drive letter is placed through cygpath, or reported', () => {
+    // Bun on Windows lists C:\... paths. A stub bun stands in for it here.
+    const bin = path.join(FX, 'fx', 'drive', 'bin');
+    fixture('drive/hook', SHIM('hook.ts'));
+    fixture('drive/hook.ts', 'export const ok = 1;\n');
+    const helper = fixture('drive/helper.ts', `export const s = \`\n${LT} HEAD\na\n${EQ}\nb\n${GT} other\n\`;\n`);
+    fixture('drive/bin/bun', '#!/bin/bash\ncase "$1" in\n  --version) echo 1.3.13 ;;\n  -e) printf \'%s\\n\' \'C:\\repo\\helper.ts\' ;;\nesac\nexit 0\n');
+    fs.chmodSync(path.join(bin, 'bun'), 0o755);
+    const shim = path.join(FX, 'fx', 'drive', 'hook');
+    const unplaced = runGate(['--report', shim], { HOOK_SYNTAX_BUN: path.join(bin, 'bun') });
+    expect(unplaced.code).toBe(0);
+    expect(unplaced.output).toContain('cannot place C:\\repo\\helper.ts');
+    expect(unplaced.output).toContain('NOT marker-scanned');
+    fixture('drive/bin/cygpath', `#!/bin/bash\n[ "$1" = -u ] && printf '%s\\n' ${JSON.stringify(helper)}\n`);
+    fs.chmodSync(path.join(bin, 'cygpath'), 0o755);
+    const placed = runGate(['--report', shim], { HOOK_SYNTAX_BUN: path.join(bin, 'bun'), PATH: `${bin}:${process.env.PATH}` });
+    expect(placed.code).toBe(1);
+    expect(placed.output).toContain('UNRESOLVED CONFLICT MARKERS');
+    expect(placed.output).toContain('helper.ts');
+  }, TEST_TIMEOUT_MS);
+
   test('a payload a shim names but does not ship is a failure', () => {
     const r = runGate([fixture('missing/hook', SHIM('gone.ts'))]);
     expect(r.code).toBe(1);
