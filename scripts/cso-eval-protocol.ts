@@ -5,6 +5,8 @@ export type ProducerVersion = 'v2' | 'v3';
 export type ProducerMode = 'daily' | 'comprehensive';
 export type ProducerStack = 'node' | 'bun' | 'python' | 'rails';
 export type ProducerVariant = 'vulnerable' | 'fixed';
+export type ProducerPlatform = 'linux/amd64' | 'linux/arm64';
+export const PRODUCER_PLATFORMS: readonly ProducerPlatform[] = ['linux/amd64', 'linux/arm64'];
 
 export interface ProducerCell {
   id: string;
@@ -19,6 +21,8 @@ export interface ProducerCell {
   budgetSeconds: number;
   sourceHash: string;
   skillHash: string;
+  /** Release and baseline cells pin the native producer platform; full-profile cells omit it. */
+  platform?: ProducerPlatform;
 }
 
 export interface ProducerSourceEntry {
@@ -28,15 +32,39 @@ export interface ProducerSourceEntry {
 }
 
 /**
+ * Only what a producer needs to run one cell. It never names the corpus case,
+ * variant, version, or repetition: an agent that can read its own control file
+ * or receipt still cannot tell which answer it is being graded against.
+ */
+export interface ProducerExecution {
+  mode: ProducerMode;
+  model: string;
+  host: ProducerHost;
+  budgetSeconds: number;
+  sourceHash: string;
+  skillHash: string;
+  platform?: ProducerPlatform;
+}
+
+/**
  * This control file is consumed before a producing agent starts. It must never
  * be placed inside the application repository or retained on the producer.
  */
 export interface ProducerInput {
-  schemaVersion: 1;
-  cell: ProducerCell;
+  schemaVersion: 2;
+  /** The opaque matrix cell id; only the trusted evaluator maps it back to a cell. */
+  cellRef: string;
   /** Exact canonical portable payload: root SKILL.md plus its manifest-listed sections. */
   skill: string;
   source: ProducerSourceEntry[];
+  execution: ProducerExecution;
+}
+
+export function producerExecution(cell: ProducerCell): ProducerExecution {
+  return {
+    mode: cell.mode, model: cell.model, host: cell.host, budgetSeconds: cell.budgetSeconds,
+    sourceHash: cell.sourceHash, skillHash: cell.skillHash, ...(cell.platform === undefined ? {} : { platform: cell.platform }),
+  };
 }
 
 export interface ProducerArtifactIdentity {
@@ -85,8 +113,9 @@ export interface ProducerArtifactInventory {
 }
 
 export interface ProducerReceipt {
-  schemaVersion: 1;
-  cell: ProducerCell;
+  schemaVersion: 2;
+  /** The opaque cell id from the consumed input; bound together with inputHash. */
+  cellRef: string;
   inputHash: string;
   installationIdentity: ProducerInstallationIdentity;
   providerIdentity: ProducerProviderIdentity;
@@ -115,12 +144,22 @@ export interface ProducerReceipt {
   receiptHash: string;
 }
 
-/** Compact trusted index; raw output remains in the separately retained receipt. */
+/**
+ * Compact trusted index; raw output remains in the separately retained receipt.
+ * Collection adds the matrix cell that the receipt's cellRef names.
+ */
 export type ProducerReceiptIndex = Omit<ProducerReceipt, 'output' | 'error'> & {
+  cell: ProducerCell;
   error?: { code: string };
 };
 
 export const sha256 = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
+
+/** The native platform this producer process runs on, or null when no CSO runtime platform matches it. */
+export function producerHostPlatform(platform: string = process.platform, arch: string = process.arch): ProducerPlatform | null {
+  if (platform !== 'linux') return null;
+  return arch === 'x64' ? 'linux/amd64' : arch === 'arm64' ? 'linux/arm64' : null;
+}
 
 export function producerInputHash(input: ProducerInput): string {
   return sha256(JSON.stringify(input));

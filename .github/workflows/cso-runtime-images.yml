@@ -12,6 +12,7 @@ on:
       - 'scripts/cso-image-matrix.ts'
       - 'scripts/cso-verify-runtime-base.ts'
       - 'scripts/cso-runtime-promotion.ts'
+      - 'scripts/cso-requalification.ts'
       - 'scripts/cso-public-ghcr.ts'
       - 'test/cso-*.test.ts'
   workflow_dispatch:
@@ -42,6 +43,15 @@ jobs:
           set -eu
           matrix="$(bun run scripts/cso-image-matrix.ts)"
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
+      - name: Record the requalification trigger inputs of this source commit
+        run: bun run scripts/cso-requalification.ts triggers > requalification.json
+      - if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cso-requalification-triggers
+          path: requalification.json
+          if-no-files-found: error
+          retention-days: 30
 
   validate-native:
     needs: reviewed-inputs
@@ -279,6 +289,7 @@ jobs:
           retention-days: 30
 
   qualify-native:
+    name: qualify-native ${{ matrix.runtimeId }}
     needs: [reviewed-inputs, stage]
     if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
     environment: cso-runtime-release
@@ -344,31 +355,21 @@ jobs:
           set -eu
           bun install --frozen-lockfile --ignore-scripts
           bun run build:cso
-          bun run test:cso:docker
-      - name: Record native gate evidence without claiming runtime qualification
+          bun run test:cso:docker --reporter=junit --reporter-outfile=native-tests.junit.xml
+      - name: Derive native gate evidence from the executed test report
         env:
           CSO_STACK: ${{ matrix.stack }}
           CSO_PLATFORM: ${{ matrix.platform }}
         run: |
           set -eu
-          jq --arg stack "$CSO_STACK" --arg platform "$CSO_PLATFORM" '
-            . + {
-              state:"native-gates-passed",
-              nativeChecks:(if $stack == "postgresql" then {
-                containmentPassed:true,coldStartPassed:true,multiDatabasePassed:true,readinessPassed:true
-              } else {
-                containmentPassed:true,coldStartPassed:true,positiveNegativeAssertionsPassed:true,
-                acquisitionPublicOnlyPassed:true,offlineLifecyclePassed:true
-              } + (if $stack == "rails" then {
-                railsSqlitePassed:true,railsPostgresqlPassed:true,nativeExtensionsPassed:true
-              } else {} end) end),
-              privateChecks:{heldOutRepairPassed:"pending",accuracyGatesPassed:"pending",secretCanaryPassed:"pending",watchdogCleanupPassed:"pending"},
-              qualified:false,
-              promotion:"prohibited until authenticated private qualification evidence completes every release gate"
-            }' staged-application/staged-image.json > qualification-evidence.json
+          bun run scripts/cso-native-evidence.ts --stack "$CSO_STACK" --platform "$CSO_PLATFORM" \
+            --junit native-tests.junit.xml --staged staged-application/staged-image.json \
+            --output qualification-evidence.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: cso-qualification-gates-${{ matrix.stack }}-${{ matrix.arch }}
-          path: qualification-evidence.json
+          path: |
+            qualification-evidence.json
+            native-tests.junit.xml
           if-no-files-found: error
           retention-days: 30

@@ -3,6 +3,9 @@ name: Propose CSO Runtime Catalog Promotion
 # This workflow never deploys a catalog. It converts authenticated
 # same-repository qualification artifacts into an attested candidate, verifies
 # those exact bytes, and opens a normal source-review PR from a protected job.
+# Pushes and PRs made with GITHUB_TOKEN start no workflows, so the job
+# dispatches the required free-tests check on the pushed branch head; a
+# workflow_dispatch is the documented exception to that rule.
 on:
   workflow_dispatch:
     inputs:
@@ -28,7 +31,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      actions: read
+      actions: write
       packages: read
       id-token: write
       attestations: write
@@ -161,6 +164,7 @@ jobs:
           cmp runtime-catalog.candidate.json committed-runtime-catalog.json
           test "$expected_candidate_sha256" = "sha256:$(sha256sum committed-runtime-catalog.json | cut -d ' ' -f 1)"
           git push --set-upstream origin "$branch"
+          gh workflow run free-tests.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"
           cat > pr-body.md <<EOF
           Promotes the complete CSO runtime catalog from authenticated qualification run $CSO_QUALIFICATION_RUN. The protected promotion workflow verified the exact candidate attestation and committed those same bytes after a previous-revision compare-and-swap.
 

@@ -61,6 +61,7 @@ import { executable, git, redact, sanitizeForJson, sanitizeHelperForJson } from 
 import { inspectPreparation } from './preparation';
 import {
   assertRuntimeCompatible,
+  isEvaluationRuntimeCatalog,
   RUNTIME_CATALOG,
   selectRuntime,
   validateRuntimeCatalog,
@@ -307,7 +308,7 @@ const SCHEMA = {
       },
     ],
     security: {
-      name: 'security assertion',
+      name: 'security assertion; or send an array of 1..8 assertions with distinct names, all judged in one before/after boot pair',
       path: '/path',
       method: 'GET|POST|PUT|PATCH|DELETE',
       expected: { status: 'fixed status', includes: 'optional', excludes: 'optional' },
@@ -669,7 +670,9 @@ async function start(
     try {
       validateRuntimeCatalog(dependencies.runtimeCatalog);
       selectRuntime(plan.runtimeProfile, platform(), dependencies.runtimeCatalog);
-      c.evidence.push(`Qualified runtime catalog: ${dependencies.runtimeCatalog.revision}`);
+      c.evidence.push(
+        `${isEvaluationRuntimeCatalog(dependencies.runtimeCatalog) ? 'Evaluation-only' : 'Qualified'} runtime catalog: ${dependencies.runtimeCatalog.revision}`,
+      );
     } catch (error: any) {
       c.gaps.push(
         error?.message?.startsWith('MISSING_QUALIFIED_RUNTIME')
@@ -864,6 +867,8 @@ async function provisionImages(args: string[], dependencies: CsoCliDependencies)
   const setupSummary = take(args, '--setup-summary'),
     requestedSeconds = args.includes('--per-image-seconds') ? need(args, '--per-image-seconds') : undefined;
   if (args.length) throw new CsoError('INVALID_ARGUMENT', `Unknown argument: ${args[0]}`);
+  if (setupSummary && isEvaluationRuntimeCatalog(dependencies.runtimeCatalog))
+    throw new CsoError('INCOMPATIBLE_INPUT', 'Setup never installs an evaluation-only CSO helper build');
   if (requestedSeconds !== undefined) catalogImageProvisioningPolicy(0, requestedSeconds);
   let targetPlatform: 'linux/amd64' | 'linux/arm64';
   try {
@@ -2740,7 +2745,11 @@ async function main() {
     return;
   }
   if (command === '--version') {
-    emit({ version: VERSION, abi: ABI });
+    emit({
+      version: VERSION,
+      abi: ABI,
+      ...(isEvaluationRuntimeCatalog(RUNTIME_CATALOG) ? { evaluationOnly: true } : {}),
+    });
     return;
   }
   if (command === 'schema') {

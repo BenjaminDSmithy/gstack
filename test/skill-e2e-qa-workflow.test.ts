@@ -188,7 +188,7 @@ Write your report to ${qaOnlyDir}/qa-reports/qa-only-report.md`,
         directory: qaOnlyDir, guard: path.join(ROOT, 'bin/gstack-qa-deadline'),
       });
       assertQaBrowserCheckpoints(result.transcript, {
-        directory: qaOnlyDir, guard: path.join(ROOT, 'bin/gstack-qa-deadline'),
+        directory: qaOnlyDir, guard: path.join(ROOT, 'bin/gstack-qa-deadline'), browse: browseBin,
       });
       passed = true;
     } catch (error) {

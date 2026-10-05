@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.91.25.0] - 2026-10-05
+## [1.91.27.0] - 2026-10-05
 
 **`./setup` refuses to wire in a hook that does not parse.**
 **A half-merged hook no longer gets installed and blocks every tool call on your machine.**
@@ -40,6 +40,23 @@ On a healthy tree, `./setup` registers what it did before, a few seconds later. 
 - `test/team-mode.test.ts`'s setup fixture carries the gate script.
 
 Contributed by @BenjaminDSmithy.
+## [1.91.25.0] - 2026-10-05
+
+**gstack can grade a private, two-architecture `/cso` release run, and the runtime release gates check more for themselves.**
+
+These are the gstack-side pieces the private CSO runtime evaluator needs before it can qualify Node, Bun, Python and Rails runtimes. The release pipeline (`cso-runtime-images.yml` → private evaluator → `cso-runtime-qualification.yml` → `cso-runtime-promote.yml`) now verifies more of its own evidence, and nothing about a user's audit changes until a qualified runtime catalog merges.
+
+### What changes for you
+
+- **Private corpora score through the public scorer.** `scripts/cso-eval.ts` accepts an injected corpus with the public layout (`defineEvalCorpus`), per-cell `linux/amd64`/`linux/arm64` platforms with one producer installation and provider identity per platform, a `release` profile (v3, one repetition) and a hash-bound external v2 baseline. The `full` profile matrix is byte-identical to before.
+- **Evaluation-only helper builds.** `bun run build:cso -- --evaluation-candidate <catalog> --output <dir>` builds a helper unit from a `cso-eval-` candidate catalog outside the checkout. It reports `evaluationOnly: true`; setup, promotion and normal builds refuse it.
+- **The ingress checks the staging run itself.** `cso-runtime-qualification.yml` resolves the staging run from verified provenance and requires a successful protected-main `workflow_dispatch` run whose ten `qualify-native` jobs all passed. A dispatch summary job shows the approver the claimed images and an optional `evaluationRef` before approval.
+- **Native gate evidence comes from test results.** Booleans are derived from JUnit executed-and-passed counts (`scripts/cso-native-evidence.ts`); skipped Docker tests no longer read as passing, and PostgreSQL rows list only the checks they need.
+- **Catalog promotion PRs get their required checks.** Both promote jobs dispatch `free-tests.yml` on the new branch.
+- **Multi-payload security proofs.** A verification request's `security` may hold 1–8 assertions judged in one before/after pair; a single assertion hashes exactly as before.
+- **Producer cells are opaque.** A producer's input and receipt name only an opaque cell id; the evaluator maps it back to the case and variant, so an agent with root on its cell cannot learn which answer it is graded against.
+- **Requalification triggers.** Qualified catalogs record the helper ABI, isolation policy hash, image preparation digest and build-inputs revision; a free test fails when the committed catalog no longer matches the code.
+
 ## [1.91.24.0] - 2026-10-05
 
 **PR evals stop throwing away work, and a red weekly census means something again.**

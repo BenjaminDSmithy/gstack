@@ -17,13 +17,15 @@ import { GeminiAdapter, prepareGeminiProducerState, removeGeminiProducerState } 
 import { PRICING } from '../test/helpers/pricing';
 import type { ProviderAdapter, RunOpts, RunResult } from '../test/helpers/providers/types';
 import {
+  PRODUCER_PLATFORMS,
+  producerHostPlatform,
   producerInputHash,
   producerArtifactInventoryHash,
   producerInstallationIdentityHash,
   producerProviderIdentityHash,
   producerReceiptHash,
   sha256,
-  type ProducerCell,
+  type ProducerExecution,
   type ProducerHost,
   type ProducerInput,
   type ProducerArtifactInventory,
@@ -197,8 +199,18 @@ function repositoryIdentity(root: string): string {
   return sha256(JSON.stringify({ config: sha256(config), head: read(['rev-parse', '--verify', 'HEAD']).trim(), branch: read(['symbolic-ref', '--short', 'HEAD']).trim(), status: read(['status', '--porcelain=v2', '--untracked-files=all']) }));
 }
 
-function validateCell(cell: ProducerCell): void {
-  if (!cell || !HEX.test(cell.id) || !cell.caseId || !['node', 'bun', 'python', 'rails'].includes(cell.stack) || !['vulnerable', 'fixed'].includes(cell.variant) || !['v2', 'v3'].includes(cell.version) || !['daily', 'comprehensive'].includes(cell.mode) || ![1, 2, 3].includes(cell.repetition) || !cell.model || !['claude', 'codex', 'gemini'].includes(cell.host) || !Number.isInteger(cell.budgetSeconds) || cell.budgetSeconds <= 60 || cell.budgetSeconds > 3600 || !HEX.test(cell.sourceHash) || !HEX.test(cell.skillHash)) throw new Error('INVALID_PRODUCER_INPUT');
+const INPUT_FIELDS = 'cellRef,execution,schemaVersion,skill,source';
+const EXECUTION_FIELDS = 'budgetSeconds,host,mode,model,skillHash,sourceHash';
+/** The input has exactly the opaque fields: no case, variant, version, or repetition can ride along. */
+function validateInput(input: ProducerInput): void {
+  const execution = input?.execution;
+  if (!input || typeof input !== 'object' || Object.keys(input).sort().join(',') !== INPUT_FIELDS || input.schemaVersion !== 2 || !HEX.test(input.cellRef) ||
+      typeof input.skill !== 'string' || Buffer.byteLength(input.skill) > INPUT_LIMIT || !Array.isArray(input.source) ||
+      !execution || typeof execution !== 'object' || Object.keys(execution).filter(key => key !== 'platform').sort().join(',') !== EXECUTION_FIELDS ||
+      !['daily', 'comprehensive'].includes(execution.mode) || typeof execution.model !== 'string' || !execution.model || !['claude', 'codex', 'gemini'].includes(execution.host) ||
+      !Number.isInteger(execution.budgetSeconds) || execution.budgetSeconds <= 60 || execution.budgetSeconds > 3600 || !HEX.test(execution.sourceHash) || !HEX.test(execution.skillHash) ||
+      ('platform' in execution && !PRODUCER_PLATFORMS.includes(execution.platform!))) throw new Error('INVALID_PRODUCER_INPUT');
+  if (execution.platform !== undefined && execution.platform !== producerHostPlatform()) throw new Error('UNMATCHED_PRODUCER_PLATFORM');
 }
 
 export interface ProducerHelperBinding {
@@ -417,7 +429,7 @@ export function resolveProducerProviderIdentity(host: ProducerHost, stateRoot: s
   };
 }
 
-function promptFor(cell: ProducerCell, skill: string, sourceRoot: string, helper: ProducerHelperBinding): string {
+function promptFor(cell: ProducerExecution, skill: string, sourceRoot: string, helper: ProducerHelperBinding): string {
   const invocation = `/cso${cell.mode === 'comprehensive' ? ' --comprehensive' : ''} --budget ${cell.budgetSeconds}`;
   const sourceAccess = cell.host === 'codex'
     ? 'The Codex permission profile grants read-only access to exactly that immutable snapshot so the trusted helper can read it. Use only the trusted helper to inspect or act on source; direct provider file or shell access is outside this evaluation policy.'
@@ -484,20 +496,20 @@ export async function runProducerCell(inputPath: string, receiptPath: string, op
   const bytes = readBoundedStable(controlPath, INPUT_LIMIT, 'Producer input');
   let input: ProducerInput;
   try { input = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('INVALID_PRODUCER_INPUT'); }
-  if (input.schemaVersion !== 1 || typeof input.skill !== 'string' || Buffer.byteLength(input.skill) > INPUT_LIMIT || !Array.isArray(input.source)) throw new Error('INVALID_PRODUCER_INPUT');
-  validateCell(input.cell);
-  if (basename(receipt) !== `${input.cell.id}.json`) throw new Error('UNMATCHED_RECEIPT_DESTINATION');
-  if (sha256(input.skill) !== input.cell.skillHash) throw new Error('INVALID_PRODUCER_SKILL');
-  validateSource(sourceRoot, input.source, input.cell.sourceHash);
+  validateInput(input);
+  const cell = input.execution;
+  if (basename(receipt) !== `${input.cellRef}.json`) throw new Error('UNMATCHED_RECEIPT_DESTINATION');
+  if (sha256(input.skill) !== cell.skillHash) throw new Error('INVALID_PRODUCER_SKILL');
+  validateSource(sourceRoot, input.source, cell.sourceHash);
   sealProducerSource(sourceRoot);
-  validateSource(sourceRoot, input.source, input.cell.sourceHash);
+  validateSource(sourceRoot, input.source, cell.sourceHash);
   const originalRepositoryIdentity = repositoryIdentity(sourceRoot);
   const stateRoot = join(jobRoot, 'state');
   const helperHome = join(stateRoot, 'cso-home');
   const helper = resolveProducerHelperBinding(sourceRoot, stateRoot, options.testHelperLauncherPath);
   const installationIdentity = producerInstallationIdentity(helper);
-  const adapter = options.adapter ?? adapterFor(input.cell.host);
-  if ((input.cell.host === 'codex' ? 'gpt' : input.cell.host) !== adapter.family) throw new Error('UNMATCHED_PRODUCER_ADAPTER');
+  const adapter = options.adapter ?? adapterFor(cell.host);
+  if ((cell.host === 'codex' ? 'gpt' : cell.host) !== adapter.family) throw new Error('UNMATCHED_PRODUCER_ADAPTER');
   fs.mkdirSync(stateRoot, { recursive: false, mode: 0o700 });
   fs.mkdirSync(helperHome, { recursive: false, mode: 0o700 });
   const provider = options.testProviderIdentity
@@ -505,13 +517,13 @@ export async function runProducerCell(inputPath: string, receiptPath: string, op
         identity: validateProviderIdentity(options.testProviderIdentity, adapter.family),
         command: options.testProviderCommand ?? { executable: process.execPath, argsPrefix: [] },
       }
-    : resolveProducerProviderIdentity(input.cell.host, stateRoot);
+    : resolveProducerProviderIdentity(cell.host, stateRoot);
   const providerIdentity = provider.identity;
   const runOptions = {
-    prompt: promptFor(input.cell, input.skill, sourceRoot, helper),
+    prompt: promptFor(cell, input.skill, sourceRoot, helper),
     workdir: stateRoot,
-    timeoutMs: input.cell.budgetSeconds * 1000,
-    model: input.cell.model,
+    timeoutMs: cell.budgetSeconds * 1000,
+    model: cell.model,
     csoProducer: {
       stateDirectory: stateRoot,
       sourceDirectory: sourceRoot,
@@ -521,7 +533,7 @@ export async function runProducerCell(inputPath: string, receiptPath: string, op
     },
   } satisfies RunOpts;
   const availability = await adapter.available(runOptions);
-  if (!availability.ok) throw new Error(`PRODUCER_UNAVAILABLE: ${availability.reason ?? input.cell.host}`);
+  if (!availability.ok) throw new Error(`PRODUCER_UNAVAILABLE: ${availability.reason ?? cell.host}`);
   const inputHash = producerInputHash(input);
 
   // Load the opaque metadata into memory, then remove it before starting the
@@ -536,11 +548,11 @@ export async function runProducerCell(inputPath: string, receiptPath: string, op
   const startedAt = new Date().toISOString();
   let run: RunResult;
   try {
-    if (input.cell.host === 'gemini') prepareGeminiProducerState(stateRoot, helper.launcher);
+    if (cell.host === 'gemini') prepareGeminiProducerState(stateRoot, helper.launcher);
     run = await adapter.run(runOptions);
   } finally {
     try {
-      if (input.cell.host === 'gemini') removeGeminiProducerState(stateRoot);
+      if (cell.host === 'gemini') removeGeminiProducerState(stateRoot);
     } finally {
       if (previousHome === undefined) delete process.env.GSTACK_HOME; else process.env.GSTACK_HOME = previousHome;
       if (previousSessionKind === undefined) delete process.env.GSTACK_SESSION_KIND; else process.env.GSTACK_SESSION_KIND = previousSessionKind;
@@ -557,7 +569,7 @@ export async function runProducerCell(inputPath: string, receiptPath: string, op
     throw new Error('PRODUCER_PROVIDER_INSTALLATION_RACE');
   }
   assertProducerSourceSealed(sourceRoot);
-  validateSource(sourceRoot, input.source, input.cell.sourceHash);
+  validateSource(sourceRoot, input.source, cell.sourceHash);
   if (repositoryIdentity(sourceRoot) !== originalRepositoryIdentity) throw new Error('PRODUCER_CHANGED_SOURCE');
   const artifacts = inventoryProducerArtifacts(helperHome);
   run = sanitizeProducerRun(run);
@@ -566,8 +578,8 @@ export async function runProducerCell(inputPath: string, receiptPath: string, op
   const tokensReported = run.tokens.input > 0 || run.tokens.output > 0 || (run.tokens.cached ?? 0) > 0;
   const estimatedCostUSD = tokensReported && PRICING[run.modelUsed] ? adapter.estimateCost(run.tokens, run.modelUsed) : null;
   const withoutHash: Omit<ProducerReceipt, 'receiptHash'> = {
-    schemaVersion: 1,
-    cell: input.cell,
+    schemaVersion: 2,
+    cellRef: input.cellRef,
     inputHash,
     installationIdentity,
     providerIdentity,
@@ -575,9 +587,9 @@ export async function runProducerCell(inputPath: string, receiptPath: string, op
     startedAt,
     finishedAt,
     status: run.error ? 'failed' : 'succeeded',
-    requestedModel: input.cell.model,
+    requestedModel: cell.model,
     modelUsed: run.modelUsed,
-    modelIdentitySource: run.modelUsed === input.cell.model ? 'requested_pin' : 'provider_reported',
+    modelIdentitySource: run.modelUsed === cell.model ? 'requested_pin' : 'provider_reported',
     durationMs: run.durationMs,
     firstUsefulResultMs: null,
     toolCalls: run.toolCalls,
@@ -600,7 +612,7 @@ async function cli(args: string[]): Promise<void> {
   if (args.length !== 4 || args[0] !== 'run' || args[3] !== '--execute-paid') throw new Error('Usage: cso-eval-producer run <consumable-input.json> <new-receipt.json> --execute-paid');
   if (process.env.CSO_EVAL_PAID !== '1') throw new Error('PAID_EXECUTION_NOT_AUTHORIZED: also set CSO_EVAL_PAID=1 on the isolated producer host');
   const receipt = await runProducerCell(args[1], args[2], { paidExecutionAuthorized: true });
-  console.log(JSON.stringify({ cellId: receipt.cell.id, status: receipt.status, durationMs: receipt.durationMs, receiptHash: receipt.receiptHash }));
+  console.log(JSON.stringify({ cellRef: receipt.cellRef, status: receipt.status, durationMs: receipt.durationMs, receiptHash: receipt.receiptHash }));
 }
 
 if (import.meta.main) {
