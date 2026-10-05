@@ -93,6 +93,17 @@ for (const shell of SHELLS) {
       });
     }
 
+    test('copilot: a runtime root with copied assets resolves through the .source-path setup wrote', () => {
+      const home = tmp();
+      const src = source(path.join(tmp(), 'checkout'), true);
+      const rt = path.join(home, '.copilot/skills/gstack');
+      fs.mkdirSync(path.join(rt, 'bin'), { recursive: true });
+      fs.writeFileSync(path.join(rt, '.source-path'), `${src}\n`);
+      const r = detect(shell, 'copilot', home, tmp());
+      expect(r.type).toBe('global-git');
+      expect(r.dir).toBe(src);
+    });
+
     test('a runtime root over a non-git copy upgrades the copy as vendored-global', () => {
       const home = tmp();
       const src = source(path.join(tmp(), 'copy'), false);
