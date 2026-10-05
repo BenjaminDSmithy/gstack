@@ -1670,7 +1670,7 @@ export async function runFreeShard(
   if (status !== 'timed-out' && captureFailures.size > 0) {
     console.error(
       `${label} output capture was incomplete (${[...captureFailures.keys()].join(', ')}), `
-      + `so its failure list may be short. Treating as FAILED. ${accounting}`,
+      + `so its failure list may be short. Treating as FAILED. ${shardAccounting(summary.terminalFileCounts, files.length)}`,
     );
   }
 
