@@ -1302,6 +1302,23 @@ describe('hook-syntax: bun payloads', () => {
     expect(r.code).toBe(0);
   }, TEST_TIMEOUT_MS);
 
+  test('HERE is followed however the shim sets it', () => {
+    // Only a variable other than HERE has to be set in the cd/pwd shape. Every
+    // real shim spells HERE that way, so nothing else pins the exemption.
+    const forms = [
+      'HERE="$(dirname "$0")"',
+      'HERE="${0%/*}"',
+      'HERE="$(cd -- "$(dirname -- "$0")" && pwd)"',
+    ];
+    forms.forEach((assign, i) => {
+      fixture(`here-any-${i}/hook`, `#!/usr/bin/env bash\n${assign}\nexec bun "$HERE/payload.ts"\n`);
+      const payload = fixture(`here-any-${i}/payload.ts`, 'const broken: number = {\n');
+      const r = runGate([path.join(FX, 'fx', `here-any-${i}/hook`)]);
+      expect([assign, r.code], r.output).toEqual([assign, 1]);
+      expect(r.output).toContain(`FAILS TO PARSE ${payload}`);
+    });
+  }, TEST_TIMEOUT_MS);
+
   test('a payload named through a variable set from the shim\'s own directory is found', () => {
     // /autoplan's hook spells it `bun "$_AUTOPLAN_HOOK_DIR/<payload>"`.
     const shim = '#!/usr/bin/env bash\nD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"\nR="$(bun "$D/payload.ts")"\necho "$R"\n';
@@ -1331,17 +1348,54 @@ describe('hook-syntax: bun payloads', () => {
     expect(r.code).toBe(0);
   }, TEST_TIMEOUT_MS);
 
+  test('an own-directory assignment with text after its closing quote is not followed', () => {
+    // `"$(cd ... && pwd)"/sub` is one word to bash: D names sub/. Read as the
+    // shim's own directory it names a payload bash never runs, and refuses a
+    // valid hook.
+    const forms = [
+      'D="$(cd "$(dirname "$0")" && pwd)"/sub',
+      'D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"/sub',
+    ];
+    forms.forEach((assign, i) => {
+      const p = fixture(`after-quote-${i}/hook`, `#!/usr/bin/env bash\n${assign}\nexec bun "$D/payload.ts"\n`);
+      fixture(`after-quote-${i}/sub/payload.ts`, 'export const ok = 1;\n');
+      const r = runGate([p]);
+      expect([assign, r.code, r.output]).toEqual([assign, 0, '']);
+    });
+  }, TEST_TIMEOUT_MS);
+
   test('an own-directory variable set with a redirect on the cd, or extra spaces, is followed', () => {
     // bin/gstack-brain-enqueue spells it `$(cd "$(dirname "$0")" 2>/dev/null && pwd)`.
+    // The assignment ends at a blank or at a control operator, with or without
+    // a blank before it.
     const forms = [
       'D="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"',
       'D="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"',
       'D="$(cd "$(dirname "$0")"  &&  pwd)" || exit 0',
+      'D="$(cd "$(dirname "$0")" && pwd)"; export D',
+      'D="$(cd "$(dirname "$0")" && pwd)"|| exit 0',
+      'D="$(cd "$(dirname "$0")" && pwd)"&& export D',
     ];
     forms.forEach((assign, i) => {
       fixture(`redirect-var-${i}/hook`, `#!/usr/bin/env bash\n${assign}\nexec bun "$D/payload.ts"\n`);
       fixture(`redirect-var-${i}/payload.ts`, 'const broken: number = {\n');
       const r = runGate([path.join(FX, 'fx', `redirect-var-${i}/hook`)]);
+      expect([assign, r.code], r.output).toEqual([assign, 1]);
+      expect(r.output).toContain('FAILS TO PARSE');
+    });
+  }, TEST_TIMEOUT_MS);
+
+  test('an own-directory assignment with a colon later on its line is still followed', () => {
+    // The gate reads `grep -n` output as LINE:TEXT, split at the first colon.
+    // A fallback message or a trailing comment can carry another one.
+    const forms = [
+      'D="$(cd "$(dirname "$0")" && pwd)" || { echo "hook: cannot find own dir" >&2; exit 0; }',
+      'D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"  # note: resolves symlinks',
+    ];
+    forms.forEach((assign, i) => {
+      fixture(`colon-var-${i}/hook`, `#!/usr/bin/env bash\n${assign}\nexec bun "$D/payload.ts"\n`);
+      fixture(`colon-var-${i}/payload.ts`, 'const broken: number = {\n');
+      const r = runGate([path.join(FX, 'fx', `colon-var-${i}/hook`)]);
       expect([assign, r.code], r.output).toEqual([assign, 1]);
       expect(r.output).toContain('FAILS TO PARSE');
     });
@@ -1363,6 +1417,18 @@ describe('hook-syntax: bun payloads', () => {
     const l = runGate([path.join(FX, 'fx', 'reassigned-later/hook')]);
     expect(l.code).toBe(1);
     expect(l.output).toContain('FAILS TO PARSE');
+  }, TEST_TIMEOUT_MS);
+
+  test('a variable reassigned from its own bun call is followed through its old value', () => {
+    // bash expands `$(bun "$D/...")` before it assigns D, so bun is handed the
+    // shim's own directory: the assignment that holds the call is not yet in
+    // force for it.
+    const shim = '#!/usr/bin/env bash\nD="$(cd "$(dirname "$0")" && pwd)"\nD="$(bun "$D/resolve.ts")"\necho "$D"\n';
+    fixture('self-reassign/hook', shim);
+    const payload = fixture('self-reassign/resolve.ts', 'const broken: number = {\n');
+    const r = runGate([path.join(FX, 'fx', 'self-reassign/hook')]);
+    expect(r.code, r.output).toBe(1);
+    expect(r.output).toContain(`FAILS TO PARSE ${payload}`);
   }, TEST_TIMEOUT_MS);
 
   test('a payload after a bun call that is not followed, on the same line, is still found', () => {
