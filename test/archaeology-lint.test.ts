@@ -29,6 +29,9 @@ const ALLOWLIST: AllowEntry[] = [
   { skills: ['landing-report'], anchor: 'feat/payments', reason: 'sample landing-report output (PR number of a sibling workspace)' },
   { skills: ['retro'], anchor: 'Biggest ship: PR #605', reason: 'sample retro output' },
   { skills: ['codex'], anchor: 'OpenAI issues #8545', reason: 'upstream OpenAI Codex issue IDs behind the reasoning-effort default' },
+  { skills: ['pr-prep'], anchor: 'lost9999', reason: 'sample pr-prep report table and block message (the upstream PRs an audit matched)' },
+  { skills: ['pr-prep'], anchor: 'codex P2', reason: 'worked example of the findings the codex second opinion reports' },
+  { skills: ['pr-prep'], anchor: 'reindex CLI_ONLY one-char fix', reason: "worked example of the audit's verdicts on a real branch" },
 ];
 
 /** `#` + 3 or more digits (bare or parenthesized), `PR #N`, `issue #N`, incident stories. */
