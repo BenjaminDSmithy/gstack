@@ -134,8 +134,9 @@ for _arg in "$@"; do
   case "$_arg" in
     --status)
       _STATUS_DIR="$(cd "$(dirname "$0")" && pwd -P)"
-      . "$_STATUS_DIR/bin/gstack-state-root.sh" && . "$_STATUS_DIR/bin/gstack-install-registry.sh" \
-        && . "$_STATUS_DIR/bin/gstack-render-claude.sh" || exit 1
+      [ -r "$_STATUS_DIR/bin/gstack-state-root.sh" ] && . "$_STATUS_DIR/bin/gstack-state-root.sh" || exit 1
+      [ -r "$_STATUS_DIR/bin/gstack-install-registry.sh" ] && . "$_STATUS_DIR/bin/gstack-install-registry.sh" || exit 1
+      [ -r "$_STATUS_DIR/bin/gstack-render-claude.sh" ] && . "$_STATUS_DIR/bin/gstack-render-claude.sh" || exit 1
       gstack_state_root_select; GSTACK_STATE_ROOT="$_gstack_sr_root"
       gstack_install_status
       _status_install_checks
@@ -376,8 +377,8 @@ fi
 # a missing twin ends setup with status 1 and no message.
 [ -r "$SOURCE_GSTACK_DIR/bin/gstack-state-root.sh" ] && . "$SOURCE_GSTACK_DIR/bin/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $SOURCE_GSTACK_DIR/bin/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
 gstack_state_root_select; GSTACK_STATE_ROOT="$_gstack_sr_root"
-. "$SOURCE_GSTACK_DIR/bin/gstack-install-registry.sh" || { echo "$0: $SOURCE_GSTACK_DIR/bin/gstack-install-registry.sh is missing. fix: reinstall from a fresh clone (docs/ADDING_A_HOST.md)" >&2; exit 1; }
-. "$SOURCE_GSTACK_DIR/bin/gstack-render-claude.sh" || { echo "$0: $SOURCE_GSTACK_DIR/bin/gstack-render-claude.sh is missing. fix: reinstall from a fresh clone" >&2; exit 1; }
+[ -r "$SOURCE_GSTACK_DIR/bin/gstack-install-registry.sh" ] && . "$SOURCE_GSTACK_DIR/bin/gstack-install-registry.sh" || { echo "$0: $SOURCE_GSTACK_DIR/bin/gstack-install-registry.sh is missing. fix: reinstall from a fresh clone (docs/ADDING_A_HOST.md)" >&2; exit 1; }
+[ -r "$SOURCE_GSTACK_DIR/bin/gstack-render-claude.sh" ] && . "$SOURCE_GSTACK_DIR/bin/gstack-render-claude.sh" || { echo "$0: $SOURCE_GSTACK_DIR/bin/gstack-render-claude.sh is missing. fix: reinstall from a fresh clone" >&2; exit 1; }
 SETUP_VERSION="$(cat "$SOURCE_GSTACK_DIR/VERSION" 2>/dev/null || echo unknown)"
 
 # --claude-model is validated before anything is written, and persisted once

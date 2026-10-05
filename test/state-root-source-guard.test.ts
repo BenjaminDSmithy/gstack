@@ -34,7 +34,7 @@ const LANES: Array<{ name: string; argv: string[] }> = [
 
 /** A `.`/`source` of a quoted path whose failure falls through to `||`. */
 const SITE = /(?:^|&&)\s*(?:\.|source)\s+"[^\n]*\|\|/;
-const GUARDED = /^\s*\[ -r (".+?") \] && \. \1 2>\/dev\/null \|\| /;
+const GUARDED = /^\s*\[ -r (".+?") \] && \. \1(?: 2>\/dev\/null)? \|\| /;
 
 interface Site { rel: string; line: number; text: string }
 
@@ -179,7 +179,7 @@ describe('sourced twin missing', () => {
       for (const site of firstSite.values()) {
         const reach = REACH[site.rel] ?? {};
         if (reach.unreachable) continue;
-        const failOpen = /\|\| exit 0\s*$/.test(site.text);
+        const failOpen = /\|\| exit 0\s*(?:#.*)?$/.test(site.text);
         const tmp = mkScratch('gstack-bin-twin-');
         try {
           const script = path.join(tmp, 'tree', site.rel);
