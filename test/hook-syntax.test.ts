@@ -42,6 +42,19 @@ const GT = '>'.repeat(7);
 const PIPE = '|'.repeat(7);
 const CONFLICT_HEREDOC = `cat <<'HOOKEOF'\n${LT} HEAD\na\n${EQ}\nb\n${GT} other\nHOOKEOF\n`;
 
+// The UTF-8 locales a byte-level case runs under: C.UTF-8 and en_US.UTF-8,
+// each only where the host has it (ubuntu:24.04 has no en_US.UTF-8). bash
+// counts the two bytes of U+00E9 as one character only in a UTF-8 locale. A
+// missing locale falls back to C, where a case passes without proving
+// anything, and bash warns on stderr at startup and each time it switches
+// back to it, which fails a case that expects no output. A case with neither
+// locale is skipped.
+const UTF8_LOCALES = ['C.UTF-8', 'en_US.UTF-8'].filter(loc => {
+  const r = spawnSync('/bin/bash', ['-c', 'x=$(printf "\\303\\251"); [ "${#x}" = 1 ]'], { env: { ...process.env, LC_ALL: loc }, stdio: 'ignore', timeout: 30_000 });
+  if (r.status === null) throw new Error(`UTF-8 locale probe for ${loc}: ${r.error ?? r.signal}`);
+  return r.status === 0;
+});
+
 // One gate run costs a bash fork per file plus a bun bundle per payload. That
 // is well under a second on an idle machine and many times that while the rest
 // of the free suite runs its shards alongside. bun's 5s default would turn that
@@ -520,6 +533,32 @@ describe('hook-syntax: line endings', () => {
     expect(r.output).toContain('hook.ts');
   }, TEST_TIMEOUT_MS);
 
+  test.skipIf(!UTF8_LOCALES.length)('an own-directory assignment is read as bash reads it, byte for byte, under a UTF-8 locale', () => {
+    // None of these bytes changes what bash runs. Read in a UTF-8 locale, each
+    // changes what the gate sees, and the payload goes unfollowed:
+    //   nbsp  a line led by a no-break space is a command to bash, not an
+    //         assignment, but BSD grep counts the NBSP as [[:space:]]
+    //   mid   GNU grep prints no line that holds an invalid byte
+    //   hash  macOS's regex fails a match with an invalid byte in the two
+    //         bytes after its end
+    const own = 'D="$(cd "$(dirname "$0")" && pwd)"';
+    const shims: Array<[string, Buffer]> = [
+      ['nbsp', Buffer.concat([Buffer.from(`${own}\n`), Buffer.from([0xc2, 0xa0]), Buffer.from('D=/elsewhere || true\n')])],
+      ['mid', Buffer.concat([Buffer.from(`${own}  # r`), Buffer.from([0xe9]), Buffer.from('pertoire\n')])],
+      ['hash', Buffer.concat([Buffer.from(`${own} #`), Buffer.from([0xe9, 0x74, 0xe9]), Buffer.from(' ok\n')])],
+    ];
+    for (const [name, body] of shims) {
+      const shim = fixture(`own-dir-bytes-${name}/hook`, '');
+      fs.writeFileSync(shim, Buffer.concat([Buffer.from('#!/usr/bin/env bash\n'), body, Buffer.from('exec bun "$D/payload.ts"\n')]));
+      const payload = fixture(`own-dir-bytes-${name}/payload.ts`, 'const broken: number = {\n');
+      for (const loc of UTF8_LOCALES) {
+        const r = runGate([shim], { LC_ALL: loc, LANG: loc });
+        expect([name, loc, r.code], r.output).toEqual([name, loc, 1]);
+        expect(r.output).toContain(`FAILS TO PARSE ${payload}`);
+      }
+    }
+  }, TEST_TIMEOUT_MS);
+
   test("a CRLF shim's payload is still found and parsed", () => {
     fixture('crlf-shim/hook', SHIM('hook.ts').replace(/\n/g, '\r\n'));
     fixture('crlf-shim/hook.ts', 'export const ok = 1;\n');
@@ -636,6 +675,29 @@ describe('hook-syntax: sweep mechanics', () => {
     expect(codeOf(r)).toBe(1);
     expect(output).toContain('broken.sh');
     expect(output).toContain('2 checked, 0 skipped');
+  }, TEST_TIMEOUT_MS);
+
+  test('the gate finds its own root with CDPATH exported, run or sourced by a relative path', () => {
+    // `/bin/bash scripts/hook-syntax.sh` from the root, and a caller that
+    // sources it and calls hook_syntax_check_tree, both take the root from
+    // $(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P). That dirname is
+    // relative, so cd consults CDPATH and prints what it found: the captured
+    // root would hold two lines, and a healthy tree be refused as "no such
+    // directory".
+    const root = path.join(FX, 'fx', 'cdpath-root');
+    fixture('cdpath-root/scripts/hook-syntax.sh', GATE_SRC);
+    fixture('cdpath-root/ok.sh', '#!/bin/bash\nexit 0\n');
+    const env = { ...process.env, CDPATH: '.' };
+    const runs: Array<[string, Captured]> = [
+      ['run', spawnCaptured('/bin/bash', ['scripts/hook-syntax.sh', '--report'], { cwd: root, env })],
+      ['sourced', spawnCaptured('/bin/bash', ['-c', 'source scripts/hook-syntax.sh; hook_syntax_check_tree; rc=$?; hook_syntax_report; exit $rc'], { cwd: root, env })],
+    ];
+    for (const [how, r] of runs) {
+      const output = `${r.stdout}${r.stderr}`;
+      expect([how, codeOf(r)], output).toEqual([how, 0]);
+      expect(output).not.toContain('no such directory');
+      expect(output).toContain('2 checked, 0 skipped');
+    }
   }, TEST_TIMEOUT_MS);
 
   test('a nested checkout is another branch, and is not swept', () => {
@@ -877,6 +939,27 @@ describe('hook-syntax: conflict markers', () => {
     const dirty = runGate([labelled]);
     expect(dirty.code).toBe(1);
     expect(dirty.output).toContain('UNRESOLVED CONFLICT MARKERS');
+  }, TEST_TIMEOUT_MS);
+
+  test.skipIf(!UTF8_LOCALES.length)('a marker whose label holds an invalid UTF-8 byte fails under a UTF-8 locale', () => {
+    // A label is free text, such as a Latin-1 branch name or commit subject.
+    // In a UTF-8 locale BSD grep drops a match whose next byte is invalid, and
+    // GNU grep prints "binary file matches" in place of any matching line that
+    // holds one. The marker scan runs in the C locale.
+    const labels: Array<[string, Buffer]> = [
+      ['first', Buffer.concat([Buffer.from(`${LT} `), Buffer.from([0xe9]), Buffer.from('branch')])],
+      ['later', Buffer.concat([Buffer.from(`${LT} HEAD caf`), Buffer.from([0xe9])])],
+    ];
+    for (const [name, label] of labels) {
+      const p = fixture(`latin1-marker/${name}.sh`, '');
+      fs.writeFileSync(p, Buffer.concat([Buffer.from("#!/bin/bash\ncat <<'EOF'\n"), label, Buffer.from('\nEOF\n')]));
+      expect(spawnSync('/bin/bash', ['-n', p], { timeout: SPAWN_TIMEOUT_MS }).status).toBe(0); // guard the premise
+      for (const loc of UTF8_LOCALES) {
+        const r = runGate([p], { LC_ALL: loc, LANG: loc });
+        expect([name, loc, r.code], r.output).toEqual([name, loc, 1]);
+        expect(r.output).toContain(`UNRESOLVED CONFLICT MARKERS in ${p}`);
+      }
+    }
   }, TEST_TIMEOUT_MS);
 
   test('each conflicted file is named once, with all of its marker lines', () => {
