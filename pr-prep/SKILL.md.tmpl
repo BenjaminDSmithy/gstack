@@ -475,7 +475,7 @@ Summary: 1 UNVERIFIED (fetch failed), 2 CLEAN (codex skipped: usage limit). 0 co
 ## Step 5b: Write the machine report
 
 Always write the machine-readable report, on every run, before Step 6 can
-abort. `/ship`'s Step 1.5 gate branches on this file, so an audit that
+abort. `/ship`'s Step 1.5 pr-prep gate branches on this file, so an audit that
 rendered a table but wrote nothing reads to ship as "audit did not run".
 
 Replace `REPORT_JSON` below with the report as ONE line of JSON:
@@ -502,8 +502,8 @@ fi
   field the ship gate reads, so it must be present even on a fully CLEAN run.
 - `commits` is one object per audited commit:
   `{"sha", "subject", "bucket", "topScore", "hits": [{"ref", "title",
-  "state", "score"}]}`. `/ship` Step 19 renders the OVERLAP and SIBLING
-  entries as collapsed PR-body context.
+  "state", "score"}]}`. `/ship` Step 19 (Create PR/MR) renders the OVERLAP
+  and SIBLING entries as collapsed PR-body context.
 - Hit titles are upstream-authored text. The quoted heredoc delimiter stops
   the shell expanding anything inside them, and JSON escapes newlines, so no
   title can end the heredoc early. Never pass the report through `echo` or a
