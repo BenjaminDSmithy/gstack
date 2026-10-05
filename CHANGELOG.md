@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.91.27.0] - 2026-10-05
+## [1.91.28.0] - 2026-10-06
 
 **`./setup` refuses to wire in a hook that does not parse.**
 **A half-merged hook no longer gets installed and blocks every tool call on your machine.**
@@ -40,6 +40,17 @@ On a healthy tree, `./setup` registers what it did before, a few seconds later. 
 - `test/team-mode.test.ts`'s setup fixture carries the gate script.
 
 Contributed by @BenjaminDSmithy.
+
+## [1.91.27.0] - 2026-10-05
+
+**The first protected-main runtime staging run can finish, and a qualified scanner catalog can ship.**
+
+The first `cso-runtime-images.yml` dispatch on main staged all ten runtime images but four rows stopped before qualification. Both causes are fixed:
+
+- **Rails SBOMs fit the attestation limit.** BuildKit's Rails SBOM lists about 19,600 files (20 MB), past `actions/attest`'s 16 MiB cap. The runtime and scanner release workflows now sign a package-level SPDX 2.3 document (`scripts/cso-sbom-packages.jq`: packages and package relationships kept, file entries and file relationships dropped, about 0.8 MB for Rails) and reject any document whose relationships name unknown elements.
+- **A qualified scanner catalog no longer breaks every scan.** Persisted scanner outcomes record the catalog revision (`cso-scanners-<sha>-<runId>`) and each profile's workflow run URL. The 11-digit Actions run id read as a phone number to the redactor, so every `gstack-cso scan` against a real catalog failed with `REDACTION_FAILED`. Catalog revisions and exact Actions run URLs are now schema-bound helper metadata; the same digits anywhere else are still redacted. Three tests that assumed the shipped catalog is empty now hold for either state, so the scanner promotion job's own validation passes.
+- **The staged-image test probes tools in a real role container.** It ran `npm --version` and the other version probes inside the group's network anchor, which is limited to 8 processes; Node's worker threads exceed that and abort (exit 134). The probes now run in the verifier container that the same test already starts. Production code never executes in the anchor.
+
 ## [1.91.25.0] - 2026-10-05
 
 **gstack can grade a private, two-architecture `/cso` release run, and the runtime release gates check more for themselves.**
