@@ -3700,8 +3700,15 @@ if [ -n "$_CANONICAL_REAL" ] && [ "$_CANONICAL_REAL" != "$SOURCE_GSTACK_DIR" ]; 
     echo "a different checkout from this one, and the hook parse gate failed on it" >&2
     echo "(exit $_canonical_rc, details above). Every gstack hook is registered from that" >&2
     echo "tree, so this run registered and re-pointed none, and ran no migration." >&2
-    echo "Fix that checkout, or make this one the global install (./setup --global)," >&2
-    echo "then re-run ./setup." >&2
+    # --global re-points a link there. A real directory (a git clone into the
+    # skills dir) is never replaced, --global included, so it is not offered.
+    if [ -L "$CANONICAL_GSTACK_ROOT" ]; then
+      echo "Fix that checkout, or make this one the global install (./setup --global)," >&2
+      echo "then re-run ./setup." >&2
+    else
+      echo "Fix that checkout, then re-run ./setup. ./setup --global would not help:" >&2
+      echo "setup never replaces a real directory at $CANONICAL_GSTACK_ROOT." >&2
+    fi
   fi
 fi
 

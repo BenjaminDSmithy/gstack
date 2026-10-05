@@ -2305,6 +2305,8 @@ describe.skipIf(process.platform === 'win32')('setup: the canonical tree hooks a
     // and sends the reader up to the gate's details. Matched as a whole line.
     const closing = (tree: string) => `\nsetup finished WITHOUT registering hooks or running migrations: ${tree} failed the hook parse gate (see above).\n`;
     expect(r.stderr).toContain(closing(fs.realpathSync(a)));
+    // A link there is re-pointed by --global, so the refusal offers it.
+    expect(r.stderr).toContain('\nFix that checkout, or make this one the global install (./setup --global),\nthen re-run ./setup.\n');
     expect(settings(f)).not.toContain('timeline-stop-hook');
     // No migration ran, and the marker did not move: the next ./setup runs it.
     expect(ran(f)).toBe(false);
@@ -2324,6 +2326,15 @@ describe.skipIf(process.platform === 'win32')('setup: the canonical tree hooks a
     expect(real.status, real.stdout + real.stderr).toBe(1);
     expect(real.stderr).toContain(`REFUSING TO REGISTER HOOKS: ${canon} resolves to ${canon},`);
     expect(real.stderr).toContain(closing(canon));
+    // --global never replaces a real directory, so the refusal must not offer
+    // it: a user who followed that advice met the same refusal again.
+    const realFix = `\nFix that checkout, then re-run ./setup. ./setup --global would not help:\nsetup never replaces a real directory at ${canon}.\n`;
+    expect(real.stderr).toContain(realFix);
+    expect(real.stderr).not.toContain('(./setup --global)');
+    const again = setupIn(f, path.join(b, 'setup'), ['--host', 'claude', '--global', '--timeline-stop-hook']);
+    expect(again.status, again.stdout + again.stderr).toBe(1);
+    expect(fs.lstatSync(canon).isDirectory()).toBe(true);
+    expect(again.stderr).toContain(realFix);
     expect(settings(f)).not.toContain('timeline-stop-hook');
     expect(ran(f)).toBe(false);
     expect(fs.readFileSync(marker(f), 'utf-8').trim()).toBe(marked);
@@ -2341,7 +2352,7 @@ describe.skipIf(process.platform === 'win32')('setup: the canonical tree hooks a
     expect(ran(f)).toBe(true);
     expect(fs.readFileSync(marker(f), 'utf-8').trim()).toBe(fs.readFileSync(path.join(b, 'VERSION'), 'utf-8').trim());
     expect(settings(f)).toBe(before);
-  }, 4 * SETUP_RUN_TIMEOUT_MS + 60_000);
+  }, 5 * SETUP_RUN_TIMEOUT_MS + 60_000);
 
   test('control: a healthy global checkout still gets its hooks from a second checkout', () => {
     const f = makeFixture();
