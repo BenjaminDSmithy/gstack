@@ -2190,6 +2190,32 @@ describe("hook-syntax: the caller's environment", () => {
       expect(broken.output).toContain(`FAILS TO PARSE ${bad}`);
     }, TEST_TIMEOUT_MS);
   }
+
+  // nounset, from `bash -u` or `nounset` in an exported SHELLOPTS, makes bash
+  // 3.2 abort on "${a[@]}" over an empty array: the gate ended in "unbound
+  // variable" and exit 1, which setup reads as a tree that does not parse.
+  // bash 4.4 and later expand an empty array under nounset, so where /bin/bash
+  // is one this passes either way.
+  test('the gate reaches a verdict with nounset turned on by the caller', () => {
+    // A shim that names its payload through a variable it never assigns leaves
+    // the own-directory lookup's list empty, a payload parsed before any file
+    // was skipped leaves the skipped list empty, and a tree with no shell file
+    // leaves the content scans' lists empty.
+    const shim = fixture('nounset/shim/hook', '#!/usr/bin/env bash\nexec bun "$X/payload.ts"\n');
+    const followed = fixture('nounset/payload/hook', SHIM('hook.ts'));
+    fixture('nounset/payload/hook.ts', 'export const ok = 1;\n');
+    const text = path.dirname(fixture('nounset/text/notes.txt', 'hello\n'));
+    const rows: Array<[string, string[], Record<string, string>, string]> = [];
+    const targets = [[shim, '1 checked, 0 skipped'], [path.dirname(shim), '1 checked, 0 skipped'], [followed, '2 checked, 0 skipped'], [text, '0 checked, 1 skipped']];
+    for (const [target, report] of targets) {
+      rows.push([target, ['-u'], {}, report], [target, [], { SHELLOPTS: 'nounset' }, report]);
+    }
+    const got = rows.map(([target, flags, env]) => {
+      const r = spawnCaptured('/bin/bash', [...flags, GATE, '--report', target], { env: { ...process.env, ...env } });
+      return [target, flags, env, codeOf(r), `${r.stdout}${r.stderr}`.trim()];
+    });
+    expect(got).toEqual(rows.map(([target, flags, env, report]) => [target, flags, env, 0, `hook-syntax: ${report}`]));
+  }, TEST_TIMEOUT_MS);
 });
 
 // ── house rules ────────────────────────────────────────────────────────────

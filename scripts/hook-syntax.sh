@@ -157,6 +157,14 @@ unset POSIX_PEDANTIC
 # matched nothing, so a broken payload behind it passed unchecked. No grep
 # here wants an option it did not spell.
 unset GREP_OPTIONS
+#
+# nounset, from `bash -u` or `nounset` in an exported SHELLOPTS, makes bash
+# 3.2 abort on "${a[@]}" over an empty array, and a run can leave several
+# empty: a shim that hands bun "$X/..." with X assigned nowhere in it, a
+# payload parsed before any file was skipped, or a run that parsed no shell
+# file ended in "unbound variable" and exit 1, which setup reads as a tree
+# that does not parse. Nothing here relies on nounset.
+set +u
 
 # A function the caller exported (`export -f`) runs in place of the command it
 # is named after: a grep forcing --color=always passed a broken payload behind
