@@ -150,7 +150,7 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     },
     behavioral: 'external',
     externalTest: 'test/skill-e2e-ship-section-loading.test.ts',
-    maxSkeletonBytes: 79_300, // + v2.0 {{ASIDE_RESEARCH}} (Aside first, WebSearch fallback); measured 78_275
+    maxSkeletonBytes: 79_600, // + v2.0 {{ASIDE_RESEARCH}} (Aside first, WebSearch fallback) + per-worktree pr-prep report path; measured 79,304
     minUnionBytes: 181_000, // token-reduction Phases 1-2 (v1.69.x branch); measured union 201,464
     mustContain: ['VERSION', 'CHANGELOG', 'review', 'merge', 'PR'],
     // v1.58.5.0: pre-push-guard install (#2077) stacks on the shared first-run-guidance preamble.
@@ -163,7 +163,7 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // wave's headline capability) grows the union to 1.195x. Deliberate:
     // the section is on-demand (loads only for Apple store targets), so
     // per-invocation cost for non-iOS ships is one manifest line.
-    maxSizeRatio: 1.343, // fork: Step 1.5 pr-prep gate + single-select AskUserQuestion doctrine + the pr-prep fetch/codex blocks (+3,578B) over upstream's 247,937 union; measured 251,515 / 187,706 = 1.3399 (2026-09-27, v1.91.2.0).
+    maxSizeRatio: 1.348, // fork: Step 1.5 pr-prep gate + single-select AskUserQuestion doctrine + the pr-prep fetch/codex blocks (+3,578B) + the pr-prep Step 5b report writer over upstream's 247,937 union; measured 1.344 (2026-10-05).
   },
   'plan-ceo-review': {
     skill: 'plan-ceo-review',
