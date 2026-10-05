@@ -59,6 +59,16 @@ const BASELINE_PATH = path.join(REPO_ROOT, 'test', 'fixtures', 'parity-baseline-
 // separately with a hard ceiling.
 const DEFAULT_RATIO = 1.50;
 const RATIO = Number(process.env.GSTACK_SIZE_BUDGET_RATIO) || DEFAULT_RATIO;
+// Fork: per-skill allowances past RATIO for deliberate growth, each measured
+// and reasoned. Every other skill keeps the default.
+const SKILL_RATIO: Record<string, { ratio: number; reason: string }> = {
+  'gstack-upgrade': {
+    ratio: 1.76,
+    reason: 'fork: hook parse gate on every fast-forward (Step 4 +3,597B), fork-install routing (Step 0 +1,298B) '
+      + 'and host-aware install detection (Step 2 +1,057B) over upstream\'s 21,845B render; '
+      + 'measured 28,036 / 16,077 = 1.744 (2026-10-05, v1.91.24.0)',
+  },
+};
 
 interface Regression {
   skill: string;
@@ -80,7 +90,7 @@ describe('SKILL.md size budget regression (gate, free)', () => {
     for (const [skill, before] of Object.entries(baseline.skills)) {
       const after = current.skills[skill];
       if (!after) continue; // skill removed since v1.44 — not a regression
-      if (after.skillMdBytes <= before.skillMdBytes * RATIO) continue;
+      if (after.skillMdBytes <= before.skillMdBytes * Math.max(RATIO, SKILL_RATIO[skill]?.ratio ?? 0)) continue;
       regressions.push({
         skill,
         beforeBytes: before.skillMdBytes,
