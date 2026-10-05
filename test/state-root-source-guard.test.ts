@@ -158,6 +158,13 @@ describe('sourced twin missing', () => {
         // A setup that runs the hook parse gate first needs its checker.
         const gate = path.join(ROOT, 'scripts', 'hook-syntax.sh');
         if (fs.existsSync(gate)) fs.copyFileSync(gate, path.join(tree, 'scripts', 'hook-syntax.sh'));
+        // The gate follows every payload setup hands to bun and refuses a
+        // missing one before setup reaches its sources, so stub each one.
+        const setupText = fs.readFileSync(path.join(ROOT, 'setup'), 'utf-8');
+        for (const m of setupText.matchAll(/\$SOURCE_GSTACK_DIR\/([\w./-]+\.(?:ts|mjs|js))(?![\w.])/g)) {
+          fs.mkdirSync(path.dirname(path.join(tree, m[1])), { recursive: true });
+          fs.writeFileSync(path.join(tree, m[1]), 'export {};\n');
+        }
 
         const r = runCaptured([...lane.argv, path.join(tree, 'setup'), '--no-prefix', '--no-team'], tmp, { cwd: tree, env: scrubbedEnv(tmp) });
         expect(r.stderr).toContain(`cannot resolve the gstack state root: ${tree}/bin/gstack-state-root.sh is missing`);
