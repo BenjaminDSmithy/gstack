@@ -1054,6 +1054,36 @@ describe('hook-syntax: honest coverage', () => {
     expect(r.output).toContain('2 checked, 0 skipped');
   }, TEST_TIMEOUT_MS);
 
+  test('a module a swept payload imports is counted once, as checked, never also as skipped', () => {
+    // The sweep reaches lib.ts before any payload is built and counts it as
+    // skipped (no #! line, not .sh). The build then marker-scans it, so that
+    // skip is taken back. Naming the shim alone never puts lib.ts on the
+    // skipped list; only a sweep, the way setup runs the gate, reaches this.
+    fixture('counted-import/hook', SHIM('hook.ts'));
+    fixture('counted-import/hook.ts', "import { y } from './lib';\nconsole.log(y);\n");
+    fixture('counted-import/lib.ts', 'export const y: number = 2;\n');
+    const r = runGate(['--report', path.join(FX, 'fx', 'counted-import')]);
+    expect([r.code, r.output]).toEqual([0, 'hook-syntax: 3 checked, 0 skipped']);
+  }, TEST_TIMEOUT_MS);
+
+  test('a payload another payload imports is counted, and taken off skipped, once, whichever shim comes first', () => {
+    // The imported file is reached twice: as an import of the other payload's
+    // build, and as its own shim's payload, built again as an entry point. It
+    // is one file checked, and its skip is taken back once; taken back twice,
+    // the count would hide orphan.ts, which nothing reaches. The sweep meets
+    // a-hook first, so the two layouts put the importer first, then last.
+    for (const [importer, imported] of [['a', 'b'], ['b', 'a']]) {
+      const dir = `counted-entry-${importer}${imported}`;
+      fixture(`${dir}/${importer}-hook`, SHIM(`${importer}.ts`));
+      fixture(`${dir}/${importer}.ts`, `import { ok } from './${imported}.ts';\nconsole.log(ok);\n`);
+      fixture(`${dir}/${imported}-hook`, SHIM(`${imported}.ts`));
+      fixture(`${dir}/${imported}.ts`, 'export const ok: number = 1;\n');
+      fixture(`${dir}/orphan.ts`, 'export const unreached = 1;\n');
+      const r = runGate(['--report', path.join(FX, 'fx', dir)]);
+      expect([dir, r.code, r.output]).toEqual([dir, 0, 'hook-syntax: 4 checked, 1 skipped']);
+    }
+  }, TEST_TIMEOUT_MS);
+
   test('python files are compiled, and no .pyc is written', () => {
     if (spawnSync('python3', ['--version'], { timeout: SPAWN_TIMEOUT_MS }).status !== 0) return;
     const ok = fixture('py/fine.py', '#!/usr/bin/env python3\nprint("ok")\n');
@@ -1694,6 +1724,14 @@ describe('hook-syntax: bun payloads', () => {
     expect(unplaced.code).toBe(0);
     expect(unplaced.output).toContain('cannot place C:\\repo\\helper.ts');
     expect(unplaced.output).toContain('NOT marker-scanned');
+    // A cygpath that succeeds and prints nothing has not placed the file.
+    // Taken as the path, the empty line would drop the import unreported.
+    fixture('drive/bin/cygpath', '#!/bin/bash\nexit 0\n');
+    fs.chmodSync(path.join(bin, 'cygpath'), 0o755);
+    const empty = runGate(['--report', shim], { HOOK_SYNTAX_BUN: path.join(bin, 'bun'), PATH: `${bin}:${process.env.PATH}` });
+    expect(empty.code, empty.output).toBe(0);
+    expect(empty.output).toContain('cannot place C:\\repo\\helper.ts');
+    expect(empty.output).toContain('NOT marker-scanned');
     fixture('drive/bin/cygpath', `#!/bin/bash\n[ "$1" = -u ] && printf '%s\\n' ${JSON.stringify(helper)}\n`);
     fs.chmodSync(path.join(bin, 'cygpath'), 0o755);
     const placed = runGate(['--report', shim], { HOOK_SYNTAX_BUN: path.join(bin, 'bun'), PATH: `${bin}:${process.env.PATH}` });
@@ -1723,6 +1761,22 @@ describe('hook-syntax: bun payloads', () => {
       expect(r.output).toContain('MISSING PAYLOAD');
       expect(r.output).toContain('/gone.ts — handed to bun by');
     }
+  }, TEST_TIMEOUT_MS);
+
+  test('a payload two shims run is built, and reported, once', () => {
+    // An entry point is recorded once it is judged: one bun build per
+    // payload however many shims run it, so one broken file is one FAILS TO
+    // PARSE and one missing file is one MISSING PAYLOAD.
+    fixture('two-shims/a-hook', SHIM('x.ts'));
+    fixture('two-shims/b-hook', SHIM('x.ts'));
+    fixture('two-shims/c-hook', SHIM('gone.ts'));
+    fixture('two-shims/d-hook', SHIM('gone.ts'));
+    fixture('two-shims/x.ts', 'const broken: number = {\n');
+    const r = runGate(['--report', path.join(FX, 'fx', 'two-shims')]);
+    expect(r.code, r.output).toBe(1);
+    expect(r.output.split('FAILS TO PARSE').length - 1, r.output).toBe(1);
+    expect(r.output.split('MISSING PAYLOAD').length - 1, r.output).toBe(1);
+    expect(r.output).toContain('hook-syntax: 5 checked, 0 skipped');
   }, TEST_TIMEOUT_MS);
 
   test('a payload whose name holds a tab is followed: VAR ends at the first tab', () => {
