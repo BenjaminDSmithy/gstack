@@ -5,7 +5,9 @@
 #      bin/gstack-redact (HIGH fails the check; MEDIUM is an advisory count —
 #      there is no human in CI to confirm, so it never fails here).
 #   2. bun audit at critical severity.
-#   3. ShellCheck (errors only) on the setup/build shell boundary.
+#   3. ShellCheck (errors only) on the setup/build shell boundary, including
+#      the two scripts setup runs before it installs anything
+#      (scripts/heal-eol.sh, then the hook parse gate scripts/hook-syntax.sh).
 #
 # Trigger is `pull_request`, NEVER `pull_request_target`: fork PRs must not
 # get secret-bearing contexts. Diff excludes cover the planted-bug fixtures
@@ -96,3 +98,5 @@ jobs:
           scripts/ubicloud/ubi-runner.sh
           scripts/ubicloud/setup-free-suite.sh
           scripts/ubicloud/test-free.sh
+          scripts/hook-syntax.sh
+          scripts/heal-eol.sh

@@ -108,6 +108,13 @@ read-only script stays read-only), and replace the file with one `mv`, so
 nothing is deleted first and a failure leaves the original as it was. It is the
 one write the setup block makes before the gate's verdict.
 
+**The two scripts are linted in CI too.** The Quality gate workflow's ShellCheck
+step runs `shellcheck --severity=error` over `scripts/hook-syntax.sh` and
+`scripts/heal-eol.sh` alongside `setup`, on every pull request to `main`. That
+catches error-level defects that `bash -n` lets through, such as an array
+expanded as `${array[@]}` without quotes, or a `[ ... ]` with no space before
+the `]`. It lints the two scripts; it does not run them.
+
 ## What it checks
 
 The sweep reads the first line of every file in the tree (up to 512 characters,
