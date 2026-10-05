@@ -581,6 +581,33 @@ describe('hook-syntax: line endings', () => {
     }
   }, TEST_TIMEOUT_MS);
 
+  test.skipIf(!UTF8_LOCALES.length)('an own-directory assignment is matched byte for byte on glibc as well, either way', () => {
+    // The `hash` row above fails a UTF-8 match on macOS alone; glibc's regex
+    // matches it. These two differ on both. A UTF-8 regex cannot match across
+    // the invalid byte in a redirect target, so the payload went unfollowed.
+    // It reads U+2003 as [[:space:]], so an assignment bash continues past the
+    // quote, D being `<dir><U+2003>`, read as the shim's own directory, and
+    // the payload bash never runs was refused.
+    const rows: Array<[string, Buffer, boolean]> = [
+      ['latin1-log', Buffer.concat([Buffer.from('D="$(cd "$(dirname "$0")" 2>>"$HOME/hook-caf'), Buffer.from([0xe9]), Buffer.from('.log" && pwd)"\n')]), true],
+      ['emsp-after', Buffer.from('D="$(cd "$(dirname "$0")" && pwd)" \n'), false],
+    ];
+    for (const [name, assign, followed] of rows) {
+      const shim = fixture(`own-dir-glibc-${name}/hook`, '');
+      fs.writeFileSync(shim, Buffer.concat([Buffer.from('#!/usr/bin/env bash\n'), assign, Buffer.from('exec bun "$D/payload.ts"\n')]));
+      const payload = fixture(`own-dir-glibc-${name}/payload.ts`, 'const broken: number = {\n');
+      for (const loc of UTF8_LOCALES) {
+        const r = runGate([shim], { LC_ALL: loc, LANG: loc });
+        if (followed) {
+          expect([name, loc, r.code], r.output).toEqual([name, loc, 1]);
+          expect(r.output).toContain(`FAILS TO PARSE ${payload}`);
+        } else {
+          expect([name, loc, r.code, r.output]).toEqual([name, loc, 0, '']);
+        }
+      }
+    }
+  }, TEST_TIMEOUT_MS);
+
   test("a CRLF shim's payload is still found and parsed", () => {
     fixture('crlf-shim/hook', SHIM('hook.ts').replace(/\n/g, '\r\n'));
     fixture('crlf-shim/hook.ts', 'export const ok = 1;\n');
@@ -1305,6 +1332,15 @@ describe('hook-syntax: bun payloads', () => {
     expect(r.code).toBe(0);
   }, TEST_TIMEOUT_MS);
 
+  test('an indented commented-out bun invocation is not a payload either', () => {
+    // A call commented out inside a branch or a function body is indented, by
+    // spaces or a tab. Read as a call, it names a file nothing runs and
+    // refuses a healthy install.
+    const shim = '#!/usr/bin/env bash\nHERE="$(cd "$(dirname "$0")" && pwd)"\nif true; then\n  # exec bun "$HERE/never-existed.ts"\n\t# bun run "$HERE/never-existed-too.ts"\n  exit 0\nfi\n';
+    const r = runGate([fixture('commented-indented/hook', shim)]);
+    expect([r.code, r.output]).toEqual([0, '']);
+  }, TEST_TIMEOUT_MS);
+
   test('HERE is followed however the shim sets it', () => {
     // Only a variable other than HERE has to be set in the cd/pwd shape. Every
     // real shim spells HERE that way, so nothing else pins the exemption.
@@ -1547,6 +1583,22 @@ describe('hook-syntax: bun payloads', () => {
     expect(r.output).toContain('hook.ts');
   }, TEST_TIMEOUT_MS);
 
+  test('a call that is not followed does not excuse a missing payload after it on the same line', () => {
+    // Only a followed call makes the calls after it optional. One that names
+    // somewhere else, through a variable never set or one set elsewhere,
+    // leaves the next call the first one that must ship.
+    const head = '#!/usr/bin/env bash\nHERE="$(cd "$(dirname "$0")" && pwd)"\n';
+    const lines = [
+      'bun "$HOME/elsewhere.ts"; exec bun "$HERE/gone.ts"',
+      'D="$HOME/lib"\nbun "$D/elsewhere.ts"; exec bun "$HERE/gone.ts"',
+    ];
+    lines.forEach((l, i) => {
+      const r = runGate([fixture(`unfollowed-then-missing-${i}/hook`, `${head}${l}\n`)]);
+      expect([l, r.code], r.output).toEqual([l, 1]);
+      expect(r.output).toContain(`MISSING PAYLOAD ${path.join(FX, 'fx', `unfollowed-then-missing-${i}`, 'gone.ts')}`);
+    });
+  }, TEST_TIMEOUT_MS);
+
   test('a later bun call on a line, in a comment or a string, need not exist; when it does, it is parsed', () => {
     // Only the first followed call on a line must ship. A trailing comment or
     // a quoted fallback can name a file bash never runs.
@@ -1567,6 +1619,25 @@ describe('hook-syntax: bun payloads', () => {
     const both = runGate([path.join(FX, 'fx', 'later-call-both/hook')]);
     expect(both.code).toBe(1);
     expect(both.output).toContain('b.ts');
+  }, TEST_TIMEOUT_MS);
+
+  test('a later bun call need not exist when the first one on its line was already checked this run', () => {
+    // What makes a later call optional is that the line's first followed call
+    // ships, not that this run built it there first. An earlier line, or a
+    // sibling shim sharing the payload, must not make a trailing comment's
+    // path a requirement.
+    const head = '#!/usr/bin/env bash\nHERE="$(cd "$(dirname "$0")" && pwd)"\n';
+    const tail = 'exec bun "$HERE/hook.ts"  # was: bun "$HERE/old-hook.ts"';
+    const line = fixture('seen-line/hook', `${head}bun "$HERE/hook.ts"\n${tail}\n`);
+    fixture('seen-line/hook.ts', 'export const ok = 1;\n');
+    fixture('seen-shim/hook-a', SHIM('hook.ts'));
+    fixture('seen-shim/hook-b', `${head}${tail}\n`);
+    fixture('seen-shim/hook.ts', 'export const ok = 1;\n');
+    const dir = path.join(FX, 'fx', 'seen-shim');
+    for (const args of [[line], [dir], [path.join(dir, 'hook-a'), path.join(dir, 'hook-b')]]) {
+      const r = runGate(args);
+      expect([args, r.code, r.output]).toEqual([args, 0, '']);
+    }
   }, TEST_TIMEOUT_MS);
 
   test('a payload another payload imports as text is still parsed, in either order', () => {
@@ -1614,6 +1685,34 @@ describe('hook-syntax: bun payloads', () => {
     const r = runGate([fixture('missing/hook', SHIM('gone.ts'))]);
     expect(r.code).toBe(1);
     expect(r.output).toContain('MISSING PAYLOAD');
+  }, TEST_TIMEOUT_MS);
+
+  test('a missing payload on a later line, or in a later shim of the same sweep, is still a failure', () => {
+    // Only a later call on the SAME line may be absent. The first followed
+    // call on every line, in every shim the sweep reaches, must ship.
+    const head = '#!/usr/bin/env bash\nHERE="$(cd "$(dirname "$0")" && pwd)"\n';
+    const line = fixture('later-line-missing/hook', `${head}bun "$HERE/a.ts"\nexec bun "$HERE/gone.ts"\n`);
+    fixture('later-line-missing/a.ts', 'export const ok = 1;\n');
+    fixture('later-shim-missing/hook-a', SHIM('a.ts'));
+    fixture('later-shim-missing/a.ts', 'export const ok = 1;\n');
+    fixture('later-shim-missing/hook-b', SHIM('gone.ts'));
+    for (const target of [line, path.join(FX, 'fx', 'later-shim-missing')]) {
+      const r = runGate([target]);
+      expect([target, r.code], r.output).toEqual([target, 1]);
+      expect(r.output).toContain('MISSING PAYLOAD');
+      expect(r.output).toContain('/gone.ts — handed to bun by');
+    }
+  }, TEST_TIMEOUT_MS);
+
+  test('a payload whose name holds a tab is followed: VAR ends at the first tab', () => {
+    // The calls are carried as VAR<TAB>rel. A variable name cannot hold a tab
+    // and a path can, so a split at any later tab names a VAR no line sets,
+    // and the payload drops out unparsed. Swept as a directory, as setup does.
+    fixture('tab-name/hook', SHIM('a\tb.ts'));
+    const payload = fixture('tab-name/a\tb.ts', 'const broken: number = {\n');
+    const r = runGate([path.join(FX, 'fx', 'tab-name')]);
+    expect(r.code, r.output).toBe(1);
+    expect(r.output).toContain(`FAILS TO PARSE ${fs.realpathSync(payload)}`);
   }, TEST_TIMEOUT_MS);
 });
 
