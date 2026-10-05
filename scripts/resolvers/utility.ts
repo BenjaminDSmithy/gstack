@@ -426,7 +426,7 @@ elif [ -n "$_RT_SRC" ] && [ -f "$_RT_SRC/setup" ] && [ -f "$_RT_SRC/VERSION" ]; 
 elif [ -f "$_RT/setup" ] && [ -f "$_RT/VERSION" ]; then
   INSTALL_TYPE="vendored-global"
   INSTALL_DIR="$_RT"
-elif _SRC=$(${ctx.paths.binDir}/gstack-paths --get GSTACK_STATE_ROOT 2>/dev/null) && _SRC=$(awk -F '\\t' '$(1) == "${ctx.host}" && $(6) != "-" { print $(6); exit }' "$_SRC/installs.tsv" 2>/dev/null) && [ -d "$_SRC/.git" ]; then
+elif _SRC=$("$_RT/bin/gstack-paths" --get GSTACK_STATE_ROOT 2>/dev/null) && _SRC=$(awk -F '\\t' '$(1) == "${ctx.host}" && $(6) != "-" { print $(6); exit }' "$_SRC/installs.tsv" 2>/dev/null) && [ -d "$_SRC/.git" ]; then
   # The install registry names the checkout setup activated for this host (e.g. a ~/gstack clone).
   INSTALL_TYPE="global-git"
   INSTALL_DIR="$_SRC"
