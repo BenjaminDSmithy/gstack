@@ -55,6 +55,14 @@ const UTF8_LOCALES = ['C.UTF-8', 'en_US.UTF-8'].filter(loc => {
   return r.status === 0;
 });
 
+// Each turns on POSIX mode in a bash it starts. `set +o posix` unbinds the
+// first and edits the second; the third stays exported to every child.
+const POSIX_ENVS: Array<[string, Record<string, string>]> = [
+  ['POSIXLY_CORRECT=1', { POSIXLY_CORRECT: '1' }],
+  ['SHELLOPTS=posix', { SHELLOPTS: 'posix' }],
+  ['POSIX_PEDANTIC=1', { POSIX_PEDANTIC: '1' }],
+];
+
 // Whether the temp filesystem keeps a name that is not valid UTF-8. APFS
 // refuses one (EILSEQ); overlayfs and ext4 keep the bytes as given.
 const BYTE_NAMES = (() => {
@@ -505,6 +513,47 @@ describe('hook-syntax: line endings', () => {
     expect(r.stderr).toContain('rewrote setup');
     expect(fs.readFileSync(path.join(sub, 'setup'), 'utf-8')).toBe('#!/bin/bash\necho gstack\n');
   }, TEST_TIMEOUT_MS);
+
+  test('heal-eol heals with POSIX mode turned on in the caller environment', () => {
+    // /bin/bash 3.2 in POSIX mode rejects heal-eol's process substitution:
+    // it died on a syntax error, setup ignores a failed heal, and the gate
+    // then refused the CRLF copy heal-eol exists to rewrite.
+    for (const [label, extra] of POSIX_ENVS) {
+      const repo = path.join(FX, `heal-posix-${label.split('=')[0].toLowerCase()}`);
+      fs.mkdirSync(repo, { recursive: true });
+      const env = { ...process.env, HOME: repo, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+      const g = (...args: string[]) => spawnCaptured('git', args, { cwd: repo, env });
+      expect(g('init', '-q').status).toBe(0);
+      fs.writeFileSync(path.join(repo, '.gitattributes'), '* text eol=lf\n');
+      fs.writeFileSync(path.join(repo, 'clean.sh'), '#!/bin/bash\necho clean\n', { mode: 0o755 });
+      expect(g('add', '.').status).toBe(0);
+      expect(g('-c', 'user.email=you@example.com', '-c', 'user.name=t', 'commit', '-qm', 'init').status).toBe(0);
+      fs.writeFileSync(path.join(repo, 'clean.sh'), '#!/bin/bash\r\necho clean\r\n');
+      const r = spawnCaptured('/bin/bash', [path.join(ROOT, 'scripts', 'heal-eol.sh'), repo], { env: { ...env, ...extra } });
+      expect([label, r.status, r.stderr]).toEqual([label, 0, 'heal-eol: rewrote clean.sh with LF line endings\n']);
+      expect(fs.readFileSync(path.join(repo, 'clean.sh'), 'utf-8')).toBe('#!/bin/bash\necho clean\n');
+    }
+  }, TEST_TIMEOUT_MS);
+
+  test('the gate and heal-eol turn POSIX mode off above their first process substitution', () => {
+    // The POSIX-mode cases fail only where /bin/bash is 3.2: bash 5.1 and
+    // later accept a process substitution in POSIX mode, so on a Linux host
+    // they pass with these lines deleted. The gate's `-n` children inherit
+    // POSIX_PEDANTIC, which `set +o posix` leaves exported.
+    const code = (src: string) => `\n${src.split('\n').filter(l => !l.trimStart().startsWith('#')).join('\n')}`;
+    const heal = code(fs.readFileSync(path.join(ROOT, 'scripts', 'heal-eol.sh'), 'utf-8'));
+    const gate = code(GATE_SRC);
+    for (const [name, src, lines] of [
+      ['heal-eol.sh', heal, ['set +o posix']],
+      ['hook-syntax.sh', gate, ['set +o posix', 'unset POSIX_PEDANTIC']],
+    ] as const) {
+      const sub = src.indexOf('<(');
+      for (const line of lines) {
+        const at = src.indexOf(`\n${line}\n`);
+        expect([name, line, at > -1, sub > -1, at < sub]).toEqual([name, line, true, true, true]);
+      }
+    }
+  });
 
   test('setup heals line endings after choosing its bash and before it runs the gate', () => {
     const chosen = SETUP_SRC.indexOf('_HOOK_SYNTAX_BASH=/bin/bash');
@@ -2001,6 +2050,28 @@ describe("hook-syntax: the caller's environment", () => {
     // grep first on PATH applies the variable on any host.
     expectVerdictsUnchanged({ GREP_OPTIONS: '--color=always', PATH: bsdGrepPath() });
   }, TEST_TIMEOUT_MS);
+
+  // POSIXLY_CORRECT or POSIX_PEDANTIC, or `posix` in an exported SHELLOPTS,
+  // starts /bin/bash in POSIX mode, and bash 3.2 there rejects process
+  // substitution: the gate's first function holding one was a syntax error,
+  // exit 2, which setup reads as "could not run" and refuses a healthy tree
+  // on. bash 5.1 and later allow it in POSIX mode, so where /bin/bash is one
+  // these pass either way, and a source pin under line endings holds the
+  // lines that turn the mode off.
+  for (const [label, env] of POSIX_ENVS) {
+    test(`the gate reaches a verdict with ${label} exported`, () => {
+      // The healthy file holds a process substitution of its own, as the gate
+      // and heal-eol.sh do: its `-n` parse must not inherit POSIX mode.
+      const ok = fixture(`posix-env/${label.split('=')[0].toLowerCase()}/ok.sh`, '#!/bin/bash\nwhile read -r l; do :; done < <(echo x)\n');
+      const bad = fixture(`posix-env/${label.split('=')[0].toLowerCase()}/bad.sh`, '#!/bin/bash\nif true; then\n');
+      const good = runGate(['--report', ok], env);
+      expect([label, good.code], good.output).toEqual([label, 0]);
+      expect(good.output).toBe('hook-syntax: 1 checked, 0 skipped');
+      const broken = runGate([bad], env);
+      expect([label, broken.code], broken.output).toEqual([label, 1]);
+      expect(broken.output).toContain(`FAILS TO PARSE ${bad}`);
+    }, TEST_TIMEOUT_MS);
+  }
 });
 
 // ── house rules ────────────────────────────────────────────────────────────
@@ -2290,6 +2361,7 @@ describe('setup: the gate refuses before anything is installed', () => {
   // search runs too.
   const CALLER_ENVS: Array<[string, Record<string, string>]> = [
     ['GREP_OPTIONS=--color=always', { GREP_OPTIONS: '--color=always' }],
+    ...POSIX_ENVS,
   ];
   for (const [label, extra] of CALLER_ENVS) {
     test(`control: a healthy tree gets past the gate with ${label} exported`, () => {
@@ -2320,9 +2392,10 @@ describe('setup: the gate refuses before anything is installed', () => {
 
   for (const code of [2, 127]) {
     test(`a gate that exits ${code} is "could not run", never "does not parse"`, () => {
-      // 126/127: the interpreter could not exec the checker. 2: an old bash in
-      // POSIX mode rejected its process substitution. Nothing was checked, so
-      // setup still refuses, but must not send anyone hunting for a broken file.
+      // 126/127: the interpreter could not exec the checker. 2: bash could
+      // not parse the checker itself, as in a half-merged copy. Nothing was
+      // checked, so setup still refuses, but must not send anyone hunting for
+      // a broken file.
       const { dir, home } = mkSetupTree();
       fs.writeFileSync(path.join(dir, 'tree', 'scripts', 'hook-syntax.sh'), `#!/bin/bash\nexit ${code}\n`);
       const r = runSetup(dir, home);

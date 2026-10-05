@@ -22,6 +22,14 @@
 # was and says so. Best effort: no git, not a work tree, or nothing to heal is
 # a silent exit 0; the hook parse gate still judges the tree afterwards.
 # Usage: heal-eol.sh <repo-root>
+#
+# POSIXLY_CORRECT or POSIX_PEDANTIC, or `posix` in an exported SHELLOPTS,
+# starts bash in POSIX mode, where bash 3.2 rejects the process substitution
+# that feeds the loop below: the heal died on a syntax error, setup carried
+# on, and the gate then refused the CRLF copy this script exists to rewrite.
+# Turning the mode off covers all three for this script's own parse; unlike
+# the gate, it parses no other file.
+set +o posix
 set -u
 root="${1:-}"
 if [ -z "$root" ]; then

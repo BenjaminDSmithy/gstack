@@ -367,8 +367,9 @@ if [ "$_hook_syntax_rc" -eq 1 ]; then
   exit 1
 elif [ "$_hook_syntax_rc" -ne 0 ]; then
   # The gate itself exits only 0 or 1. Anything else means it never reached a
-  # verdict: 126/127 when its interpreter could not exec it, 2 when an old bash
-  # in POSIX mode (started as `sh ./setup`) rejects its process substitution.
+  # verdict: 126/127 when its interpreter could not exec it, 2 when bash could
+  # not parse the gate file itself, as in a half-merged copy. (POSIX mode is
+  # not a cause: the gate turns it off before it reads a process substitution.)
   # Still a refusal, because nothing was checked, but not a parse failure: the
   # message must not send anyone hunting for a broken file that is not there.
   echo "" >&2

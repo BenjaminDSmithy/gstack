@@ -83,7 +83,7 @@ It never falls back to a bare `PATH` bash first, which on macOS is Homebrew's
 | --- | --- | --- |
 | 0 | nothing | clean |
 | 1 | "a file that does not parse, or one that is still half-merged" | the report above it names the file |
-| anything else | "the hook parse gate could not run (… exited N …)" | nothing was checked: 126/127 when the interpreter could not exec it, 2 when an old bash in POSIX mode (`sh ./setup`) rejects its process substitution |
+| anything else | "the hook parse gate could not run (… exited N …)" | nothing was checked: 126/127 when the interpreter could not exec it, 2 when bash could not parse the gate file itself, as in a half-merged copy |
 
 Each of the last two is a refusal.
 
@@ -202,6 +202,18 @@ under that. Run directly, the gate also drops every shell function it started
 with: one the caller exported (`export -f`) runs in place of the command it is
 named after, and a `grep` forcing colour passed a broken payload while a
 `find` that printed nothing refused a healthy tree.
+
+The gate and `scripts/heal-eol.sh` both turn POSIX mode off before they read a
+process substitution. An exported `POSIXLY_CORRECT` or `POSIX_PEDANTIC`, or
+`posix` in an exported `SHELLOPTS`, starts `/bin/bash` in that mode, and bash
+3.2 there rejects process substitution: the gate exited 2 on a healthy tree,
+which `setup` refuses as "could not run", and the heal died on a syntax error
+before rewriting anything. Turning the mode off also unbinds `POSIXLY_CORRECT`
+and drops `posix` from `SHELLOPTS`, and the gate unsets `POSIX_PEDANTIC`, which
+stays exported otherwise, so the `-n` parses start without the mode and a
+`#!/bin/bash` file with a process substitution of its own is parsed as it runs
+when started normally. Under an exported `POSIX_PEDANTIC` alone, the gate had
+refused its own file and `heal-eol.sh` as files that do not parse.
 
 Silent on a healthy tree. Coverage is printed only on request:
 

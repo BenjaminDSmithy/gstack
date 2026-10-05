@@ -135,13 +135,27 @@
 # bash is Homebrew's 5.x, which can deadlock writing a heredoc body. This file
 # has no heredocs, and stays bash-3.2-clean.
 
-# What the caller exports must not reach a verdict. macOS grep (BSD 2.6.0)
-# still applies GREP_OPTIONS, without a word, as GNU grep did until 3.6, and
-# `--color=always` there wrapped every match in escapes: a payload path read
-# out of a hit named a file that does not exist, refusing a healthy tree as
-# MISSING PAYLOAD, and an own-directory assignment matched nothing, so a
-# broken payload behind it passed unchecked. No grep here wants an option it
-# did not spell.
+# Caller exports that turned a healthy tree into a refusal here, or a broken
+# one into a pass. Each is undone before the first line it would change.
+#
+# POSIXLY_CORRECT or POSIX_PEDANTIC, or `posix` in an exported SHELLOPTS,
+# starts bash in POSIX mode, and bash 3.2 there rejects process substitution:
+# the first function below that holds one was a syntax error, the gate exited
+# 2, and setup refused a healthy tree as "could not run". The mode is turned
+# off before any of them is read. That also unbinds POSIXLY_CORRECT and drops
+# `posix` from SHELLOPTS, but leaves POSIX_PEDANTIC exported, so it is unset
+# too: the `-n` parses must start without the mode, or a `#!/bin/bash` file
+# with a process substitution of its own (this one, heal-eol.sh) is refused
+# under bash 3.2 as a file that does not parse.
+set +o posix
+unset POSIX_PEDANTIC
+#
+# macOS grep (BSD 2.6.0) still applies GREP_OPTIONS, without a word (GNU grep
+# applied it until 3.6), and `--color=always` there wrapped every match in
+# escapes: a payload path read out of a hit named a file that does not exist,
+# refusing a healthy tree as MISSING PAYLOAD, and an own-directory assignment
+# matched nothing, so a broken payload behind it passed unchecked. No grep
+# here wants an option it did not spell.
 unset GREP_OPTIONS
 
 # A function the caller exported (`export -f`) runs in place of the command it
