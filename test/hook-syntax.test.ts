@@ -541,11 +541,15 @@ describe('hook-syntax: line endings', () => {
     //   mid   GNU grep prints no line that holds an invalid byte
     //   hash  macOS's regex fails a match with an invalid byte in the two
     //         bytes after its end
+    //   end   bash 5.2's read takes the newline after a trailing invalid
+    //         byte as part of a character, so the last such line never
+    //         comes back
     const own = 'D="$(cd "$(dirname "$0")" && pwd)"';
     const shims: Array<[string, Buffer]> = [
       ['nbsp', Buffer.concat([Buffer.from(`${own}\n`), Buffer.from([0xc2, 0xa0]), Buffer.from('D=/elsewhere || true\n')])],
       ['mid', Buffer.concat([Buffer.from(`${own}  # r`), Buffer.from([0xe9]), Buffer.from('pertoire\n')])],
       ['hash', Buffer.concat([Buffer.from(`${own} #`), Buffer.from([0xe9, 0x74, 0xe9]), Buffer.from(' ok\n')])],
+      ['end', Buffer.concat([Buffer.from(`${own}  # caf`), Buffer.from([0xe9]), Buffer.from('\n')])],
     ];
     for (const [name, body] of shims) {
       const shim = fixture(`own-dir-bytes-${name}/hook`, '');

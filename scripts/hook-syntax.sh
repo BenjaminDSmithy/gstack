@@ -180,6 +180,8 @@ HOOK_SYNTAX_NESTED=0
 HOOK_SYNTAX_FOLLOWED=0
 # Filled by _hook_syntax_bun_calls: one VAR<TAB>rel line per call.
 HOOK_SYNTAX_CALLS=''
+# Filled by _hook_syntax_read_list: the records it read, one per element.
+HOOK_SYNTAX_LIST=()
 
 # Paths already checked this run, newline-delimited, so a payload reached
 # through its shim is not checked again when the sweep walks past it.
@@ -503,6 +505,20 @@ _hook_syntax_bun_calls() {
   return 0
 }
 
+# Read stdin into HOOK_SYNTAX_LIST, one element per record; $1 ends a record
+# ('' for NUL). Read in the C locale: under a UTF-8 locale, bash 5.2's read
+# takes the bytes after an invalid UTF-8 byte as part of one character, the
+# delimiter included, so a record that ended in one ran on into the next, and
+# a last record that ended in one was never returned.
+_hook_syntax_read_list() {
+  local LC_ALL=C item
+  HOOK_SYNTAX_LIST=()
+  while IFS= read -r -d "$1" item; do
+    HOOK_SYNTAX_LIST+=("$item")
+  done
+  return 0
+}
+
 # $1 =~ $2 in the C locale. Returns the match status.
 _hook_syntax_match() {
   local LC_ALL=C
@@ -524,9 +540,10 @@ _hook_syntax_payload() {
   local own_dir_re='"\$\(cd "\$\(dirname "\$(0|\{BASH_SOURCE\[0\]\}|BASH_SOURCE)"\)"([[:space:]]+[0-9]*>&?[^[:space:]&;|]+)*[[:space:]]*&&[[:space:]]*pwd( -P)?\)"([[:space:];|&]|$)'
   local own_re="$assign_re$own_dir_re"
   if [ "$var" != HERE ]; then
-    while IFS= read -r ln; do
+    _hook_syntax_read_list "$HOOK_SYNTAX_NL" < <(LC_ALL=C grep -nE "$assign_re" -- "$shim" 2>/dev/null)
+    for ln in "${HOOK_SYNTAX_LIST[@]}"; do
       [ "${ln%%:*}" -lt "$at" ] && last="${ln#*:}"
-    done < <(LC_ALL=C grep -nE "$assign_re" -- "$shim" 2>/dev/null)
+    done
     [ -n "$last" ] || return 0
     _hook_syntax_match "$last" "$own_re" || return 0
   fi
