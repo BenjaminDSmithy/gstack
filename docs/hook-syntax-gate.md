@@ -66,7 +66,7 @@ a hook added to either is covered without editing the test.
 | --- | --- | --- |
 | `test/hook-syntax.test.ts` | every `bun run test`, and the required free-suite CI check | fails the suite, naming the file and line |
 | `./setup` | every install, including the one `/gstack-upgrade` runs | **refuses**: nothing is sourced, built, created, linked or registered (only the CRLF heal below runs first; the read-only `./setup --status` exits before the gate and installs nothing) |
-| `./setup`, before its migrations and hook registration | when `~/.claude/skills/gstack` resolves to a checkout other than the one setup runs from | **runs no migration and registers and re-points no hook** (one migration registers a hook itself; the next `./setup` runs them all), finishes the rest of the install, and exits 1 |
+| `./setup`, before its migrations and hook registration | when `~/.claude/skills/gstack` resolves to a checkout other than the one setup runs from (a link to another checkout, or a real directory there, which setup never replaces), on a run that installs for Claude: only such a run registers or re-points a hook into that tree. On a run for another host, the one migration that registers a hook, v1.58.0.0 inside Conductor, names the checkout setup runs from, which the row above has already gated | **runs no migration and registers and re-points no hook** (one migration registers a hook itself; the next `./setup` runs them all), finishes the rest of the install, and exits 1 |
 
 The setup block sits directly after `setup` resolves its own directory — above
 the first `source`, the first `bun` call and the first `mkdir`/`ln`/`cp`. The
@@ -189,9 +189,9 @@ import. A full sweep under `/bin/bash` took 16–24 seconds at a load average ne
 85–120. Each payload build takes 0.1–0.2 seconds; almost all the rest is the
 per-file parses, one fork each, plus one probe per interpreter.
 
-Every `setup` run pays for one sweep, and for a second when
-`~/.claude/skills/gstack` resolves to a different checkout. `./setup
---refresh-registered`, which `/gstack-upgrade` runs, re-runs `setup` once per
+Every `setup` run pays for one sweep, and a run that installs for Claude pays
+for a second when `~/.claude/skills/gstack` resolves to a different checkout.
+`./setup --refresh-registered`, which `/gstack-upgrade` runs, re-runs `setup` once per
 registered host, so an upgrade pays for 1+N sweeps. In three pairs of healthy
 `./setup --host claude` runs on 2026-10-04 (load average 78–111), an install
 took 10–12 seconds before the gate and 18–26 seconds with it. On v1.91.13, in

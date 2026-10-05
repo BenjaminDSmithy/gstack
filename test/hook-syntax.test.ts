@@ -1833,39 +1833,77 @@ describe.skipIf(process.platform === 'win32')('setup: the canonical tree hooks a
     return newest;
   };
 
+  // Every run names its host rather than lean on setup's default (claude):
+  // only a run that installs for Claude gates the canonical tree, and the
+  // --host codex run below is the contrast.
   test('a broken global checkout gets no hook registered from a clean second checkout', () => {
     const f = makeFixture();
     const a = makeSource(f, path.join(f.home, 'src-a/gstack'));
     const b = makeSource(f, path.join(f.home, 'src-b/gstack'));
+    const canon = path.join(f.home, '.claude/skills/gstack');
     // A owns the global link, installed without the Stop hook.
-    const first = setupIn(f, path.join(a, 'setup'), ['--no-timeline-stop-hook']);
+    const first = setupIn(f, path.join(a, 'setup'), ['--host', 'claude', '--no-timeline-stop-hook']);
     expect(first.status, first.stderr).toBe(0);
-    expect(fs.realpathSync(path.join(f.home, '.claude/skills/gstack'))).toBe(fs.realpathSync(a));
+    expect(fs.realpathSync(canon)).toBe(fs.realpathSync(a));
     expect(settings(f)).not.toContain('timeline-stop-hook');
     // A goes mid-merge; B is clean and asks for the Stop hook. A's opt-out is
     // saved in config, so B must ask explicitly for there to be a hook at all.
     const hook = path.join(a, 'hosts/claude/hooks/timeline-stop-hook');
     put(hook, `${fs.readFileSync(hook, 'utf-8')}\n${CONFLICT_HEREDOC}`, 0o755);
     const marked = pendingMigration(f, b);
-    const r = setupIn(f, path.join(b, 'setup'), ['--timeline-stop-hook']);
+    const r = setupIn(f, path.join(b, 'setup'), ['--host', 'claude', '--timeline-stop-hook']);
     expect(r.status, r.stdout + r.stderr).toBe(1);
     expect(r.stderr).toContain('REFUSING TO REGISTER HOOKS');
     expect(r.stderr).toContain('UNRESOLVED CONFLICT MARKERS');
-    expect(r.stderr).toContain('setup finished WITHOUT registering hooks');
+    // The last line names the tree to fix and everything this run skipped,
+    // and sends the reader up to the gate's details. Matched as a whole line.
+    const closing = (tree: string) => `\nsetup finished WITHOUT registering hooks or running migrations: ${tree} failed the hook parse gate (see above).\n`;
+    expect(r.stderr).toContain(closing(fs.realpathSync(a)));
     expect(settings(f)).not.toContain('timeline-stop-hook');
     // No migration ran, and the marker did not move: the next ./setup runs it.
     expect(ran(f)).toBe(false);
     expect(fs.readFileSync(marker(f), 'utf-8').trim()).toBe(marked);
     expect(r.stderr).toContain('ran no migration');
-  }, 2 * SETUP_RUN_TIMEOUT_MS + 60_000);
+
+    // The same broken checkout as a real directory at the global path, the
+    // README's `git clone ... ~/.claude/skills/gstack` install. setup never
+    // replaces a real directory there, and it resolves to itself, not to the
+    // checkout setup runs from, so it is gated the same way.
+    expect(fs.lstatSync(canon).isSymbolicLink()).toBe(true);
+    fs.unlinkSync(canon);
+    fs.renameSync(a, canon);
+    expect(fs.lstatSync(canon).isDirectory()).toBe(true);
+    expect(fs.realpathSync(canon)).toBe(canon);
+    const real = setupIn(f, path.join(b, 'setup'), ['--host', 'claude', '--timeline-stop-hook']);
+    expect(real.status, real.stdout + real.stderr).toBe(1);
+    expect(real.stderr).toContain(`REFUSING TO REGISTER HOOKS: ${canon} resolves to ${canon},`);
+    expect(real.stderr).toContain(closing(canon));
+    expect(settings(f)).not.toContain('timeline-stop-hook');
+    expect(ran(f)).toBe(false);
+    expect(fs.readFileSync(marker(f), 'utf-8').trim()).toBe(marked);
+
+    // A run for another host registers and re-points no hook into the Claude
+    // checkout, so that checkout does not gate it (#2347: --host codex leaves
+    // the Claude install alone). The one migration that registers a hook,
+    // v1.58.0.0 inside Conductor, names the checkout setup runs from, which
+    // setup's first sweep passed. The run finishes and runs the migration the
+    // refused runs skipped.
+    const before = settings(f);
+    const codex = setupIn(f, path.join(b, 'setup'), ['--host', 'codex']);
+    expect(codex.status, codex.stdout + codex.stderr).toBe(0);
+    expect(codex.stderr).not.toContain('REFUSING TO REGISTER HOOKS');
+    expect(ran(f)).toBe(true);
+    expect(fs.readFileSync(marker(f), 'utf-8').trim()).toBe(fs.readFileSync(path.join(b, 'VERSION'), 'utf-8').trim());
+    expect(settings(f)).toBe(before);
+  }, 4 * SETUP_RUN_TIMEOUT_MS + 60_000);
 
   test('control: a healthy global checkout still gets its hooks from a second checkout', () => {
     const f = makeFixture();
     const a = makeSource(f, path.join(f.home, 'src-a/gstack'));
     const b = makeSource(f, path.join(f.home, 'src-b/gstack'));
-    expect(setupIn(f, path.join(a, 'setup'), ['--no-timeline-stop-hook']).status).toBe(0);
+    expect(setupIn(f, path.join(a, 'setup'), ['--host', 'claude', '--no-timeline-stop-hook']).status).toBe(0);
     pendingMigration(f, b);
-    const r = setupIn(f, path.join(b, 'setup'), ['--timeline-stop-hook']);
+    const r = setupIn(f, path.join(b, 'setup'), ['--host', 'claude', '--timeline-stop-hook']);
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(r.stderr).not.toContain('REFUSING TO REGISTER HOOKS');
     expect(settings(f)).toContain(path.join(f.home, '.claude/skills/gstack/hosts/claude/hooks/timeline-stop-hook'));
