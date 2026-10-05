@@ -642,6 +642,25 @@ describe('hook-syntax: line endings', () => {
     }
   }, TEST_TIMEOUT_MS);
 
+  test.skipIf(!UTF8_LOCALES.length)('a reassignment after a line ending in an invalid UTF-8 byte is still read under a UTF-8 locale', () => {
+    // The `end` row's run-on also cut the other way: read under a UTF-8
+    // locale, bash 5.2 took the `D="$D/lib"` line into the own-directory line
+    // before it, so the gate saw no reassignment and refused the shim's own
+    // payload.ts. bash runs lib/payload.ts, which parses.
+    const shim = fixture('own-dir-reassigned/hook', '');
+    fs.writeFileSync(shim, Buffer.concat([
+      Buffer.from('#!/usr/bin/env bash\nD="$(cd "$(dirname "$0")" && pwd)"  # caf'),
+      Buffer.from([0xe9]),
+      Buffer.from('\nD="$D/lib"\nexec bun "$D/payload.ts"\n'),
+    ]));
+    fixture('own-dir-reassigned/payload.ts', 'const broken: number = {\n');
+    fixture('own-dir-reassigned/lib/payload.ts', 'export const ok = 1;\n');
+    for (const loc of ['C', ...UTF8_LOCALES]) {
+      const r = runGate([shim], { LC_ALL: loc, LANG: loc });
+      expect([loc, r.code, r.output]).toEqual([loc, 0, '']);
+    }
+  }, TEST_TIMEOUT_MS);
+
   test.skipIf(!UTF8_LOCALES.length)('an own-directory assignment is matched byte for byte on glibc as well, either way', () => {
     // The `hash` row above fails a UTF-8 match on macOS alone; glibc's regex
     // matches it. These two differ on both. A UTF-8 regex cannot match across
