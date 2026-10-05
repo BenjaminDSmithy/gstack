@@ -39,7 +39,7 @@
     "test/helpers/pty/runners/counting.ts": {"blob":"a4ac5961c136e3c18540d5b4075ef44c2b87a425","since":1},
     "test/helpers/pty/runners/floor.ts": {"blob":"a8d6d180280da349a9609af9141ccfd4205313d6","since":1},
     "test/helpers/pty/runners/observation.ts": {"blob":"032298c30ebeff0a9314749670895406169bde1d","since":1},
-    "test/helpers/pty/screen.ts": {"blob":"ba86fa311c94401ecb7c1376a7a2bc7c1c516cf6","since":1},
+    "test/helpers/pty/screen.ts": {"blob":"745e55be2f586583e45e325824dc454f6e8785ad","since":1,"nonBehavioral":"test/helpers/pty/screen.ts imports the same Bun.build xterm bundle from a temp .mjs instead of a data: URL. Bun 1.4.2 loads a 304,054-character data: specifier, so both paths load the identical module there; only Bun 1.3.13, which rejects it with NameTooLong, behaves differently"},
     "test/helpers/pty/session.ts": {"blob":"68f56d907edc6ceaa731f06dbd99c99ee77bcfe6","since":1},
     "test/helpers/session-drain-policy.ts": {"blob":"6211239dd0485e6495a700b824a7e0e61d1bcd97","since":1},
     "test/helpers/session-runner.ts": {"blob":"702444c3b3f7e129d101ea3864752e09951adb77","since":1},
