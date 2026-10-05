@@ -880,7 +880,7 @@ case "${1:-}" in
     # Run this after installing or uninstalling gbrain so your locally
     # generated SKILL.md files match your installation state.
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-    . "$SCRIPT_DIR/gstack-render-claude.sh" 2>/dev/null || { echo "$0: $SCRIPT_DIR/gstack-render-claude.sh is missing. fix: reinstall with ./setup or /gstack-upgrade" >&2; exit 1; }
+    [ -r "$SCRIPT_DIR/gstack-render-claude.sh" ] && . "$SCRIPT_DIR/gstack-render-claude.sh" 2>/dev/null || { echo "$0: $SCRIPT_DIR/gstack-render-claude.sh is missing. fix: reinstall with ./setup or /gstack-upgrade" >&2; exit 1; }
     DETECT_BIN="$SCRIPT_DIR/gstack-gbrain-detect"
     DETECTION_FILE="$STATE_DIR/gbrain-detection.json"
     mkdir -p "$STATE_DIR"
