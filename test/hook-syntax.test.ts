@@ -113,9 +113,21 @@ function codeOf(r: Captured): number {
 }
 
 function runGate(args: string[], env: Record<string, string> = {}): Run {
-  const r = spawnCaptured('/bin/bash', [GATE, ...args], { env: { ...process.env, ...env } });
+  return runGateWith('/bin/bash', args, env);
+}
+
+function runGateWith(bash: string, args: string[], env: Record<string, string> = {}): Run {
+  const r = spawnCaptured(bash, [GATE, ...args], { env: { ...process.env, ...env } });
   const killed = r.signal ? `\n[killed by ${r.signal}]` : '';
   return { code: codeOf(r), output: `${r.stdout}${r.stderr}${killed}`.trim() };
+}
+
+// /bin/bash, and the PATH bash when it is another one. /bin/bash is 3.2 on
+// macOS and 5 on Linux; a Mac's PATH bash is usually Homebrew's 5. Cases that
+// turn on how a newer bash behaves run under both, and prove it only where one
+// is new enough.
+function hostBashes(): string[] {
+  return [...new Set(['/bin/bash', spawnCaptured('/bin/bash', ['-c', 'command -v bash']).stdout.trim()])].filter(Boolean);
 }
 
 // ── the wired hooks, derived from where they are registered ────────────────
@@ -1026,6 +1038,37 @@ describe('hook-syntax: conflict markers', () => {
     }
   }, TEST_TIMEOUT_MS);
 
+  test('a NUL byte in a file does not hide its markers', () => {
+    // grep reads a file whose first 32 KiB hold a NUL as binary, and prints
+    // "Binary file X matches" (BSD) or nothing on stdout (GNU) in place of
+    // the marker lines. git sniffs only the first 8,000 bytes for a NUL, so a
+    // file with one past them is merged as text and gets real markers; bash
+    // runs a script whose NUL sits past its first two lines. A NUL on the
+    // marker line itself is dropped from the report, and bash 4.4 and later
+    // must not add a warning about dropping it.
+    const pad = `# ${'p'.repeat(77)}\n`.repeat(110);
+    const merged = `#!/bin/bash\n${pad}: '\u0000'\n${CONFLICT_HEREDOC}`;
+    const late = fixture('nul-markers/merged.sh', merged);
+    const onLine = fixture('nul-markers/label.sh', `#!/bin/bash\ncat <<'EOF'\n${LT} HEAD\u0000x\nEOF\n`);
+    const nul = fs.readFileSync(late).indexOf(0);
+    expect(nul).toBeGreaterThan(8000); // premise: git merges it as text
+    expect(nul).toBeLessThan(32 * 1024); // premise: grep reads it as binary
+    const cases: Array<[string, number]> = [
+      [late, merged.split('\n').findIndex(l => l.startsWith(LT)) + 1],
+      [onLine, 3],
+    ];
+    for (const bash of hostBashes()) {
+      for (const [p, line] of cases) {
+        expect(spawnSync(bash, ['-n', p], { timeout: SPAWN_TIMEOUT_MS }).status).toBe(0); // guard the premise
+        const r = runGateWith(bash, [p]);
+        expect([bash, p, r.code], r.output).toEqual([bash, p, 1]);
+        expect(r.output).toContain(`UNRESOLVED CONFLICT MARKERS in ${p}`);
+        expect(r.output).toContain(`${p}:${line}:${LT} HEAD`);
+        expect(r.output).not.toContain('null byte');
+      }
+    }
+  }, TEST_TIMEOUT_MS);
+
   test('each conflicted file is named once, with all of its marker lines', () => {
     const a = fixture('multi/a.sh', `#!/bin/bash\n${CONFLICT_HEREDOC}`);
     const b = fixture('multi/b.sh', `#!/bin/bash\n${CONFLICT_HEREDOC}`);
@@ -1286,6 +1329,18 @@ describe('hook-syntax: bun payloads', () => {
     expect(r.output.split('UNRESOLVED CONFLICT MARKERS').length - 1).toBe(1);
   }, TEST_TIMEOUT_MS);
 
+  test('markers in an imported module holding a NUL byte still fail', () => {
+    // bun accepts a raw NUL in source, and git merges a module as text while
+    // its first 8,000 bytes hold none; grep reads the same bytes as binary.
+    fixture('import-nul/hook', SHIM('hook.ts'));
+    fixture('import-nul/hook.ts', "import { msg, z } from './helper';\nconsole.log(msg, z);\n");
+    const mod = fixture('import-nul/helper.ts', `${conflictedLiteral('msg')}// ${'x'.repeat(9000)}\nexport const z = "\u0000";\n`);
+    expect(fs.readFileSync(mod).indexOf(0)).toBeGreaterThan(8000); // guard the premise
+    const r = runGate([path.join(FX, 'fx', 'import-nul/hook')]);
+    expect(r.code, r.output).toBe(1);
+    expect(r.output).toContain(`UNRESOLVED CONFLICT MARKERS in ${fs.realpathSync(mod)}`);
+  }, TEST_TIMEOUT_MS);
+
   test('control: an imported module that only spells a marker in an escaped string stays GREEN', () => {
     // bun re-prints such a string as a template literal with the marker at
     // column 0 of its bundle; the module's own bytes hold no marker line.
@@ -1397,6 +1452,93 @@ describe('hook-syntax: bun payloads', () => {
     expect(r.code).toBe(1);
     expect(r.output).toContain('FAILS TO PARSE');
     expect(r.output).toContain('payload.ts');
+  }, TEST_TIMEOUT_MS);
+
+  test('a shim holding a NUL byte still has its payload followed, through HERE or its own-directory variable', () => {
+    // bash runs a script whose NUL sits past its first two lines, dropping the
+    // byte. grep reads the same file as binary and prints no line for the
+    // payload search, or the own-directory assignment lookup, to read.
+    const forms: Array<[string, string]> = [
+      ['HERE', '$(cd "$(dirname "$0")" && pwd)'],
+      ['D', '$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)'],
+    ];
+    for (const [name, assign] of forms) {
+      const shim = fixture(`nul-shim-${name}/hook`, `#!/usr/bin/env bash\nset -e\n# a stray \u0000 byte\n${name}="${assign}"\nexec bun "$${name}/hook.ts"\n`);
+      fs.chmodSync(shim, 0o755);
+      const payload = fixture(`nul-shim-${name}/hook.ts`, 'const broken: number = {\n');
+      // Premise: bash parses the shim, and running it reaches the payload.
+      expect(spawnSync('/bin/bash', ['-n', shim], { timeout: SPAWN_TIMEOUT_MS }).status).toBe(0);
+      const ran = spawnCaptured(shim, [], { env: process.env });
+      expect([name, ran.status]).toEqual([name, 1]);
+      expect(ran.stderr).toContain('hook.ts');
+      for (const [target, named] of [[shim, payload], [path.dirname(shim), fs.realpathSync(payload)]]) {
+        const r = runGate([target]);
+        expect([name, target, r.code], r.output).toEqual([name, target, 1]);
+        expect(r.output).toContain(`FAILS TO PARSE ${named}`);
+      }
+    }
+  }, TEST_TIMEOUT_MS);
+
+  test('control: a healthy shim with a NUL byte on its bun line is followed, GREEN and silent under every bash', () => {
+    // The NUL reaches the gate's own command substitution, and bash 4.4 and
+    // later warn on stderr when one drops it. bash drops it at run time too.
+    const shim = fixture('nul-call/hook', `#!/usr/bin/env bash\nHERE="$(cd "$(dirname "$0")" && pwd)"\nexec bun "$HERE/hook.ts" # \u0000\n`);
+    fixture('nul-call/hook.ts', 'export {};\n');
+    for (const bash of hostBashes()) {
+      const r = runGateWith(bash, ['--report', shim]);
+      expect([bash, r.code], r.output).toEqual([bash, 0]);
+      expect(r.output).toBe('hook-syntax: 2 checked, 0 skipped');
+    }
+  }, TEST_TIMEOUT_MS);
+
+  test('a NUL byte inside a shim line is dropped as bash drops it, wherever it sits, under every bash', () => {
+    // bash drops a NUL past a script's first two lines even inside a word or
+    // a name, so each row runs as if the byte were not there. Each was misread
+    // all the same. A grep pattern matches nothing a NUL splits, so the call,
+    // the variable or the name in the first, second and fourth rows went
+    // unseen under every bash. /bin/bash 3.2's read cuts a line at its first
+    // NUL and loses the rest of it, so under it the third row went unfollowed
+    // and the last read as the shim's own directory, refusing a healthy hook.
+    // The shim's own payload.ts is broken and sub/payload.ts is valid, so a
+    // payload.ts the gate refuses is one it followed into the shim's own
+    // directory. A stub bun on PATH records the path each bash hands it, and
+    // every row is checked against that record before the gate runs.
+    const rows: Array<[string, string, string]> = [
+      ['the bun call', 'HERE="$(cd "$(dirname "$0")" && pwd)"\nexec bun\u0000 "$HERE/payload.ts"', 'payload.ts'],
+      ['the variable it names', 'HERE="$(cd "$(dirname "$0")" && pwd)"\nexec bun "$HE\u0000RE/payload.ts"', 'payload.ts'],
+      ['the own-directory assignment', 'D="$(cd "$(dirname "$0")" &&\u0000 pwd)"\nexec bun "$D/payload.ts"', 'payload.ts'],
+      ['the assigned name', 'D\u0000="$(cd "$(dirname "$0")" && pwd)"\nexec bun "$D/payload.ts"', 'payload.ts'],
+      ['the end of the own directory', 'D="$(cd "$(dirname "$0")" && pwd)"\u0000/sub\nexec bun "$D/payload.ts"', 'sub/payload.ts'],
+    ];
+    const stub = fixture('nul-in-line-bin/bun', '#!/bin/sh\nfor a in "$@"; do printf \'%s\\n\' "$a" >> "$BUN_LOG"; done\n');
+    fs.chmodSync(stub, 0o755);
+    const hooks = rows.map(([, body], i) => {
+      const hook = fixture(`nul-in-line-${i}/hook`, `#!/usr/bin/env bash\nset -e\n${body}\n`);
+      fixture(`nul-in-line-${i}/sub/payload.ts`, 'export const ok = 1;\n');
+      return hook;
+    });
+    const bashes = hostBashes();
+    const ran: Array<[string, string, string[]]> = [];
+    for (const bash of bashes) {
+      rows.forEach(([name], i) => {
+        const log = path.join(FX, 'fx', `nul-in-line-${i}`, 'bun.log');
+        fs.writeFileSync(log, '');
+        spawnCaptured(bash, [hooks[i]], { env: { ...process.env, PATH: `${path.dirname(stub)}:${process.env.PATH}`, BUN_LOG: log } });
+        const dir = path.dirname(hooks[i]);
+        ran.push([bash, name, fs.readFileSync(log, 'utf-8').split('\n').filter(Boolean).map(p => path.relative(dir, p))]);
+      });
+    }
+    expect(ran).toEqual(bashes.flatMap(bash => rows.map(([name, , runs]) => [bash, name, [runs]]))); // the premise
+    const got: Array<[string, string, number, string]> = [];
+    rows.forEach(([name], i) => {
+      const payload = fixture(`nul-in-line-${i}/payload.ts`, 'const broken: number = {\n');
+      for (const bash of bashes) {
+        const r = runGateWith(bash, [hooks[i]]);
+        const clean = !/null byte|MISSING PAYLOAD/.test(r.output);
+        got.push([bash, name, r.code, clean && r.output.includes(`FAILS TO PARSE ${payload}`) ? 'followed' : r.output]);
+      }
+    });
+    expect(got).toEqual(rows.flatMap(([name, , runs]) => bashes.map(bash => [bash, name, runs === 'payload.ts' ? 1 : 0, runs === 'payload.ts' ? 'followed' : ''])));
   }, TEST_TIMEOUT_MS);
 
   test('control: a variable that names somewhere else is not followed', () => {

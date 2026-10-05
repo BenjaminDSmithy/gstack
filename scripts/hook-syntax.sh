@@ -58,7 +58,11 @@
 #     from its own bytes
 #   * conflict markers -> scanned SEPARATELY from parsing, because a marker
 #     inside a heredoc body or a quoted string parses cleanly and is still a
-#     half-merged file
+#     half-merged file. This scan and the search for bun payloads read every
+#     file as text, NUL bytes included: bash runs a script with a NUL past its
+#     first two lines, where grep would call the file binary and print no line.
+#     bash drops each NUL as it reads, so a shim line holding one is read with
+#     the NUL dropped, wherever it sits: inside `bun`, a name or a value
 #   * a CR byte anywhere in a shell file -> refused. `bash -n` accepts plenty
 #     of CRLF scripts, but bash keeps the \r on every line at run time, so
 #     `exec bun "$HERE/x.ts"` names `x.ts\r`. A CRLF shebang is stripped for
@@ -205,6 +209,13 @@ HOOK_SYNTAX_UNPARSED=()  # every file skipped, so a payload found later is uncou
 
 HOOK_SYNTAX_NL='
 '
+# In the C locale, an ERE bracket that matches a NUL byte and nothing else.
+# bash drops every NUL from a script it runs, inside a word or a name too, so
+# a scan that must see a shim's lines as bash runs them also takes each line
+# holding a NUL, and reads it with the NUL dropped. BSD and GNU grep match a
+# NUL this way under -a. BusyBox grep ends a line at a NUL, so there a line
+# holding one is still misread.
+HOOK_SYNTAX_NUL_RE=$'[^\001-\377]'
 
 # Interpreters this run has probed, as `<name>=><verdict>` lines.
 HOOK_SYNTAX_PROBED="$HOOK_SYNTAX_NL"
@@ -342,7 +353,16 @@ _hook_syntax_markers() {
   local hits f rest hit found rc=0
   # Judged on output, not exit status: grep exits 2 when any one file errors,
   # even after printing matches in the rest.
-  hits=$(LC_ALL=C grep -nHE '^([<]{7}|[>]{7}|[|]{7}) ' -- "$@" 2>/dev/null)
+  #
+  # -a reads every file as text. Without it grep calls a file binary when its
+  # first buffer (32 KiB for BSD grep) holds a NUL, and prints "Binary file X
+  # matches" (BSD) or nothing at all on stdout (GNU) in place of the lines, so
+  # no line names the file. bash runs a script whose NUL sits past its first
+  # two lines, dropping the byte, and git merges a file as text, markers and
+  # all, while its first 8,000 bytes hold none. A NUL on a matched line is
+  # dropped from the capture too; the braces keep bash 4.4 and later from
+  # warning about it on stderr.
+  { hits=$(LC_ALL=C grep -anHE '^([<]{7}|[>]{7}|[|]{7}) ' -- "$@" 2>/dev/null); } 2>/dev/null
   [ -n "$hits" ] || return 0
   for f in "$@"; do
     found=0
@@ -454,7 +474,11 @@ _hook_syntax_check_bun() {
 _hook_syntax_payloads() {
   [ "${#HOOK_SYNTAX_SHELLS[@]}" -gt 0 ] || return 0
   local hits rest hit shim f text line calls call var rel strict k rc=0 tab=$'\t'
-  hits=$(LC_ALL=C grep -nHE 'bun[[:space:]]+(run[[:space:]]+)?"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/' -- "${HOOK_SYNTAX_SHELLS[@]}" 2>/dev/null)
+  # Read as text, and a dropped NUL kept quiet, as in _hook_syntax_markers:
+  # a NUL anywhere in a shim's first 32 KiB hid every call in it. Every line
+  # holding a NUL is taken too, and read below with the NUL dropped, as bash
+  # runs it: the pattern matches no call a NUL splits (`bun<NUL> "$HERE/x"`).
+  { hits=$(LC_ALL=C grep -anHE 'bun[[:space:]]+(run[[:space:]]+)?"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/'"|$HOOK_SYNTAX_NUL_RE" -- "${HOOK_SYNTAX_SHELLS[@]}" 2>/dev/null); } 2>/dev/null
   [ -n "$hits" ] || return 0
   rest="$hits"
   while [ -n "$rest" ]; do
@@ -520,11 +544,32 @@ _hook_syntax_bun_calls() {
 # takes the bytes after an invalid UTF-8 byte as part of one character, the
 # delimiter included, so a record that ended in one ran on into the next, and
 # a last record that ended in one was never returned.
+#
+# Not for a file's lines: /bin/bash 3.2's read cuts a record at its first NUL
+# and throws the rest of it away, as bash 4.2 does (4.3 and later drop the
+# NUL and go on). _hook_syntax_lines splits those.
 _hook_syntax_read_list() {
   local LC_ALL=C item
   HOOK_SYNTAX_LIST=()
   while IFS= read -r -d "$1" item; do
     HOOK_SYNTAX_LIST+=("$item")
+  done
+  return 0
+}
+
+# Split $1 into HOOK_SYNTAX_LIST, one element per line. $1 comes from a
+# command substitution, which every bash drops a NUL from, as it does at run
+# time. Unlike read, pattern removal cuts at the newline byte in any locale,
+# after an invalid UTF-8 byte too.
+_hook_syntax_lines() {
+  local rest="$1"
+  HOOK_SYNTAX_LIST=()
+  while [ -n "$rest" ]; do
+    HOOK_SYNTAX_LIST+=("${rest%%"$HOOK_SYNTAX_NL"*}")
+    case "$rest" in
+      *"$HOOK_SYNTAX_NL"*) rest="${rest#*"$HOOK_SYNTAX_NL"}" ;;
+      *) rest='' ;;
+    esac
   done
   return 0
 }
@@ -819,11 +864,17 @@ _hook_syntax_assigns_cmd() {
 # somewhere else. Straight-line reading: a branch or a function body is not
 # followed through.
 _hook_syntax_payload() {
-  local shim="$1" var="$2" rel="$3" at="$4" strict="$5" before="$6" dir payload ln n last=''
+  local shim="$1" var="$2" rel="$3" at="$4" strict="$5" before="$6" dir payload hits ln n last=''
   local assign_re="(^|[^A-Za-z0-9_])$var\\+?="
   local own_re='^"\$\(cd "\$\(dirname "\$(0|\{BASH_SOURCE\[0\]\}|BASH_SOURCE)"\)"([[:space:]]+[0-9]*>&?[^[:space:]&;|]+)*[[:space:]]*&&[[:space:]]*pwd( -P)?\)"$'
   if [ "$var" != HERE ]; then
-    _hook_syntax_read_list "$HOOK_SYNTAX_NL" < <(LC_ALL=C grep -nE "$assign_re" -- "$shim" 2>/dev/null)
+    # Read as text, with every line holding a NUL, as in _hook_syntax_payloads,
+    # and through a command substitution, never read: /bin/bash 3.2's read
+    # cuts a line at its first NUL, so `D="$(cd ... &&<NUL> pwd)"` named no
+    # directory and `D="$(cd ... && pwd)"<NUL>/sub` named the shim's own.
+    # _hook_syntax_assigns finds no assignment of VAR on a line without one.
+    { hits=$(LC_ALL=C grep -anE "$assign_re|$HOOK_SYNTAX_NUL_RE" -- "$shim" 2>/dev/null); } 2>/dev/null
+    _hook_syntax_lines "$hits"
     for ln in "${HOOK_SYNTAX_LIST[@]}"; do
       n="${ln%%:*}"
       if [ "$n" -lt "$at" ] && _hook_syntax_assigns "${ln#*:}" "$var"; then

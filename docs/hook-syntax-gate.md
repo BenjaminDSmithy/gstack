@@ -149,6 +149,22 @@ more than a script) and dispatches on the **shebang**, never on an extension:
   time: `exec bun "$HERE/x.ts"` names `x.ts\r`. A CRLF shebang is stripped
   before dispatch, so such a file is classified and refused, never skipped.
   Python reads CRLF source fine and is compiled as usual.
+* **NUL bytes** — the conflict-marker scan and the search for bun payloads read
+  every file as text (`grep -a`). Without that, BSD grep calls a file binary
+  when its first 32 KiB hold a NUL and prints `Binary file X matches` in place
+  of the lines, and GNU grep prints nothing on stdout, so a shim with one stray
+  NUL had its payload go unbuilt and a file with one had its markers go
+  unreported. bash still runs a script whose NUL sits past its first two lines,
+  dropping the byte, and git merges a file as text, markers and all, while its
+  first 8,000 bytes hold no NUL. A NUL on a matched line is dropped the same
+  way, without the warning bash 4.4 and later would print about it. bash drops a
+  NUL wherever it sits, inside `bun`, a variable's name or an own-directory
+  value too, and no pattern matches across one, so the payload search and the
+  own-directory lookup also take every line holding a NUL and read it with the
+  NUL dropped. Neither reads a line through `read`: `/bin/bash` 3.2's read
+  cuts a line at its first NUL and loses the rest of it. BusyBox grep ends a
+  line at a NUL and numbers what follows as the next line, so there a line
+  holding one is still misread.
 * **Shebang-less shell libraries** — the one rule that reads a name. A file
   with no `#!` line at all whose name ends in `.sh` is parsed as bash: it is a
   sourced library, and `bin/gstack-egress-lib.sh`, sourced by the SessionStart
