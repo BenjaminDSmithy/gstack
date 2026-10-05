@@ -163,7 +163,7 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // wave's headline capability) grows the union to 1.195x. Deliberate:
     // the section is on-demand (loads only for Apple store targets), so
     // per-invocation cost for non-iOS ships is one manifest line.
-    maxSizeRatio: 1.348, // fork: Step 1.5 pr-prep gate + single-select AskUserQuestion doctrine + the pr-prep fetch/codex blocks (+3,578B) + the pr-prep Step 5b report writer over upstream's 247,937 union; measured 1.344 (2026-10-05).
+    maxSizeRatio: 1.355, // fork: Step 1.5 pr-prep gate + single-select AskUserQuestion doctrine + the pr-prep fetch/codex blocks (+3,578B) + the pr-prep Step 5b report writer and Step 19 Upstream context over upstream's 247,937 union; measured 1.349 (2026-10-05).
   },
   'plan-ceo-review': {
     skill: 'plan-ceo-review',
