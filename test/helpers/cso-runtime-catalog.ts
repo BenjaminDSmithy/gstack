@@ -1,5 +1,6 @@
 import type { CsoStack } from '../../lib/cso/preparation';
 import { canonical, sha256 } from '../../lib/cso/contracts';
+import { ISOLATION_POLICY_HASH } from '../../lib/cso/docker';
 import {
   CSO_HELPER_ABI,
   type QualifiedRuntime,
@@ -96,6 +97,12 @@ export function completeRuntimeCatalogFixture(
       workflow: WORKFLOW,
       evidenceDigest: `sha256:${sha256(canonical(runtimes))}`,
       qualificationEvidenceDigest: DIGEST,
+      requalification: {
+        helperAbi: CSO_HELPER_ABI,
+        isolationPolicyHash: ISOLATION_POLICY_HASH,
+        preparationSha256: 'c'.repeat(64),
+        buildInputsRevision: 'runtime-test-build-v1',
+      },
     },
     runtimes,
   };

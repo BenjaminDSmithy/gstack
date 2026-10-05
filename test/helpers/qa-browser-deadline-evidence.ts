@@ -105,18 +105,33 @@ export function assertQaBrowserPreparation(transcript: unknown[], options: Pick<
   if (!prepared) throw new Error('QA preparation: owned nonempty report Write must complete before guard start/baseline');
 }
 
-export function assertQaBrowserCheckpoints(transcript: unknown[], options: Pick<Options, 'directory' | 'guard'>) {
+/**
+ * The fixture prompt routes browser cleanup through the guard, and a probe
+ * excludes bookkeeping. Only closing the tab with the supplied browse binary,
+ * as the whole child, is cleanup; anything else in the child is a probe.
+ */
+function browserCleanupChild(child: string[], browse: string): boolean {
+  if (child.length === 2) return child[0] === browse && child[1] === 'closetab';
+  return child.length === 3 && child[0] === 'bash' && child[1] === '-c'
+    && [`B="${browse}"; "$B" closetab`, `"${browse}" closetab`].includes(child[2].trim());
+}
+
+export function assertQaBrowserCheckpoints(transcript: unknown[], options: Pick<Options, 'directory' | 'guard' | 'browse'>) {
   const fail = (reason: string): never => { throw new Error('QA checkpoint: ' + reason); };
   const root = path.join(options.directory, 'qa-reports');
   const files = readQACheckpointFiles(root);
   const calls = browserNativeCalls(transcript);
-  const runs = calls.filter(call => {
-    if (call.parent !== null || call.name !== 'Bash' || typeof call.input.command !== 'string') return false;
+  const guarded = calls.flatMap(call => {
+    if (call.parent !== null || call.name !== 'Bash' || typeof call.input.command !== 'string') return [];
     let argv: string[];
-    try { argv = literalArgv(call.input.command); } catch { return false; }
+    try { argv = literalArgv(call.input.command); } catch { return []; }
     return ['bun', process.execPath].includes(argv[0]) && argv[1] === options.guard
-      && argv[2] === 'run' && argv[3] === path.join(root, 'deadline.json');
+      && argv[2] === 'run' && argv[3] === path.join(root, 'deadline.json')
+      ? [{ call, cleanup: argv[4] === '--' && browserCleanupChild(argv.slice(5), options.browse) }] : [];
   });
+  const runs = guarded.filter(run => !run.cleanup).map(run => run.call);
+  const lastProbe = runs.at(-1);
+  if (lastProbe && guarded.some(run => run.cleanup && run.call.start < lastProbe.end)) fail('browser cleanup preceded a probe');
   const notes: Array<{ call: (typeof calls)[number]; value: any }> = [];
   const written = new Set<string>();
   for (const call of calls) {

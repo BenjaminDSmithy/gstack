@@ -58,9 +58,35 @@ test.each(['captured-rewrite', 'verbatim-text', 'decoded-json', 'wrapped-json', 
     fs.writeFileSync(write.input.file_path, scenario === 'disk-mismatch' ? '{}' : write.input.content);
     if (scenario === 'missing-ack') events.splice(3, 1);
     if (scenario === 'late-write') events.push(...events.splice(2, 2));
-    const check = () => assertQaBrowserCheckpoints(events, { directory: f.directory, guard });
+    const check = () => assertQaBrowserCheckpoints(events, { directory: f.directory, guard, browse });
     if (scenario === 'verbatim-text' || scenario === 'decoded-json') expect(check).not.toThrow();
     else expect(check).toThrow();
+  });
+
+// CI run 37252022510 (qa-only-no-fix): after its last probe the agent closed the tab
+// through the guard, as the fixture prompt directs, and the clock had expired.
+test.each(['cleanup-after-last-probe', 'cleanup-direct-argv', 'probe-after-cleanup', 'compound-cleanup', 'other-browser-cleanup'])
+  ('guarded browser cleanup after the last probe needs no checkpoint; anything more is a probe: %s', scenario => {
+    const f = fixture();
+    const events = JSON.parse(JSON.stringify(capturedObservation.events)
+      .replaceAll('__QA_FIXTURE__', f.directory).replaceAll('__QA_GUARD__', guard).replaceAll('__QA_BROWSE__', browse));
+    const baseline = events[1].message.content[0], write = events[2].message.content[0];
+    const lines = baseline.content.split('\n');
+    const first = lines.findIndex((line: string) => line.startsWith('QA_DEADLINE '));
+    const last = lines.findLastIndex((line: string) => line.startsWith('QA_DEADLINE '));
+    write.input.content = JSON.stringify({ ...JSON.parse(write.input.content), observed: lines.slice(first + 1, last).join('\n') });
+    fs.writeFileSync(write.input.file_path, write.input.content);
+    const child = scenario === 'cleanup-direct-argv' ? quote(browse) + ' closetab'
+      : `bash -c 'B="${scenario === 'other-browser-cleanup' ? '/usr/bin/true' : browse}"; "$B" closetab${scenario === 'compound-cleanup' ? '; "$B" goto http://127.0.0.1:1/' : ''}'`;
+    const expired = events[5].message.content[0].content;
+    const cleanup = [
+      { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_cleanup', name: 'Bash', input: { command: `bun ${quote(guard)} run ${quote(path.join(f.directory, 'qa-reports/deadline.json'))} -- ${child}` } }] } },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_cleanup', content: expired, is_error: true }] } },
+    ];
+    if (scenario === 'probe-after-cleanup') events.splice(4, 0, ...cleanup); else events.push(...cleanup);
+    const check = () => assertQaBrowserCheckpoints(events, { directory: f.directory, guard, browse });
+    if (['cleanup-after-last-probe', 'cleanup-direct-argv'].includes(scenario)) expect(check).not.toThrow();
+    else expect(check).toThrow(scenario === 'probe-after-cleanup' ? 'browser cleanup preceded a probe' : 'follow-up lacks one acknowledged preceding checkpoint');
   });
 
 test('R70 retained public ordering has no completed report Write before its clock/baseline', () => {

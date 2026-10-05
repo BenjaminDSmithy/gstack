@@ -2,6 +2,7 @@
 import committedCatalog from './runtime-catalog.json';
 import type { CsoStack, PreparationPlan } from './preparation';
 import { CsoError, canonical, sha256 } from './contracts';
+import { ISOLATION_POLICY_HASH } from './docker';
 
 export const CSO_HELPER_ABI = 3;
 export type RuntimePlatform = 'linux/amd64' | 'linux/arm64';
@@ -29,12 +30,15 @@ export type RuntimeQualification = RuntimeQualificationProvenance &
         multiDatabasePassed: true;
         readinessPassed: true;
       }
+    /** Staged and attested, with no release gate measured. Only evaluation catalogs carry it. */
+    | { kind: 'evaluation' }
   );
 export interface QualifiedRuntime {
   id: string;
   stack: CsoStack | 'postgresql';
   platform: RuntimePlatform;
-  state: 'qualified';
+  /** evaluation_candidate appears only in evaluation-only catalogs, never in a distributed helper. */
+  state: 'qualified' | 'evaluation_candidate';
   image: string;
   entrypoint: '/opt/cso/entrypoint';
   helperAbi: number;
@@ -42,6 +46,18 @@ export interface QualifiedRuntime {
   policyVersion: 'cso-isolation-v1';
   qualifiedAt: string;
   qualification: RuntimeQualification;
+}
+/**
+ * The inputs a qualification was measured under. Changing any of them after
+ * promotion makes the catalog older than its inputs: requalify or withdraw.
+ */
+export interface RequalificationTriggers {
+  helperAbi: number;
+  /** ISOLATION_POLICY_HASH, which covers the cso-isolation-v1 policy version and every limit. */
+  isolationPolicyHash: string;
+  /** Digest of every source byte compiled or copied into the runtime images (preparation and verifier helpers). */
+  preparationSha256: string;
+  buildInputsRevision: string;
 }
 /** Reviewed build metadata is informative. It never makes an image executable. */
 export interface ReviewedRuntimeProfile {
@@ -66,8 +82,26 @@ export interface RuntimeCatalog {
     evidenceDigest: string;
     /** Canonical digest of the complete release-gate statements retained externally. */
     qualificationEvidenceDigest: string;
+    /** Trigger inputs measured by the staging run at sourceCommit. */
+    requalification: RequalificationTriggers;
+  };
+  /**
+   * Present only on an evaluation-only catalog (revision cso-eval-<runId>-<sha12>):
+   * staged digests from one protected staging run, built into a private
+   * evaluation helper. Setup, distribution builds and promotion refuse it.
+   */
+  evaluation?: {
+    sourceCommit: string;
+    workflow: string;
+    /** Canonical digest of the staged runtime matrix. */
+    evidenceDigest: string;
   };
   runtimes: QualifiedRuntime[];
+}
+
+export const EVALUATION_REVISION_PREFIX = 'cso-eval-';
+export function isEvaluationRuntimeCatalog(catalog: Pick<RuntimeCatalog, 'revision'>): boolean {
+  return typeof catalog?.revision === 'string' && catalog.revision.startsWith(EVALUATION_REVISION_PREFIX);
 }
 
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
@@ -120,6 +154,20 @@ function validateRuntimeIdentity(value: {
     throw new Error('INCOMPATIBLE_PREPARATION_HELPER');
 }
 
+export function validRequalificationTriggers(value: unknown, buildRevision: string): boolean {
+  const triggers = value as RequalificationTriggers;
+  return (
+    !!triggers &&
+    typeof triggers === 'object' &&
+    Object.keys(triggers).sort().join(',') ===
+      'buildInputsRevision,helperAbi,isolationPolicyHash,preparationSha256' &&
+    triggers.helperAbi === CSO_HELPER_ABI &&
+    /^[a-f0-9]{64}$/.test(triggers.isolationPolicyHash) &&
+    /^[a-f0-9]{64}$/.test(triggers.preparationSha256) &&
+    triggers.buildInputsRevision === buildRevision
+  );
+}
+
 export function validateRuntimeCatalog(value: unknown): asserts value is RuntimeCatalog {
   const catalog = value as RuntimeCatalog;
   if (
@@ -131,6 +179,7 @@ export function validateRuntimeCatalog(value: unknown): asserts value is Runtime
     !Array.isArray(catalog.runtimes)
   )
     throw new Error('INCOMPATIBLE_RUNTIME_CATALOG');
+  const evaluation = isEvaluationRuntimeCatalog(catalog);
   if (
     catalog.previousRevision !== null &&
     (typeof catalog.previousRevision !== 'string' || !BUILD_REVISION.test(catalog.previousRevision))
@@ -170,8 +219,11 @@ export function validateRuntimeCatalog(value: unknown): asserts value is Runtime
       !QUALIFICATION_WORKFLOW.test(catalog.promotion.workflow) ||
       !DIGEST.test(catalog.promotion.evidenceDigest) ||
       !DIGEST.test(catalog.promotion.qualificationEvidenceDigest) ||
+      !validRequalificationTriggers(catalog.promotion.requalification, catalog.buildRevision) ||
       Object.keys(catalog.promotion).sort().join(',') !==
-        ['evidenceDigest', 'qualificationEvidenceDigest', 'sourceCommit', 'workflow'].sort().join(',')
+        ['evidenceDigest', 'qualificationEvidenceDigest', 'requalification', 'sourceCommit', 'workflow']
+          .sort()
+          .join(',')
     ) {
       throw new Error('INVALID_RUNTIME_PROMOTION');
     }
@@ -194,7 +246,7 @@ export function validateRuntimeCatalog(value: unknown): asserts value is Runtime
       `^ghcr\\.io/garrytan/gstack/cso-staging/${runtime.stack}-${arch}@sha256:[a-f0-9]{64}$`,
     );
     if (
-      runtime.state !== 'qualified' ||
+      runtime.state !== (evaluation ? 'evaluation_candidate' : 'qualified') ||
       !IMAGE.test(runtime.image) ||
       !expectedImage.test(runtime.image) ||
       runtime.entrypoint !== '/opt/cso/entrypoint' ||
@@ -229,7 +281,10 @@ export function validateRuntimeCatalog(value: unknown): asserts value is Runtime
       'provenanceDigest',
       'verifiedProvenance',
     ];
-    if (['node', 'bun', 'python', 'rails'].includes(runtime.stack)) {
+    if (evaluation) {
+      if (qualification.kind !== 'evaluation' || keys.join(',') !== [...common].sort().join(','))
+        throw new Error('INVALID_EVALUATION_RUNTIME');
+    } else if (['node', 'bun', 'python', 'rails'].includes(runtime.stack)) {
       if (
         qualification.kind !== 'application' ||
         qualification.containmentPassed !== true ||
@@ -266,6 +321,30 @@ export function validateRuntimeCatalog(value: unknown): asserts value is Runtime
   if (catalog.runtimes.length > 0) {
     for (const identity of profileIdentities)
       if (!runtimeIdentities.has(identity)) throw new Error('INCOMPLETE_QUALIFIED_RUNTIME_MATRIX');
+  }
+  if (evaluation) {
+    const record = catalog.evaluation;
+    if (
+      !record ||
+      catalog.promotion !== undefined ||
+      catalog.runtimes.length === 0 ||
+      Object.keys(record).sort().join(',') !== 'evidenceDigest,sourceCommit,workflow' ||
+      !/^[a-f0-9]{40}$/.test(record.sourceCommit) ||
+      !QUALIFICATION_WORKFLOW.test(record.workflow) ||
+      catalog.revision !==
+        `${EVALUATION_REVISION_PREFIX}${record.workflow.slice(record.workflow.lastIndexOf('/') + 1)}-${record.sourceCommit.slice(0, 12)}` ||
+      catalog.runtimes.some(
+        (runtime) =>
+          runtime.qualification.sourceCommit !== record.sourceCommit ||
+          runtime.qualification.workflow !== record.workflow,
+      ) ||
+      record.evidenceDigest !== `sha256:${sha256(canonical(catalog.runtimes))}`
+    )
+      throw new Error('INVALID_EVALUATION_RUNTIME_CATALOG');
+    return;
+  }
+  if (catalog.evaluation !== undefined) throw new Error('INVALID_EVALUATION_RUNTIME_CATALOG');
+  if (catalog.runtimes.length > 0) {
     if (!catalog.promotion) throw new Error('MISSING_RUNTIME_PROMOTION');
     if (
       catalog.runtimes.some(
@@ -326,6 +405,11 @@ export function selectRuntime(
   catalog: RuntimeCatalog = RUNTIME_CATALOG,
 ): QualifiedRuntime {
   validateRuntimeCatalog(catalog);
+  const recorded = catalog.promotion?.requalification;
+  if (recorded && recorded.isolationPolicyHash !== ISOLATION_POLICY_HASH)
+    throw new Error(
+      'STALE_RUNTIME_QUALIFICATION: the isolation policy changed after these runtimes were qualified; requalify before target execution.',
+    );
   const matches = catalog.runtimes.filter(
     (runtime) => runtime.platform === platform && (runtime.id === profile || runtime.stack === profile),
   );

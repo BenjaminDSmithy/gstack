@@ -1890,6 +1890,12 @@ if [ "$CSO_BUILD_AVAILABLE" -eq 1 ]; then
     echo "gstack setup failed: CSO build completed without its required native artifact set" >&2
     exit 1
   fi
+  # Evaluation-only helpers embed an unqualified cso-eval-* catalog for the
+  # private evaluator. Setup never installs one, whether marked or copied bare.
+  if [ -e "$SOURCE_GSTACK_DIR/bin/.gstack-cso-evaluation" ] || "$SOURCE_GSTACK_DIR/bin/gstack-cso-launcher$_EXE" --version 2>/dev/null | grep -q '"evaluationOnly": *true'; then
+    echo "gstack setup failed: bin/ holds an evaluation-only CSO helper; remove the bin/gstack-cso-* artifacts and re-run setup" >&2
+    exit 1
+  fi
   # Runtime/scanner execution never pulls. Setup is the sole automatic
   # acquisition path: the trusted launcher validates committed catalogs,
   # rejects remote Docker contexts, and uses an empty Docker config for

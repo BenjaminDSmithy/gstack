@@ -1,10 +1,17 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { imageBuildMatrix } from '../scripts/cso-image-matrix';
+import committedCatalog from '../lib/cso/runtime-catalog.json';
+import buildInputs from '../lib/cso/images/build-inputs.json';
+import { committedImageBuildMatrix, imageBuildMatrix } from '../scripts/cso-image-matrix';
+import { catalogPromotionCandidate, requiredChecks } from '../scripts/cso-runtime-promotion';
 import { runBashScript } from './helpers/bash-script';
+import { requalificationTriggers } from '../scripts/cso-requalification';
+
+const CURRENT_TRIGGERS = await requalificationTriggers();
 
 const ROOT = resolve(import.meta.dir, '..');
 const temps: string[] = [];
@@ -250,12 +257,75 @@ describe('CSO build and distribution wiring', () => {
   });
 });
 
+const EVALUATION_REF = `sha256:${'e'.repeat(64)}`;
+const STAGING_RUN = '777';
+function dispatchedStatements(): any[] {
+  return committedImageBuildMatrix().include.map(row => ({
+    schemaVersion: 1, helperAbi: 3, state: 'qualified', buildRevision: row.inputRevision, runtimeId: row.runtimeId,
+    stack: row.stack, platform: row.platform, versions: row.versions, sourceCommit: 'a'.repeat(40),
+    image: `ghcr.io/garrytan/gstack/cso-staging/${row.stack}-${row.arch}@sha256:${Bun.hash(row.runtimeId).toString(16).padStart(64, '0')}`,
+    checks: Object.fromEntries(requiredChecks(row.stack).map(key => [key, true])),
+    evaluationRef: EVALUATION_REF,
+  }));
+}
+function ingressStep(name: string): string {
+  const job = (Bun.YAML.parse(readFileSync(join(ROOT, '.github/workflows/cso-runtime-qualification.yml'), 'utf8')) as any).jobs.qualify;
+  return (job.steps.find((step: any) => step.name === name).run as string).replaceAll('bun run scripts/', `bun run ${quote(ROOT)}/scripts/`);
+}
+function ingressFixture() {
+  const dir = mkdtempSync(join(tmpdir(), 'cso-ingress-')); temps.push(dir);
+  const bin = join(dir, 'bin'), work = join(dir, 'work'), fake = join(dir, 'gh-fixtures');
+  for (const path of [bin, work, fake]) mkdirSync(path);
+  writeFileSync(join(bin, 'gh'), [
+    '#!/bin/sh',
+    'set -eu',
+    'case "$1 $2" in',
+    '  "attestation verify")',
+    '    case "$*" in',
+    '      *https://slsa.dev/provenance/v1*) jq --arg image "$3" \'.[0].verificationResult.statement.subject[0].name = $image\' "$FAKE_GH/provenance.json" ;;',
+    '      *) jq -n --arg image "$3" \'[{verificationResult:{statement:{predicateType:"https://spdx.dev/Document/v2.3",subject:[{name:$image}]}}}]\' ;;',
+    '    esac ;;',
+    '  "api --paginate") cat "$FAKE_GH/jobs.json" ;;',
+    '  "run download") while [ "$#" -gt 0 ]; do [ "$1" != --dir ] || dir=$2; shift; done; mkdir -p "$dir"; cp "$FAKE_GH/requalification.json" "$dir/" ;;',
+    '  "api repos/"*) cat "$FAKE_GH/run.json" ;;',
+    '  *) echo "unexpected gh $*" >&2; exit 2 ;;',
+    'esac',
+    '',
+  ].join('\n'));
+  chmodSync(join(bin, 'gh'), 0o755);
+  const invocation = `https://github.com/garrytan/gstack/actions/runs/${STAGING_RUN}/attempts/1`;
+  writeFileSync(join(fake, 'provenance.json'), JSON.stringify([{ verificationResult: {
+    signature: { certificate: { runInvocationURI: invocation } },
+    statement: { predicateType: 'https://slsa.dev/provenance/v1', subject: [{ name: '' }], predicate: { runDetails: { metadata: { invocationId: invocation } } } },
+  } }]));
+  const run = (overrides: Record<string, unknown> = {}) => writeFileSync(join(fake, 'run.json'), JSON.stringify({
+    id: Number(STAGING_RUN), path: '.github/workflows/cso-runtime-images.yml', event: 'workflow_dispatch', head_branch: 'main',
+    head_sha: 'a'.repeat(40), status: 'completed', conclusion: 'success',
+    repository: { full_name: 'garrytan/gstack' }, head_repository: { full_name: 'garrytan/gstack' }, ...overrides,
+  }));
+  const jobs = (conclusion = 'success') => {
+    const list = committedImageBuildMatrix().include.map((row, index) => ({
+      name: `qualify-native ${row.runtimeId}`, run_id: Number(STAGING_RUN), status: 'completed', conclusion: index === 0 ? conclusion : 'success',
+    }));
+    writeFileSync(join(fake, 'jobs.json'), JSON.stringify([{ total_count: list.length, jobs: list }]));
+  };
+  run(); jobs();
+  writeFileSync(join(fake, 'requalification.json'), JSON.stringify(CURRENT_TRIGGERS));
+  const event = join(dir, 'event.json');
+  writeFileSync(event, JSON.stringify({ action: 'cso-runtime-qualified', client_payload: { evaluationRef: EVALUATION_REF, statements: dispatchedStatements() } }));
+  const env = { ...process.env, PATH: `${bin}:${dirname(process.execPath)}:${process.env.PATH}`, FAKE_GH: fake, GITHUB_EVENT_PATH: event,
+    GITHUB_REPOSITORY: 'garrytan/gstack', GITHUB_RUN_ID: '555' };
+  const step = (name: string) => runBashScript(ingressStep(name), { cwd: work, env, timeout: 60_000 });
+  return { work, run, jobs, step };
+}
+
 describe('CSO runtime staging gates', () => {
   test('runtime workflow shell blocks parse after GitHub expressions are substituted', () => {
     for (const relative of [
       '.github/workflows/cso-runtime-images.yml',
       '.github/workflows/cso-runtime-qualification.yml',
       '.github/workflows/cso-runtime-promote.yml',
+      '.github/workflows/cso-scanner-images.yml',
     ]) {
       const raw = readFileSync(join(ROOT, relative), 'utf8');
       const workflow = Bun.YAML.parse(raw) as any;
@@ -310,7 +380,7 @@ describe('CSO runtime staging gates', () => {
     const workflow = Bun.YAML.parse(raw) as any;
     const job = workflow.jobs['cso-docker-integration'];
     expect(job).toBeTruthy();
-    const gate = job.steps.find((step: any) => step.run === 'bun run test:cso:docker');
+    const gate = job.steps.find((step: any) => step.run?.trim() === 'bun test --max-concurrency 1 test/cso-docker-integration.test.ts');
     expect(gate.env.GSTACK_CSO_DOCKER_TESTS).toBe('1');
     expect(raw).not.toContain('secrets.');
     expect(job.steps.map((s: any) => s.run ?? '').join('\n')).toContain('docker --host unix:///var/run/docker.sock info');
@@ -384,13 +454,15 @@ describe('CSO runtime staging gates', () => {
     expect(workflow.jobs['qualify-native'].needs).toEqual(['reviewed-inputs', 'stage']);
     expect(raw).toContain('cso-staged-postgresql-${{ matrix.arch }}');
     expect(raw).toContain('GSTACK_CSO_TEST_POSTGRES_IMAGE');
-    expect(raw).toContain('acquisitionPublicOnlyPassed:true');
-    expect(raw).toContain('positiveNegativeAssertionsPassed:true');
-    expect(raw).toContain('heldOutRepairPassed:"pending"');
-    expect(raw).toContain('railsSqlitePassed:true');
-    expect(raw).toContain('railsPostgresqlPassed:true');
-    expect(raw).toContain('nativeExtensionsPassed:true');
-    expect(raw).toContain('qualified:false');
+    const qualify = workflow.jobs['qualify-native'];
+    expect(qualify.name).toBe('qualify-native ${{ matrix.runtimeId }}');
+    expect(raw).not.toMatch(/Passed:\s*true/);
+    const tested = qualify.steps.findIndex((s: any) => s.run?.includes('bun run test:cso:docker --reporter=junit --reporter-outfile=native-tests.junit.xml'));
+    const derived = qualify.steps.findIndex((s: any) => s.run?.includes('scripts/cso-native-evidence.ts --stack "$CSO_STACK" --platform "$CSO_PLATFORM"'));
+    expect(tested).toBeGreaterThanOrEqual(0);
+    expect(derived).toBe(tested + 1);
+    expect(qualify.steps[derived].run).toContain('--junit native-tests.junit.xml --staged staged-application/staged-image.json');
+    expect(qualify.steps[derived + 1].with.path.split('\n').filter(Boolean)).toEqual(['qualification-evidence.json', 'native-tests.junit.xml']);
     expect(raw).not.toContain('setup-qemu');
     expect(raw).not.toContain('git push');
     expect(raw).not.toContain('gh pr create');
@@ -412,7 +484,7 @@ describe('CSO runtime staging gates', () => {
     expect(Object.keys(workflow.on)).toEqual(['workflow_dispatch']);
     expect(job.if).toContain("github.ref == 'refs/heads/main'");
     expect(job.environment).toBe('cso-runtime-release');
-    expect(job.permissions).toMatchObject({ contents: 'write', 'pull-requests': 'write', actions: 'read', packages: 'read', 'id-token': 'write', attestations: 'write' });
+    expect(job.permissions).toMatchObject({ contents: 'write', 'pull-requests': 'write', actions: 'write', packages: 'read', 'id-token': 'write', attestations: 'write' });
     expect(raw).toContain('.head_branch == "main"');
     expect(raw).toContain('.path == ".github/workflows/cso-runtime-qualification.yml"');
     expect(raw).toContain('.event == "repository_dispatch"');
@@ -444,15 +516,51 @@ describe('CSO runtime staging gates', () => {
     for (const step of job.steps) if (step.uses) expect(step.uses).toMatch(/@[a-f0-9]{40}$/);
   });
 
+  test('catalog promotion PRs dispatch the required free-tests check on the pushed branch', () => {
+    const freeTests = Bun.YAML.parse(readFileSync(join(ROOT, '.github/workflows/free-tests.yml'), 'utf8')) as any;
+    expect(Object.keys(freeTests.on)).toContain('workflow_dispatch');
+    expect(freeTests.jobs['free-tests'].if).toBe('always()');
+    expect(freeTests.jobs['free-tests'].name).toBeUndefined();
+    for (const [relative, jobName] of [
+      ['.github/workflows/cso-runtime-promote.yml', 'propose'],
+      ['.github/workflows/cso-scanner-images.yml', 'promote-catalog'],
+    ]) {
+      const job = (Bun.YAML.parse(readFileSync(join(ROOT, relative), 'utf8')) as any).jobs[jobName];
+      expect(job.permissions.actions, relative).toBe('write');
+      const script = job.steps.find((step: any) => step.run?.includes('gh pr create')).run as string;
+      const pushed = script.indexOf('git push --set-upstream origin "$branch"');
+      const dispatched = script.indexOf('gh workflow run free-tests.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"');
+      expect(pushed, relative).toBeGreaterThan(0);
+      expect(dispatched, relative).toBeGreaterThan(pushed);
+      expect(script.indexOf('gh pr create'), relative).toBeGreaterThan(dispatched);
+    }
+  });
+
   test('private qualification enters only through an actor-restricted protected environment and re-verifies staged attestations', () => {
     const raw = readFileSync(join(ROOT, '.github/workflows/cso-runtime-qualification.yml'), 'utf8');
     const workflow = Bun.YAML.parse(raw) as any;
     const job = workflow.jobs.qualify;
     expect(Object.keys(workflow.on)).toEqual(['repository_dispatch']);
     expect(job.environment).toBe('cso-runtime-release');
-    expect(job.permissions).toEqual({ contents: 'read', packages: 'read', attestations: 'read' });
+    expect(job.permissions).toEqual({ contents: 'read', packages: 'read', attestations: 'read', actions: 'read' });
+    expect(job.needs).toBe('dispatch-summary');
+    const summary = workflow.jobs['dispatch-summary'];
+    expect(summary.permissions).toEqual({});
+    expect(summary.environment).toBeUndefined();
+    expect(summary.steps.every((step: any) => !step.uses)).toBe(true);
     expect(raw).toContain('test "$GITHUB_ACTOR" = "$CSO_QUALIFICATION_ACTOR"');
     expect(raw).toContain('.client_payload.statements | type == "array" and length == 10');
+    expect(raw).not.toContain('^ghcr.io/');
+    expect(raw).toContain('^ghcr\\\\.io/garrytan/gstack/cso-staging/');
+    const names = job.steps.map((step: any) => step.name);
+    const attested = names.indexOf('Verify each staged image attestation and normalize qualification statements');
+    const staging = names.indexOf('Require one successful protected-main staging run with every native gate passed');
+    const contract = names.indexOf('Enforce the complete release contract before retaining evidence');
+    expect(attested).toBeGreaterThan(0);
+    expect(staging).toBe(attested + 1);
+    expect(contract).toBe(staging + 1);
+    expect(job.steps[staging].run).toContain('gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?filter=latest&per_page=100"');
+    expect(job.steps.at(-1).with.path).toContain('staging-run-evidence');
     expect(raw).toContain('--cert-identity "$signer"');
     expect(raw).toContain('--source-digest "$source_commit"');
     expect(raw).toContain('--deny-self-hosted-runners');
@@ -488,5 +596,133 @@ describe('CSO runtime staging gates', () => {
     expect(qualify.steps.some((s:any)=>s.uses?.startsWith('docker/login-action@'))).toBe(false);
     expect(qualify.steps[loaded].run).toContain('scripts/cso-public-ghcr.ts verify');
     expect(qualify.steps[loaded].env.GH_TOKEN).toBe('${{ github.token }}');
+  });
+
+  test('the ingress payload gate accepts an optional evaluation reference and summarizes it before approval', () => {
+    const script = (Bun.YAML.parse(readFileSync(join(ROOT, '.github/workflows/cso-runtime-qualification.yml'), 'utf8')) as any).jobs['dispatch-summary'].steps[0].run;
+    const dir = mkdtempSync(join(tmpdir(), 'cso-dispatch-summary-')); temps.push(dir);
+    const event = join(dir, 'event.json'), summary = join(dir, 'summary.md');
+    const dispatch = (payload: unknown) => {
+      writeFileSync(event, JSON.stringify({ action: 'cso-runtime-qualified', client_payload: payload }));
+      writeFileSync(summary, '');
+      const result = runBashScript(script, { cwd: dir, env: { ...process.env, GITHUB_EVENT_PATH: event, GITHUB_STEP_SUMMARY: summary }, timeout: 30_000 });
+      return { status: result.status, summary: readFileSync(summary, 'utf8') };
+    };
+    const statements = dispatchedStatements();
+    expect(dispatch({ statements }).summary).toContain('- evaluationRef: `none`');
+    const accepted = dispatch({ evaluationRef: EVALUATION_REF, statements });
+    expect(accepted.status).toBe(0);
+    expect(accepted.summary).toContain(`- evaluationRef: \`${EVALUATION_REF}\``);
+    expect(accepted.summary).toContain(`- sourceCommit: \`${'a'.repeat(40)}\``);
+    for (const statement of statements) expect(accepted.summary).toContain(`| \`${statement.runtimeId}\` | \`${statement.image}\` |`);
+    const rejected = (payload: unknown) => expect(dispatch(payload).status).not.toBe(0);
+    rejected({ evaluationRef: 'sha256:abc', statements });
+    rejected({ evaluationRef: EVALUATION_REF.toUpperCase(), statements });
+    rejected({ evaluationRef: null, statements });
+    rejected({ evaluationRef: EVALUATION_REF, statements, finding: 'held-out detail' });
+    rejected({ statements: statements.slice(1) });
+    rejected({ statements: statements.map((item, index) => index ? item : { ...item, sourceCommit: 'b'.repeat(40) }) });
+    rejected({ statements: statements.map((item, index) => index ? item : { ...item, image: item.image.replace('ghcr.io', 'ghcrxio') }) });
+    rejected({ statements: statements.map((item, index) => index ? item : { ...item, runtimeId: 'node`|injected' }) });
+  });
+
+  test('the protected ingress binds verified statements to one successful staging run and never carries the evaluation reference', () => {
+    const fixture = ingressFixture();
+    const normalized = fixture.step('Verify each staged image attestation and normalize qualification statements');
+    expect(normalized.status, normalized.stderr).toBe(0);
+    const staging = fixture.step('Require one successful protected-main staging run with every native gate passed');
+    expect(staging.status, staging.stderr).toBe(0);
+    expect(staging.stdout).toContain('STAGING RUN VERIFIED');
+    const contract = fixture.step('Enforce the complete release contract before retaining evidence');
+    expect(contract.status, contract.stderr).toBe(0);
+
+    const statements = committedImageBuildMatrix().include.map(row =>
+      JSON.parse(readFileSync(join(fixture.work, 'qualification-evidence', row.runtimeId, 'qualified-runtime.json'), 'utf8')));
+    for (const statement of statements) {
+      expect(statement).not.toHaveProperty('evaluationRef');
+      expect(statement.workflow).toBe('https://github.com/garrytan/gstack/actions/runs/555');
+    }
+    expect(JSON.parse(readFileSync(join(fixture.work, 'qualification-evidence', 'requalification.json'), 'utf8'))).toEqual(CURRENT_TRIGGERS);
+    const candidate = JSON.stringify(catalogPromotionCandidate(committedCatalog, buildInputs, statements, CURRENT_TRIGGERS));
+    expect(candidate).not.toContain('evaluationRef');
+    expect(candidate).not.toContain('e'.repeat(64));
+
+    for (const [mutate, error] of [
+      [() => fixture.run({ conclusion: 'failure' }), 'STAGING_RUN_NOT_SUCCESSFUL'],
+      [() => fixture.jobs('failure'), 'STAGING_NATIVE_GATE_NOT_PASSED'],
+    ] as const) {
+      fixture.run(); fixture.jobs(); mutate();
+      rmSync(join(fixture.work, 'staging-run-evidence'), { recursive: true, force: true });
+      const rejected = fixture.step('Require one successful protected-main staging run with every native gate passed');
+      expect(rejected.status).not.toBe(0);
+      expect(rejected.stderr).toContain(error);
+    }
+  });
+});
+
+describe('CSO evaluation-only candidate builds', () => {
+  const revision = `cso-eval-123456-${'a'.repeat(12)}`;
+  const sha = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex');
+  function candidateFixture(catalogRevision = revision) {
+    const dir = buildFixture(), outside = mkdtempSync(join(tmpdir(), 'gstack-cso-eval-out-')); temps.push(outside);
+    mkdirSync(join(dir, 'test/helpers'), { recursive: true });
+    const catalog = join(outside, 'candidate.json');
+    writeFileSync(catalog, JSON.stringify({ schemaVersion: 1, revision: catalogRevision, runtimes: [] }, null, 2) + '\n');
+    return { dir, outside, catalog, output: join(outside, 'unit') };
+  }
+  const candidateBuild = (dir: string, catalog: string, output: string, extra = '') =>
+    runBashScript(`${fakeBuildCommand(dir, extra)} --evaluation-candidate ${quote(catalog)} --output ${quote(output)}`, { timeout: 20_000 });
+
+  test.skipIf(process.platform === 'win32')('builds a marked five-artifact producer unit outside the checkout without touching bin/', () => {
+    const { dir, outside, catalog, output } = candidateFixture();
+    const result = candidateBuild(dir, catalog, output);
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toEqual({ output, revision, evaluationOnly: true });
+    expect(readdirSync(output).sort()).toEqual(['.gstack-cso-evaluation', '.gstack-cso-generation', 'cso-eval-producer', 'gstack-cso-core', 'gstack-cso-launcher', 'gstack-cso-watchdog']);
+    const marker = JSON.parse(readFileSync(join(output, '.gstack-cso-evaluation'), 'utf8'));
+    expect(marker).toEqual({ schemaVersion: 1, evaluationOnly: true, runtimeCatalogRevision: revision, runtimeCatalogSha256: sha(catalog), coreSha256: sha(join(output, 'gstack-cso-core')) });
+    expect(readFileSync(join(output, '.gstack-cso-generation'), 'utf8')).toBe(`${marker.coreSha256}\n`);
+    expect(readdirSync(join(dir, 'bin'))).toEqual([]);
+    expect(readdirSync(outside).sort()).toEqual(['candidate.json', 'unit']);
+    const args = readFileSync(join(dir, 'compiler.log'), 'utf8').trim().split('\n');
+    const check = args.indexOf('check-evaluation');
+    expect(check).toBeGreaterThan(0); expect(args[check + 1]).toBe('lib/cso/runtime-catalog.json');
+    expect(check).toBeLessThan(args.indexOf('lib/cso/cli.ts'));
+    expect(args).toContain('scripts/cso-eval-producer.ts');
+    expect(args.filter(arg => arg === '--no-compile-autoload-package-json')).toHaveLength(2);
+  });
+
+  test.skipIf(process.platform === 'win32')('refuses unmarked catalogs, in-checkout or existing outputs, and leaves nothing on a failed check', () => {
+    const plain = candidateFixture('cso-v3-123456-aaaaaaaaaaaa');
+    expect(candidateBuild(plain.dir, plain.catalog, plain.output).status).toBe(65);
+    const inside = candidateFixture();
+    const insideResult = candidateBuild(inside.dir, inside.catalog, join(inside.dir, 'unit'));
+    expect(insideResult.status).toBe(73); expect(existsSync(join(inside.dir, 'unit'))).toBe(false);
+    const existing = candidateFixture(); mkdirSync(existing.output);
+    expect(candidateBuild(existing.dir, existing.catalog, existing.output).status).toBe(73);
+    const failed = candidateFixture();
+    expect(candidateBuild(failed.dir, failed.catalog, failed.output, 'CSO_FAIL_COMPILER_N=1').status).toBe(42);
+    expect(readdirSync(failed.outside)).toEqual(['candidate.json']);
+  });
+
+  test.skipIf(process.platform === 'win32')('distribution builds refuse an evaluation catalog in the source tree', () => {
+    const dir = buildFixture();
+    writeFileSync(join(dir, 'lib/cso/runtime-catalog.json'), JSON.stringify({ revision }, null, 2));
+    const result = fakeBuild(dir);
+    expect(result.status).toBe(65); expect(result.stderr).toContain('evaluation-only catalog');
+    expect(existsSync(join(dir, 'compiler.log'))).toBe(false);
+  });
+
+  test('the candidate gate rejects the committed release catalog', () => {
+    const result = spawnSync(process.execPath, ['scripts/cso-runtime-promotion.ts', 'check-evaluation', 'lib/cso/runtime-catalog.json'], { cwd: ROOT, encoding: 'utf8', timeout: 30_000 });
+    expect(result.status).toBe(1); expect(result.stderr).toContain('NOT_AN_EVALUATION_CATALOG');
+    expect(String((committedCatalog as { revision: string }).revision).startsWith('cso-eval-')).toBe(false);
+  });
+
+  test('setup refuses a marked or self-reporting evaluation helper', () => {
+    const setup = readFileSync(join(ROOT, 'setup'), 'utf8');
+    expect(setup).toContain('[ -e "$SOURCE_GSTACK_DIR/bin/.gstack-cso-evaluation" ]');
+    expect(setup).toContain(`--version 2>/dev/null | grep -q '"evaluationOnly": *true'`);
+    expect(setup.indexOf('bin/ holds an evaluation-only CSO helper')).toBeLessThan(setup.indexOf('provision-images --setup-summary'));
   });
 });

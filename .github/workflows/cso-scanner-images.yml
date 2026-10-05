@@ -319,7 +319,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      actions: read
+      actions: write
       packages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -365,6 +365,7 @@ jobs:
           git add lib/cso/scanner-images/catalog.json
           git commit -m "Promote qualified CSO scanner catalog"
           git push --set-upstream origin "$branch"
+          gh workflow run free-tests.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"
           cat > pr-body.md <<'EOF'
           Promotes the complete scanner catalog produced by native amd64/arm64 qualification for all six CSO scanners. Each profile binds its immutable image, exact version-output hash, offline asset hash when required, containment and adapter gates, SBOM, provenance, source commit, and workflow run.
 

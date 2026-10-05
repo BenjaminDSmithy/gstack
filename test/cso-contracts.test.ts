@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import { canonical, completeness, CsoError, fingerprint, importLegacy, renderReport, sha256, snapshotPathHandle, snapshotPathId, validateCoverage, validateFinding, validateVerificationObservation, validateVerificationRequest } from '../lib/cso/contracts';
-import { assertCanonicalStartPlan, canonicalStartPlan, canonicalTestPlan, certify, fileEffect, makeReviewArtifact, patchHash, preparePatchedSource, resolveVerificationRequestPaths, testExecutionPassed, treeHash, validateRepairBundle, validateReviewArtifact, verificationIdentity, verifyRepair } from '../lib/cso/verification';
+import { assertCanonicalStartPlan, canonicalStartPlan, canonicalTestPlan, certify, fileEffect, makeReviewArtifact, patchHash, preparePatchedSource, resolveVerificationRequestPaths, testExecutionPassed, treeHash, validateRepairBundle, validateReviewArtifact, verificationHarnessHash, verificationIdentity, verifyRepair } from '../lib/cso/verification';
 import { assertionWitnessPairHash, witnessObservationHash } from '../lib/cso/witness';
 import { admit, machinePoolRoot, markSupervised, release } from '../lib/cso/admission';
 import { sanitizeHelperForJson } from '../lib/cso/process';
@@ -210,6 +210,50 @@ describe('tested repair certificate gate',()=>{
     const missing=structuredClone(bundle);delete missing.preparation;expect(()=>validateRepairBundle(missing,missing.id,before)).toThrow('omitted project test-toolchain');
     const drift=structuredClone(bundle);drift.preparation!.after.preparedDependencyHash=h('b');drift.verification.preparationHash=sha256(canonical(drift.preparation));drift.verification.id='';const rebound=verificationIdentity(drift.verification);drift.verification.id=rebound;drift.id=rebound;expect(()=>validateRepairBundle(drift,rebound,before)).toThrow('test toolchain changed');
     expect(()=>certify({...params,preparation:undefined})).toThrow('require before/after prepared dependency proofs');expect(()=>certify({...params,preparation:{before:proof(h('9')),after:proof(h('b'))}})).toThrow('toolchain bytes changed');
+  });
+  const securityArray=()=>[
+    {name:'tenant isolation',path:'/user?id=2',method:'GET',expected:{status:403},vulnerable:{status:200,includes:'tenant-b'}},
+    {name:'tenant isolation by header',path:'/user',method:'GET',headers:{'x-tenant':'b'},expected:{status:403},vulnerable:{status:200,includes:'tenant-b'}},
+    {name:'tenant isolation on write',path:'/user/2',method:'PUT',body:'{"name":"x"}',expected:{status:404},vulnerable:{status:204}},
+  ];
+  test('single-object security keeps its pre-array request, patch, assertion, and harness bytes',()=>{
+    const root=tmp();fs.writeFileSync(path.join(root,'test.js'),'pass\n');fs.chmodSync(path.join(root,'test.js'),0o644);
+    const raw:any=request('vulnerable\n','fixed\n');raw.review.reviewedPatchHash=patchHash(raw);const req=validateVerificationRequest(raw);
+    expect(Array.isArray(req.security)).toBe(false);expect(canonical(req.security)).toBe(canonical(raw.security));
+    expect({patch:patchHash(req),request:sha256(canonical(req)),assertion:sha256(canonical({legitimate:req.legitimate,security:req.security})),harness:verificationHarnessHash(req,root)}).toEqual({
+      patch:'cc6ab00ee0160ce484a86130f94a5e6e5f588f3ec975c781c4d077647adff483',
+      request:'85175d755f1b297eb7d15dc1d9850e1ac453d1d129ceee58213d89cbab0ee59c',
+      assertion:'7e0f792881bc14137f2aa70b0662a013939749903e49eb507c1ecf48561b0771',
+      harness:'2a74b61982270fd10c071f0bdd32ae37f04de6e3eca1db6c9225132de29b4309',
+    });
+  });
+  test('security accepts a bounded array of distinct assertions that each carry an exclusive vulnerable oracle',()=>{
+    const make=(security:unknown)=>{const raw:any=request('vulnerable\n','fixed\n');raw.security=security;raw.review.reviewedPatchHash=patchHash(raw);return raw;};
+    const accepted=validateVerificationRequest(make(securityArray()));expect(accepted.security).toEqual(securityArray() as any);
+    expect(validateVerificationRequest(make(securityArray().slice(0,1))).security).toHaveLength(1);
+    const full=Array.from({length:8},(_,i)=>({...securityArray()[0],name:`payload ${i}`}));expect(validateVerificationRequest(make(full)).security).toHaveLength(8);
+    expect(()=>validateVerificationRequest(make([]))).toThrow('1..8 assertions');
+    expect(()=>validateVerificationRequest(make([...full,{...full[0],name:'payload 8'}]))).toThrow('1..8 assertions');
+    expect(()=>validateVerificationRequest(make([securityArray()[0],{...securityArray()[1],name:'tenant isolation'}]))).toThrow('names must be distinct');
+    const missing=securityArray();delete (missing[2] as any).vulnerable;expect(()=>validateVerificationRequest(make(missing))).toThrow('distinct before/fixed security oracles');
+    const overlapping=securityArray();overlapping[1].vulnerable={...overlapping[1].expected} as any;expect(()=>validateVerificationRequest(make(overlapping))).toThrow('mutually exclusive');
+    const extra:any=securityArray();extra[0].expected.untrusted='yes';expect(()=>validateVerificationRequest(make(extra))).toThrow('Unexpected security[0].expected field');
+    expect(()=>validateVerificationRequest(make([null]))).toThrow();
+  });
+  test('an array security request is observed in exactly one before/after pair and binds every member',async()=>{
+    const runDir=tmp(),snapshot=path.join(runDir,'snapshot');fs.mkdirSync(snapshot);fs.writeFileSync(path.join(snapshot,'app.js'),'vulnerable\n');const testBody='test("ok",()=>{})\n';fs.writeFileSync(path.join(snapshot,'app.test.js'),testBody);const packageJson='{"scripts":{"test":"node --test"}}';fs.writeFileSync(path.join(snapshot,'package.json'),packageJson);
+    const raw:any=request('vulnerable\n','fixed\n');raw.findingId='1abcdefabcdefabcdefabcdefabcdefa';raw.security=securityArray();raw.existingTests=[{executable:'/usr/local/bin/node',args:['--test','--test-reporter=tap','./app.test.js']}];raw.testFiles=['app.test.js'];raw.review.reviewedPatchHash=patchHash(raw);
+    const manifest:any={version:3,createdAt:'2026-01-01T00:00:00Z',expiresAt:'2026-01-08T00:00:00Z',root:'/repo',headCommit:'a'.repeat(40),originalHash:'b'.repeat(64),executionHash:treeHash(snapshot),entries:[{path:'app.js',originalHash:sha256('vulnerable\n'),executionHash:sha256('vulnerable\n'),bytes:11,mode:0o600},{path:'app.test.js',originalHash:sha256(testBody),executionHash:sha256(testBody),bytes:Buffer.byteLength(testBody),mode:0o600},{path:'package.json',originalHash:sha256(packageJson),executionHash:sha256(packageJson),bytes:packageJson.length,mode:0o600}]};
+    const runtime:any={id:'node',stack:'node',image:'runtime@sha256:'+'a'.repeat(64),platform:'linux/amd64'},phases:string[]=[];
+    const executor:any={observe:async(_source:string,phase:string,observed:any)=>{phases.push(phase);expect(observed.security).toEqual(securityArray());return{booted:true,legitimate:true,security:phase==='before'?'intended_failure':'pass',existingTests:true,output:'ok',inputHash:''};}};
+    let unattested:any;try{await verifyRepair({runId:'run',runDir,manifest,rawRequest:raw,runtime,verifier:runtime,policyHash:'c'.repeat(64),archives:[],executor,persist:false});}catch(error){unattested=error;}
+    expect(phases).toEqual(['before','after']);expect(unattested).toMatchObject({code:'PREREQUISITE',attempt:{reproduction:'reproduced',repair:'proposed',bundleIssued:false}});
+    const root=tmp(),before=path.join(root,'before'),after=path.join(root,'after');fs.mkdirSync(before);fs.writeFileSync(path.join(before,'app.js'),'vulnerable\n');fs.writeFileSync(path.join(before,'test.js'),'pass\n');
+    const plain:any=request('vulnerable\n','fixed\n');plain.security=securityArray();plain.review.reviewedPatchHash=patchHash(plain);const req=validateVerificationRequest(plain);preparePatchedSource(before,after,req);
+    const params:any={runId:'run',manifest:{originalHash:'d'.repeat(64),executionHash:treeHash(before),entries:[]},request:req,runtime:{id:'node',image:'runtime@sha256:'+'a'.repeat(64),platform:'linux/amd64'},verifier:{image:'runtime@sha256:'+'a'.repeat(64)},before:{booted:true,legitimate:true,security:'intended_failure',existingTests:true,output:'before',inputHash:''},after:{booted:true,legitimate:true,security:'pass',existingTests:true,output:'after',inputHash:''},beforeRoot:before,afterRoot:after,policyHash:'c'.repeat(64),auditPolicyHash:'e'.repeat(64),archives:[],testToolchain:'runtime'};
+    const bundle=authenticatedBundleFixture(certify(params),params);expect(validateRepairBundle(bundle,bundle.id,before).id).toBe(bundle.id);
+    const dropped=structuredClone(bundle);(dropped.request.security as any[]).pop();expect(()=>validateRepairBundle(dropped,dropped.id,before)).toThrow('harness');
+    expect(certify({...params,after:{...params.after,security:'inconclusive'}}).manifest.result).toBe('inconclusive');
   });
 });
 function tree(root:string){return sha256(JSON.stringify(fs.readdirSync(root).sort().map(p=>{const file=path.join(root,p),stat=fs.statSync(file);return[p,sha256(fs.readFileSync(file)),stat.mode&0o777];})));}

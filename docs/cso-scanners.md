@@ -99,7 +99,15 @@ deployments restricted to protected `main`. GitHub otherwise creates a reference
 missing environment without protection rules. Promotion requires an explicit
 dispatch from `main` and approval through that configured environment. It opens a pull request
 containing only the proposed source catalog, so code review remains the final
-authorization step. `previousRevision` records the prior compatible catalog for
+authorization step. Pushes and pull requests made with the workflow's
+`GITHUB_TOKEN` start no workflows, so after pushing the promotion branch the job
+dispatches [`free-tests.yml`](../.github/workflows/free-tests.yml) on it
+(`actions: write`); that run reports the required `free-tests` check on the
+branch head. Opening the PR also requires the repository setting **Allow GitHub
+Actions to create and approve pull requests** (Settings → Actions → General →
+Workflow permissions); without it `gh pr create` fails after the push and the
+dispatch, and a maintainer opens the PR from the pushed branch.
+`previousRevision` records the prior compatible catalog for
 rollback and must still equal the current `main` catalog when promotion runs.
 
 Scanner flags follow the primary documentation linked in

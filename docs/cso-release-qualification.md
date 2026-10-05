@@ -26,6 +26,12 @@ The dedicated Windows CI job checks startup, argument forwarding, and runtime
 injection separately from static audit and private-state support. POSIX
 watchdog execution remains unavailable there.
 
+No qualified runtime or scanner image exists yet, so contained runtime and
+scanner execution is unavailable and setup preloads nothing: the scanner
+catalog is empty while its build inputs await review, and the runtime catalog's
+profiles stay unqualified until a private evaluator, still being built, can
+qualify them.
+
 Every successful fresh install or upgrade asks the trusted launcher to preload
 the current host platform's qualified runtime and scanner images. This is the
 only automatic image acquisition path. It first validates the committed
@@ -48,10 +54,12 @@ egress. `gstack-cso doctor --repo PATH` never downloads; it reports a qualified
 profile unavailable until that exact digest and platform are already present
 in the local daemon.
 
-The ordinary free suite exercises contracts without requiring Docker. The
-`cso-docker-integration` CI job sets `GSTACK_CSO_DOCKER_TESTS=1`; unavailable Docker
-or missing containment prerequisites fail that job. Run it locally with a
-working local daemon:
+The ordinary free suite exercises contracts without requiring Docker. The free
+lane's `cso-docker-integration` job sets `GSTACK_CSO_DOCKER_TESTS=1` and runs
+`test/cso-docker-integration.test.ts`; unavailable Docker or missing containment
+prerequisites fail that job. The node-lifecycle and stack-cold files need a
+staged stack image, so they run in the CSO runtime workflows through
+`test:cso:docker`. Run all three locally with a working local daemon:
 
 ```bash
 bun run build:cso
@@ -117,7 +125,20 @@ the embedded verifier against a loopback service with both a passing control
 and an intentionally failing control, alongside the containment suite. After
 all staging rows finish, native qualification jobs run the matching cold-start
 journey described above. The Node row additionally runs the complete lifecycle
-journey.
+journey. Each native job is named `qualify-native <runtimeId>` and runs the
+Docker suites with Bun's JUnit reporter
+(`--reporter=junit --reporter-outfile=native-tests.junit.xml`).
+[`cso-native-evidence.ts`](../scripts/cso-native-evidence.ts) maps every native
+check key to the named tests that prove it for that stack and records the key
+true only when the report has no failed testcase and each named test appears
+once, passed, and made at least one assertion. A test that the environment
+skips, such as the staged-runtime smoke test without `GSTACK_CSO_TEST_IMAGE`,
+reports as skipped and leaves its checks false; any false native check fails the
+job. The pending private checks are the stack's required release gates from
+`cso-runtime-promotion.ts` minus its native keys: `secretCanaryPassed` and
+`watchdogCleanupPassed` for PostgreSQL, plus `heldOutRepairPassed` and
+`accuracyGatesPassed` for application stacks. The job uploads the JUnit report
+beside `qualification-evidence.json`, which records its digest.
 Registry publication is staging, not runtime qualification.
 
 GitHub Container Registry creates new packages private. Before a staging digest
@@ -135,6 +156,12 @@ staging, qualification, and promotion. Both
 runtime and scanner promotion repeat this anonymous pull check on fresh hosted
 runners before opening a catalog PR.
 
+The first protected-main staging run therefore stops at the public-package
+check by design: its push creates the ten `cso-staging` packages as private. A
+package administrator makes those ten packages public, then dispatches the
+staging workflow again. Later runs publish new digests into the same public
+packages.
+
 Review the retained staging artifacts together with all checks in
 [`qualification.json`](../lib/cso/images/qualification.json). Cold-start fixtures,
 held-out repair evaluations, precision/recall thresholds, crash cleanup, and all
@@ -150,7 +177,16 @@ the committed build profiles, and emits an attested
 candidate attestation against its workflow identity, protected-main source ref,
 source commit, and exact file digest. It then compares `previousRevision` with
 the source catalog, commits those same bytes to a fresh branch, and opens a
-normal review PR. A concurrent catalog promotion fails the compare-and-swap or
+normal review PR. Pushes and pull requests made with the workflow's
+`GITHUB_TOKEN` start no workflows, so after pushing the branch the job dispatches
+[`free-tests.yml`](../.github/workflows/free-tests.yml) on it with
+`gh workflow run free-tests.yml --ref <branch>` (its `actions: write` grant).
+That run reports the required `free-tests` check on the branch head the PR
+proposes. Opening the PR also requires the repository setting **Allow GitHub
+Actions to create and approve pull requests** (Settings → Actions → General →
+Workflow permissions). Without it `gh pr create` fails after the push and the
+dispatch, and a maintainer opens the PR from the pushed branch. A concurrent
+catalog promotion fails the compare-and-swap or
 produces a merge conflict instead of silently replacing the newer matrix.
 The catalog stores a separately recomputable digest of the retained runtime
 matrix and the digest of the complete external qualification statements. The
@@ -163,16 +199,99 @@ The public qualification ingress is
 Set the protected environment variable `CSO_QUALIFICATION_ACTOR` to the GitHub
 service account used by the private evaluator. After its held-out assertions and
 accuracy run pass, that account sends a `repository_dispatch` event of type
-`cso-runtime-qualified`. The payload has one key, `statements`, containing ten
-objects with `schemaVersion`, `helperAbi`, `state`, `buildRevision`,
-`runtimeId`, `stack`, `platform`, immutable `image`, exact `versions`,
-`sourceCommit`, and the true-valued `checks` accepted by
-`cso-runtime-promotion.ts`. The ingress checks the actor and matrix size,
-re-verifies both OCI attestations against the protected staging workflow and
-source commit, replaces the workflow, time, SBOM digest, and provenance digest
-with values it observed, then runs the catalog generator as its final schema
-gate. It uploads the statements only after that gate passes. The payload carries
-no held-out assertion, application source, finding, or repair bundle.
+`cso-runtime-qualified`. The payload has the key `statements` and, optionally,
+`evaluationRef`; no other key is accepted. `statements` contains ten objects
+with `schemaVersion`, `helperAbi`, `state`, `buildRevision`, `runtimeId`,
+`stack`, `platform`, immutable `image`, exact `versions`, `sourceCommit`, and
+the true-valued `checks` accepted by `cso-runtime-promotion.ts`. All ten name
+one `sourceCommit`. `evaluationRef` is an opaque `sha256:<64 hex>` reference
+that lets the approver match the dispatch to the private evaluator's verdict.
+An unprotected `dispatch-summary` job with no token permissions validates the
+payload shape and writes `evaluationRef`, the source commit, and each
+`runtimeId` and `image` pair to the run's job summary. The reviewer reads it
+there before approving the protected `qualify` job. `evaluationRef` never enters
+the normalized statements, the uploaded evidence, or the catalog.
+
+The protected job checks the actor, re-verifies both OCI attestations against
+the protected staging workflow and source commit, and replaces the workflow,
+time, SBOM digest, and provenance digest with values it observed. Attestations
+are signed in the staging job, before native qualification runs, so a valid
+attestation alone does not show that native gates passed.
+[`cso-staging-run.ts`](../scripts/cso-staging-run.ts) therefore resolves the
+staging run from each verified SLSA provenance statement: the predicate's
+`runDetails.metadata.invocationId` must equal the signing certificate's
+`runInvocationURI`, and all ten images must resolve to the same run of this
+repository. Through the Actions API (`actions: read`) the ingress then requires
+that run to be `.github/workflows/cso-runtime-images.yml`, started by
+`workflow_dispatch` on `main` in this repository, completed with conclusion
+`success`, and built from the statements' `sourceCommit`. The latest attempt's
+`qualify-native <runtimeId>` jobs, read across every page of the jobs API, must
+be exactly one per committed matrix row (ten) and all `success`. The run and job
+records are retained as `staging-run-evidence`. The catalog generator runs last
+as the final schema gate, and the ingress uploads the statements only after that
+gate passes. The payload carries no held-out assertion, application source,
+finding, or repair bundle.
+
+A qualification stays valid only while the inputs it was measured under are
+unchanged. [`cso-requalification.ts`](../scripts/cso-requalification.ts) defines
+four requalification triggers: the helper ABI (`CSO_HELPER_ABI`), the isolation
+policy (`ISOLATION_POLICY_HASH`, which covers the `cso-isolation-v1` policy
+version and every limit), `preparationSha256` (a digest of every source byte
+compiled or copied into a runtime image: the import closure of the image's
+verifier and preparation helpers plus the image build context), and the
+`build-inputs.json` revision. The staging run's `reviewed-inputs` job records
+these values for its source commit as the `cso-requalification-triggers`
+artifact. The ingress downloads that artifact from the verified staging run
+into the evidence, and the promotion generator writes it into
+`promotion.requalification`. Generation refuses triggers that differ from the
+promoting checkout, so a trigger that changed between staging and promotion
+requires a new staging run. The free suite's
+[`cso-requalification.test.ts`](../test/cso-requalification.test.ts) compares
+the committed catalog's recorded triggers with the current source and fails
+when any differs. A change to a trigger therefore either lands with a
+requalified catalog or withdraws the catalog's runtimes in the same pull
+request. Independently, the helper refuses to select a runtime recorded under
+another isolation policy.
+
+The judge observes held-out attacks in one boot: a `VerificationRequest`'s
+`security` field is either one assertion or an array of up to eight assertions
+with distinct names, judged in a single before/after pair. The before phase is
+`intended_failure` only when every assertion shows its vulnerable expectation,
+and the after phase passes only when every assertion passes its fixed
+expectation. A single assertion keeps its original hashes. The verifier is
+compiled into the runtime images, so array requests need images staged from a
+commit that includes it.
+
+### Evaluation-only helper builds
+
+The private evaluator drives the real helper against staged digests before
+any gate is measured. It never edits the committed catalog. Instead,
+`bun scripts/cso-runtime-promotion.ts evaluation-candidate --staged-root <dir>
+--output <new-file>` converts one staging run's ten `staged-image.json` records
+into an evaluation-only catalog. Its revision is `cso-eval-<runId>-<sha12>`, it
+carries an `evaluation` record instead of `promotion`, and every runtime is an
+`evaluation_candidate` whose qualification has `kind: "evaluation"` and no
+release-gate field. Then
+
+```bash
+bun run build:cso -- --evaluation-candidate <catalog.json> --output <new-directory>
+```
+
+compiles the helper core and `cso-eval-producer` from a private copy of the
+source with that catalog embedded, adds the native launcher and watchdog, and
+writes the five-artifact producer unit to a new directory outside the checkout.
+Beside the unchanged `.gstack-cso-generation` manifest, it writes
+`.gstack-cso-evaluation`, which marks the unit evaluation-only and records the
+catalog revision, catalog SHA-256, and core SHA-256. The helper reports
+`"evaluationOnly": true` from `--version`, labels its catalog evaluation-only
+in runtime readiness, and refuses `provision-images --setup-summary`.
+Distribution refuses it at every step. A normal `build:cso` stops when
+`lib/cso/runtime-catalog.json` carries a `cso-eval-` revision. Setup fails when
+`bin/` holds an `.gstack-cso-evaluation` manifest or a launcher that reports
+`evaluationOnly`. Catalog promotion and transitions reject evaluation catalogs,
+and the runtime catalog validator rejects an evaluation catalog that carries
+`promotion`, release-gate fields, or a revision that does not name its staging
+run and source commit.
 
 The current reviewed profiles and unpromoted catalog establish this release
 process; they do not claim published gstack images, passed containment, or

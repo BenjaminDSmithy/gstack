@@ -9,13 +9,22 @@ export const FAMILIES = ['sql-injection', 'command-injection', 'path-traversal',
 export type EvalStack = typeof STACKS[number];
 export type EvalFamily = typeof FAMILIES[number];
 export type EvalVariant = 'vulnerable' | 'fixed';
-export interface CorpusCase {
-  id: string; stack: EvalStack; family: EvalFamily; severity: 'critical' | 'high' | 'medium';
+export interface CorpusCase<Family extends string = EvalFamily> {
+  id: string; stack: EvalStack; family: Family; severity: 'critical' | 'high' | 'medium';
   rootCause: string; location: { path: string; symbol: string };
   coreColdStart: true; heldOut: true;
   filesHash: { vulnerable: string; fixed: string };
 }
-export interface CorpusManifest { schemaVersion: 1; version: string; cases: CorpusCase[] }
+export interface CorpusManifest<Family extends string = EvalFamily> { schemaVersion: 1; version: string; cases: CorpusCase<Family>[] }
+/**
+ * A corpus with the public layout: a manifest plus a deterministic source
+ * generator for each case variant. Private evaluators inject their own; the
+ * default is this public development corpus.
+ */
+export interface EvalCorpus {
+  manifest: CorpusManifest<string>;
+  sourceFiles(id: string, variant: EvalVariant): Record<string, string>;
+}
 const hash = (input: string) => createHash('sha256').update(input).digest('hex');
 export function sourceHash(files: Record<string, string>): string {
   return hash(JSON.stringify(Object.keys(files).sort().map(path => [path, hash(files[path])])));
@@ -304,16 +313,67 @@ export function loadCorpusManifest(): CorpusManifest {
   if (JSON.stringify(manifest) !== JSON.stringify(createManifest())) throw new Error('CORPUS_INTEGRITY_MISMATCH');
   return manifest;
 }
-export function materializeCase(id: string, variant: EvalVariant, destination: string): { path: string; sourceHash: string } {
-  const manifest = loadCorpusManifest();
-  const spec = manifest.cases.find(item => item.id === id);
+const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const HEX = /^[a-f0-9]{64}$/;
+const SOURCE_PATH = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
+const safeSourcePath = (path: string) => SOURCE_PATH.test(path) && path.length <= 256 && path.split('/').every(part => part !== '.' && part !== '..');
+
+/** Validate the manifest layout of a public or injected corpus without reading its sources. */
+export function validateCorpusManifest(value: unknown): CorpusManifest<string> {
+  const manifest = value as CorpusManifest<string>;
+  if (!manifest || typeof manifest !== 'object' || manifest.schemaVersion !== 1 || typeof manifest.version !== 'string' || !/^[a-z0-9][a-z0-9.-]{0,63}$/.test(manifest.version) ||
+      !Array.isArray(manifest.cases) || manifest.cases.length === 0 || canonicalKeys(manifest) !== 'cases,schemaVersion,version') throw new Error('INVALID_CORPUS_MANIFEST');
+  const ids = new Set<string>();
+  for (const item of manifest.cases) {
+    if (!item || canonicalKeys(item) !== 'coreColdStart,family,filesHash,heldOut,id,location,rootCause,severity,stack' ||
+        typeof item.id !== 'string' || !SLUG.test(item.id) || ids.has(item.id) || !STACKS.includes(item.stack) ||
+        typeof item.family !== 'string' || !SLUG.test(item.family) || !['critical', 'high', 'medium'].includes(item.severity) ||
+        typeof item.rootCause !== 'string' || !item.rootCause.trim() || !item.location || typeof item.location.path !== 'string' || !safeSourcePath(item.location.path) ||
+        typeof item.location.symbol !== 'string' || !item.location.symbol.trim() || item.coreColdStart !== true || item.heldOut !== true ||
+        !item.filesHash || !HEX.test(item.filesHash.vulnerable) || !HEX.test(item.filesHash.fixed) || item.filesHash.vulnerable === item.filesHash.fixed) throw new Error('INVALID_CORPUS_MANIFEST');
+    ids.add(item.id);
+  }
+  return manifest;
+}
+function canonicalKeys(value: object): string { return Object.keys(value).sort().join(','); }
+
+/** The public development corpus. Its oracles are public, so it is never held out. */
+export function publicCorpus(): EvalCorpus {
+  return { manifest: loadCorpusManifest(), sourceFiles };
+}
+
+/**
+ * Bind an injected corpus to its manifest: every variant's generated sources
+ * must hash to the pinned value. An injected corpus cannot reuse the public
+ * corpus version, so its matrices and results never alias public ones.
+ */
+export function defineEvalCorpus(manifestValue: unknown, generate: EvalCorpus['sourceFiles']): EvalCorpus {
+  const manifest = validateCorpusManifest(manifestValue);
+  if (manifest.version === CORPUS_VERSION) throw new Error('INJECTED_CORPUS_REUSES_PUBLIC_VERSION');
+  const read = (id: string, variant: EvalVariant) => {
+    const files = generate(id, variant);
+    if (!files || typeof files !== 'object' || !Object.keys(files).length || Object.entries(files).some(([path, contents]) => !safeSourcePath(path) || typeof contents !== 'string')) throw new Error('INVALID_CORPUS_SOURCE');
+    return files;
+  };
+  for (const item of manifest.cases) for (const variant of ['vulnerable', 'fixed'] as const) {
+    if (sourceHash(read(item.id, variant)) !== item.filesHash[variant]) throw new Error('CORPUS_INTEGRITY_MISMATCH');
+  }
+  return { manifest, sourceFiles: (id, variant) => {
+    if (!manifest.cases.some(item => item.id === id)) throw new Error('UNKNOWN_CORPUS_CASE');
+    if (variant !== 'vulnerable' && variant !== 'fixed') throw new Error('INVALID_CORPUS_VARIANT');
+    return read(id, variant);
+  } };
+}
+
+export function materializeCase(id: string, variant: EvalVariant, destination: string, corpus: EvalCorpus = publicCorpus()): { path: string; sourceHash: string } {
+  const spec = corpus.manifest.cases.find(item => item.id === id);
   if (!spec) throw new Error('UNKNOWN_CORPUS_CASE');
   const path = resolve(destination);
   if (existsSync(path)) throw new Error('CORPUS_DESTINATION_EXISTS');
   const parent = dirname(path);
   if (realpathSync(parent) !== parent || !lstatSync(parent).isDirectory()) throw new Error('UNSAFE_CORPUS_DESTINATION');
-  const files = sourceFiles(id, variant);
-  if (sourceHash(files) !== spec.filesHash[variant]) throw new Error('CORPUS_INTEGRITY_MISMATCH');
+  const files = corpus.sourceFiles(id, variant);
+  if (sourceHash(files) !== spec.filesHash[variant] || Object.keys(files).some(file => !safeSourcePath(file))) throw new Error('CORPUS_INTEGRITY_MISMATCH');
   mkdirSync(path, { mode: 0o700 });
   for (const [file, contents] of Object.entries(files)) {
     const output = join(path, file); mkdirSync(dirname(output), { recursive: true, mode: 0o700 });

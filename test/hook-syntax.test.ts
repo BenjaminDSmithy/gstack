@@ -26,7 +26,7 @@ import { spawnSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { cleanupFixtures, makeFixture, makeSource, put, type Fixture } from './helpers/install-fixture';
+import { cleanupFixtures, cleanupSeed, makeFixture, makeSource, put, type Fixture } from './helpers/install-fixture';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const GATE = path.join(ROOT, 'scripts', 'hook-syntax.sh');
@@ -2245,6 +2245,9 @@ describe.skipIf(process.platform === 'win32')('setup: the canonical tree hooks a
   // Each fixture is a full checkout; removing several took over Bun's 5 s
   // default hook timeout at a load average near 300.
   afterAll(cleanupFixtures, 120_000);
+  // The fixtures clone a read-only seed under TMPDIR. Left behind, it makes the
+  // free runner's removal of its shard directory fail with EACCES.
+  afterAll(cleanupSeed, 120_000);
 
   // A whole install, not one gate run: about 20-30 s on this Mac at a load
   // average near 100, and past 120 s near 350. The bound only catches a hang.

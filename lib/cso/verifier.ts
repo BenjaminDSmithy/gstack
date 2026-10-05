@@ -1,13 +1,20 @@
 #!/usr/bin/env bun
 import * as fs from 'node:fs';
 import { connect } from 'node:net';
-import { HttpAssertion, VerificationObservation, object } from './contracts';
+import {
+  HttpAssertion,
+  MAX_SECURITY_ASSERTIONS,
+  VerificationObservation,
+  VerificationRequest,
+  object,
+  securityAssertions,
+} from './contracts';
 
 interface Config {
   phase: 'before' | 'after';
   port: number;
   legitimate: HttpAssertion[];
-  security: HttpAssertion;
+  security: VerificationRequest['security'];
 }
 function matches(status: number, body: string, oracle: HttpAssertion['expected']): boolean {
   return (
@@ -66,6 +73,34 @@ async function request(a: HttpAssertion, port: number): Promise<{ status: number
     clearTimeout(timer);
   }
 }
+export async function judgeSecurity(
+  phase: Config['phase'],
+  security: Config['security'],
+  port: number,
+): Promise<{
+  security: VerificationObservation['security'];
+  members: VerificationObservation['security'][];
+}> {
+  const members: VerificationObservation['security'][] = [];
+  for (const assertion of securityAssertions(security)) {
+    const r = await request(assertion, port),
+      fixed = matches(r.status, r.body, assertion.expected),
+      vulnerable = matches(r.status, r.body, assertion.vulnerable!);
+    members.push(
+      phase === 'before'
+        ? vulnerable && !fixed
+          ? 'intended_failure'
+          : fixed && !vulnerable
+            ? 'pass'
+            : 'inconclusive'
+        : fixed && !vulnerable
+          ? 'pass'
+          : 'inconclusive',
+    );
+  }
+  const agreed = members.every((member) => member === members[0]) ? members[0] : 'inconclusive';
+  return { security: agreed, members };
+}
 async function ready(port: number): Promise<boolean> {
   return await new Promise((resolve) => {
     const socket = connect({ host: '127.0.0.1', port }),
@@ -97,7 +132,8 @@ async function main() {
     v.port < 1024 ||
     v.port > 65535 ||
     !Array.isArray(v.legitimate) ||
-    !v.security
+    !v.security ||
+    (Array.isArray(v.security) && (!v.security.length || v.security.length > MAX_SECURITY_ASSERTIONS))
   )
     throw new Error('invalid verifier policy');
   const config = v as Config;
@@ -122,20 +158,11 @@ async function main() {
           }),
         )
       ).every(Boolean);
-      const r = await request(config.security, config.port),
-        fixed = matches(r.status, r.body, config.security.expected),
-        vulnerable = matches(r.status, r.body, config.security.vulnerable!);
-      security =
-        config.phase === 'before'
-          ? vulnerable && !fixed
-            ? 'intended_failure'
-            : fixed && !vulnerable
-              ? 'pass'
-              : 'inconclusive'
-          : fixed && !vulnerable
-            ? 'pass'
-            : 'inconclusive';
-      summary = `boot=true legitimate=${legitimate} security=${security}`;
+      const judged = await judgeSecurity(config.phase, config.security, config.port);
+      security = judged.security;
+      summary = `boot=true legitimate=${legitimate} security=${security}${
+        Array.isArray(config.security) ? ` members=${judged.members.join(',')}` : ''
+      }`;
     } catch {
       summary = 'bounded verifier request failed';
     }

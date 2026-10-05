@@ -66,7 +66,7 @@ Invoke them by name (e.g., `/office-hours`).
 | `/health` | Code quality dashboard (type checker, linter, tests, dead code). |
 | `/benchmark` | Performance regression detection (page load, Core Web Vitals). |
 | `/benchmark-models` | Cross-model benchmark for skills (Claude, GPT, Gemini side-by-side). |
-| `/cso` | Supported security findings with explicit coverage. Static assessment remains available without catalog profiles; contained runtime/scanner execution requires matching qualified profiles. Runtime-tested bundles authenticate separate external assertions. Project-test completion remains `self_reported` because target code controls the test process; `tested` is reserved for a future target-independent completion witness. |
+| `/cso` | Supported security findings with explicit coverage. Static assessment remains available without catalog profiles; contained runtime/scanner execution requires matching qualified profiles, and no catalog has one yet (scanner build inputs are reviewed and await their qualification run; runtime qualification needs a private evaluator that is still being built), so `/cso` runs static assessment only. Runtime-tested bundles authenticate separate external assertions. Project-test completion remains `self_reported` because target code controls the test process; `tested` is reserved for a future target-independent completion witness. |
 | `/setup-gbrain` | Set up gbrain for cross-machine session memory sync. |
 | `/sync-gbrain` | Keep gbrain current with this repo's code; refresh agent search guidance in CLAUDE.md. |
 
@@ -250,22 +250,26 @@ bun run typecheck:test   # test-code type-debt ratchet (new diagnostics fail; --
 bun run format:cso       # format lib/cso/*.ts (format:cso:check is the CI gate)
 bun run test:quick       # fast measured free subset for edit feedback (not acceptance)
 bun run test             # complete free suite via the strict shard runner (no API spend)
-bun run test:ubicloud    # same suite on an ephemeral 16-vCPU Ubicloud VM (needs UBICLOUD_API_KEY)
-bun run eval:bg:pr       # changed fast live probes + selected judges, with explicit deferrals
-bun run eval:bg:release  # fresh complete gate + periodic live coverage
-bun run eval:pass-rates  # per-case trial pass rates (Wilson), drift and quarantine alarms (--case, --gate)
-bun run scripts/test-paid-shards.ts --tier periodic --list --slice-budget 540 --jobs 2  # CI slice plan preview (free)
-bun run test:windows     # curated Windows-safe subset (runs on windows-latest)
+bun run eval:bg:pr       # changed live probes + selected judges; dispatches CI when HEAD is clean and pushed, else runs locally
+bun run eval:bg:release  # fresh complete gate + periodic live coverage (same backend choice)
+bun run test:health      # audit success metrics and weekly health from CI history (free; needs gh)
 bun run build            # generate docs + compile binaries
 bun run gen:skill-docs   # regenerate SKILL.md files from templates
 bun run skill:check      # health dashboard for all skills
 ```
 
+Every other test and eval command (Ubicloud, the Windows subset, one paid tier
+or case, branch validation in CI, pass rates, plan previews), with its cost and
+prerequisites, is in [Which command do I run?](CONTRIBUTING.md#which-command-do-i-run).
+Agents poll `eval:bg:*` logs for the `### gstack-detach EXIT=<code> ###` sentinel
+([CLAUDE.md](CLAUDE.md#running-evals-as-an-agent-always-detach-sigterm-proof)).
+
 ## Platform support
 
 - **macOS** + **Linux**: full test suite supported.
-- **Windows**: curated Windows-safe subset runs on `windows-latest` via the
-  `windows-free-tests` CI job. Setup script (`./setup`) requires Git Bash or
+- **Windows**: the curated Windows-safe subset runs in the `windows-free-tests`
+  CI workflow across six `windows-latest` jobs, packed by Windows-measured
+  durations. Setup script (`./setup`) requires Git Bash or
   MSYS today; native PowerShell support is a future expansion. The `bin/gstack-paths`
   helper resolves state roots through `CLAUDE_PLUGIN_DATA` / `GSTACK_HOME` so plugin
   installs work on every platform.
