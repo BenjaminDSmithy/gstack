@@ -89,6 +89,8 @@ describe('CLAUDE.md facts match the code that owns them', () => {
 // it is exempt from title checks but must still match its reference.
 const SHIP_STEP_REFERENCES: Array<{ file: string; step: string; title?: string; historical?: string }> = [
   { file: 'document-release/sections/release-body.md.tmpl', step: '14', title: 'TODOS.md' },
+  { file: 'pr-prep/SKILL.md.tmpl', step: '1.5', title: 'pr-prep gate' },
+  { file: 'pr-prep/SKILL.md.tmpl', step: '19', title: 'Create PR/MR' },
 ];
 const SHIP_REFERENCE = /\/ship`?(?:'s)? Step (\d+(?:\.\d+)?)\b/g;
 
