@@ -7,7 +7,8 @@
  *   never as an "(empty body)" envelope. The guard envelopes whatever reaches
  *   its stdin, so a bare `gh | jq | guard` pipe turned 24 failed fetches into
  *   24 "(empty body)" envelopes — a false CLEAN (observed 2026-09-26).
- * Step 4.4: the second opinion runs through `codex exec --sandbox read-only`,
+ * Step 4.4: the second opinion runs through `codex exec -` (prompt on stdin,
+ *   sandbox from gstack-codex-probe, result through the shared validator),
  *   never `codex review "<prompt>"` (a bare prompt reviews the uncommitted
  *   tree; `--base`/`--commit` reject a prompt), and a usage-limit error is a
  *   loud skip, not a silent pass.
@@ -46,7 +47,9 @@ function sectionAfter(heading: string): string {
 }
 
 const FETCH_BLOCK = bashBlockAfter('## Step 3:').replaceAll('~/.claude/skills/gstack/bin/gstack-issue-guard', GUARD);
-const CODEX_BLOCK = bashBlockAfter('## Step 4.4:');
+const CODEX_BLOCK = bashBlockAfter('## Step 4.4:')
+  .replaceAll('~/.claude/skills/gstack/bin/gstack-codex-probe', path.join(ROOT, 'bin', 'gstack-codex-probe'))
+  .replaceAll('~/.claude/skills/gstack/lib/outside-review-result.ts', path.join(ROOT, 'lib', 'outside-review-result.ts'));
 
 const SHELLS = ['bash', 'zsh'].filter((s) => Bun.which(s));
 const HAVE_JQ = Bun.which('jq') !== null;
@@ -156,7 +159,7 @@ describe('pr-prep Step 3: fetch health is checked before the guard', () => {
 });
 
 describe('pr-prep Step 4.4: codex second opinion', () => {
-  test('never uses `codex review "<prompt>"`; uses codex exec read-only with stdin closed', () => {
+  test('never uses `codex review "<prompt>"`; uses codex exec with the prompt on stdin and the shared sandbox', () => {
     // Prose may name the anti-pattern; no executable block may run it.
     const blocks = [...SKILL_MD.matchAll(/```bash\n([\s\S]*?)\n```/g)].map((m) => m[1]);
     expect(blocks.length).toBeGreaterThan(5);
@@ -164,8 +167,9 @@ describe('pr-prep Step 4.4: codex second opinion', () => {
       expect(b).not.toMatch(/codex review\s+"/);
       expect(b).not.toMatch(/codex review\s+--(base|commit)\s+\S+\s+"/);
     }
-    expect(CODEX_BLOCK).toContain('codex exec --sandbox read-only');
-    expect(CODEX_BLOCK).toContain('< /dev/null');
+    expect(CODEX_BLOCK).toContain('codex exec - -C "$_REPO_ROOT" -s "${_GSTACK_CODEX_SANDBOX:?}"');
+    expect(CODEX_BLOCK).toContain('< "$_CX/$sha.prompt"');
+    expect(CODEX_BLOCK).toContain('outside-review-result.ts');
     expect(CODEX_BLOCK).not.toMatch(/for sha in \$/);
     expect(sectionAfter('## Step 4.4:')).toMatch(/usage limit/i);
   });
@@ -204,6 +208,7 @@ describe('pr-prep Step 4.4: codex second opinion', () => {
         `  ok) printf '%s\\n' "${REVIEW}" > "$out"; exit 0;;`,
         `  limit) echo "ERROR: You've hit your usage limit. Try again later." >&2; exit 1;;`,
         `  limit0) echo "You've hit your usage limit." | tee "$out" >&2; exit 0;;`,
+        `  untagged) printf '%s\\n' "${'the change reads well; '.repeat(30)}" > "$out"; exit 0;;`,
         '  *) echo "boom" >&2; exit 2;;',
         'esac',
       ].join('\n'),
@@ -222,7 +227,7 @@ describe('pr-prep Step 4.4: codex second opinion', () => {
             cwd: repo,
             env: { CODEX_STUB_MODE: 'ok', CLEAN_COMMIT_SHAS: shas.join(sep) },
           });
-          expect(calls(log)).toEqual(['CALL exec --sandbox read-only', 'CALL exec --sandbox read-only']);
+          expect(calls(log)).toEqual(['CALL exec - -C', 'CALL exec - -C']);
           for (const sha of shas) expect(r.out).toContain(`=== codex review ${sha} ===`);
           expect(r.out).not.toContain('CODEX SKIPPED');
           expect(r.out).not.toContain('CODEX FAILED');
@@ -250,6 +255,17 @@ describe('pr-prep Step 4.4: codex second opinion', () => {
           env: { CODEX_STUB_MODE: 'limit0', CLEAN_COMMIT_SHAS: shas.join('\n') },
         });
         expect(r.out).toContain('CODEX SKIPPED: usage limit');
+        expect(r.out).not.toContain('=== codex review');
+      });
+
+      test('a review with no severity tag and no NO_FINDINGS -> CODEX FAILED, never printed as a review', () => {
+        const log = path.join(tmp, `codex-untagged-${shell}.log`);
+        const r = run(shell, CODEX_BLOCK, {
+          stub: codexStub(log),
+          cwd: repo,
+          env: { CODEX_STUB_MODE: 'untagged', CLEAN_COMMIT_SHAS: shas.join('\n') },
+        });
+        for (const sha of shas) expect(r.out).toContain(`CODEX FAILED: ${sha} (exit 0, untagged_review)`);
         expect(r.out).not.toContain('=== codex review');
       });
 
