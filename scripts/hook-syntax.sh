@@ -190,7 +190,8 @@ HOOK_SYNTAX_LIST=()
 # Paths already checked this run, newline-delimited, so a payload reached
 # through its shim is not checked again when the sweep walks past it.
 HOOK_SYNTAX_SEEN=""
-# Payloads already built as entry points this run, kept the same way.
+# Payloads already judged as entry points this run, built or reported
+# missing, kept the same way.
 HOOK_SYNTAX_ENTRIES=""
 
 # Directories never descended into: vendored and generated trees carry other
@@ -849,9 +850,12 @@ _hook_syntax_payload() {
   case "$HOOK_SYNTAX_ENTRIES" in
     *"$HOOK_SYNTAX_NL$payload$HOOK_SYNTAX_NL"*) return 0 ;;
   esac
+  # A file that is not there, named by a call that need not have it, is not
+  # recorded: a call that must have it, on a later line or in another shim,
+  # is still judged, in whatever order the sweep reaches them.
+  [ -r "$payload" ] || [ "$strict" -eq 1 ] || return 0
   HOOK_SYNTAX_ENTRIES="$HOOK_SYNTAX_ENTRIES$HOOK_SYNTAX_NL$payload$HOOK_SYNTAX_NL"
   if [ ! -r "$payload" ]; then
-    [ "$strict" -eq 1 ] || return 0
     printf 'hook-syntax: MISSING PAYLOAD %s — handed to bun by %s\n' "$payload" "$shim" >&2
     return 1
   fi

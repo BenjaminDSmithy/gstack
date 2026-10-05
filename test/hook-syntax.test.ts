@@ -1640,6 +1640,27 @@ describe('hook-syntax: bun payloads', () => {
     }
   }, TEST_TIMEOUT_MS);
 
+  test('a payload a later call only mentions must still ship when another call runs it', () => {
+    // A trailing comment may name a file that is not there. That must not
+    // excuse the same file when a later line, or another shim, runs it, in
+    // whichever order the sweep reaches them.
+    const head = '#!/usr/bin/env bash\nHERE="$(cd "$(dirname "$0")" && pwd)"\n';
+    const line = fixture('mentioned-line/hook', `${head}bun "$HERE/a.ts"  # was: bun "$HERE/b.ts"\nexec bun "$HERE/b.ts"\n`);
+    fixture('mentioned-line/a.ts', 'export const ok = 1;\n');
+    fixture('mentioned-shim/hook-a', `${head}exec bun "$HERE/a.ts"  # was: bun "$HERE/b.ts"\n`);
+    fixture('mentioned-shim/hook-b', SHIM('b.ts'));
+    fixture('mentioned-shim/a.ts', 'export const ok = 1;\n');
+    const dir = path.join(FX, 'fx', 'mentioned-shim');
+    const a = path.join(dir, 'hook-a');
+    const b = path.join(dir, 'hook-b');
+    for (const args of [[line], [dir], [a, b], [b, a]]) {
+      const r = runGate(args);
+      expect([args, r.code], r.output).toEqual([args, 1]);
+      expect(r.output).toContain('MISSING PAYLOAD');
+      expect(r.output).toContain('/b.ts — handed to bun by');
+    }
+  }, TEST_TIMEOUT_MS);
+
   test('a payload another payload imports as text is still parsed, in either order', () => {
     // A text import is listed in the build's metafile but never parsed. Listed
     // first, it must not count as the second shim's payload already checked.
