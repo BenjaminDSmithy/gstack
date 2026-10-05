@@ -38,8 +38,14 @@ import { skillCensus } from './helpers/skill-census';
  * New-skill ratchet: previous ceiling 1,171 + ceil(92 / 4) = 1,194
  * token-equivalents (4,776 bytes), leaving 4 bytes. Existing descriptions
  * are unchanged.
+ *   ref     fork: /pr-prep addition on upstream 55fbe771 (2026-10-05)
+ *   result  pre-addition aggregate 4,772 bytes; pr-prep adds 48 bytes
+ *           (name 7 + description 41), yielding 4,820 bytes
+ *           = 1,205 token-equivalents including the root router alias.
+ * New-skill ratchet: previous ceiling 1,194 + ceil(48 / 4) = 1,206
+ * token-equivalents (4,824 bytes), leaving 4 bytes.
  */
-const CATALOG_BUDGET_TOKEN_EQUIVALENTS = 1_194;
+const CATALOG_BUDGET_TOKEN_EQUIVALENTS = 1_206;
 
 // Largest today: design-consultation at 229 bytes. A description that needs
 // more than 260 bytes is a body paragraph, not a catalog entry.
