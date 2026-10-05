@@ -188,6 +188,16 @@ The sweep itself fails rather than reading green when it could not look:
   invisible
 * a sweep that found no file at all
 * a path that does not exist
+* a root, or a file it would parse, whose path holds a newline: the content
+  scans read grep's `name:line:text` output a line at a time, and no line
+  matched such a name, so its conflict markers and the payloads it named went
+  unseen and the run passed. A root is refused once, by the physical path it
+  resolves to, a trailing newline included, however it was named: directly,
+  through a symlink, as `.`, or as the gate's own root. A symlink whose own
+  name holds a newline sweeps its target like any other. A module a bun
+  payload imports is refused too: bun's import list names it whole, on one
+  line. A file the sweep skips and no payload imports never reaches the
+  content scans, so its name refuses nothing
 
 A symlinked root is resolved and swept through: the live install,
 `~/.claude/skills/gstack`, is often a symlink.

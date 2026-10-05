@@ -180,7 +180,10 @@ HOOK_SYNTAX_BUN="${HOOK_SYNTAX_BUN:-bun}"
 # external, nothing written. On failure: bun's diagnostics, exit 1. On success:
 # the physical path of every local file the build pulled in other than the
 # entrypoint, one per line, read from the build's metafile; a bun whose build
-# API has no metafile prints NO_METAFILE instead. The list comes from the
+# API has no metafile prints NO_METAFILE instead. A path holding a newline
+# would split across two lines, and the first half could name another file,
+# scanned in its place: it is printed whole on one line instead, as
+# NEWLINE_IN_PATH and its JSON spelling, and refused. The list comes from the
 # build itself, never from the bundle's text, which bun re-prints: it turns an
 # ordinary "\n<<<<<<< " string into a template literal with the marker at
 # column 0, and it names modules in comment headers whose shape varies.
@@ -208,7 +211,7 @@ try {
 }
 if (!r.success) { for (const m of r.logs) console.error(Bun.inspect(m)); process.exit(1); }
 if (!r.metafile) { console.log("NO_METAFILE"); process.exit(0); }
-for (const k of Object.keys(r.metafile.inputs)) { const p = real(k); if (p !== entry) console.log(p); }'
+for (const k of Object.keys(r.metafile.inputs)) { const p = real(k); if (p !== entry) console.log(p.includes("\n") ? "NEWLINE_IN_PATH " + JSON.stringify(p) : p); }'
 
 # What the run actually covered. Read by `--report`; never asserted.
 HOOK_SYNTAX_CHECKED=0
@@ -307,8 +310,13 @@ _hook_syntax_gap() {
 }
 
 # $1 = path. Returns 0 when this run has already checked it. Fork-free: a sweep
-# reads a few thousand files.
+# reads a few thousand files. A path holding a newline is never marked, and
+# never seen: the list is newline-delimited, so `A<NL><NL>B` matched the two
+# entries A and B, and a half-merged file there passed unread.
 _hook_syntax_seen() {
+  case "$1" in
+    *"$HOOK_SYNTAX_NL"*) return 1 ;;
+  esac
   case "$HOOK_SYNTAX_SEEN" in
     *"$HOOK_SYNTAX_NL$1$HOOK_SYNTAX_NL"*) return 0 ;;
   esac
@@ -317,6 +325,21 @@ _hook_syntax_seen() {
 
 _hook_syntax_mark() {
   HOOK_SYNTAX_SEEN="$HOOK_SYNTAX_SEEN$HOOK_SYNTAX_NL$1$HOOK_SYNTAX_NL"
+}
+
+# $1 = path. Returns 0, and says so, when it holds a newline. The content
+# scans read grep's `name:line:text` output one line at a time, and no hit
+# matches a name with a newline in it: its conflict markers and the payloads
+# it hands to bun went unseen, and the run passed. Such a path is refused
+# instead, as one that cannot be read is.
+_hook_syntax_newline() {
+  case "$1" in
+    *"$HOOK_SYNTAX_NL"*)
+      printf 'hook-syntax: NEWLINE IN PATH %s — the content scans read names a line at a time, so it cannot be checked\n' "$1" >&2
+      return 0
+      ;;
+  esac
+  return 1
 }
 
 # $1 = path. Reads the first line, up to 512 characters and never past a run
@@ -479,6 +502,11 @@ _hook_syntax_check_bun() {
     case "$line" in
       NO_METAFILE)
         printf 'hook-syntax: %s cannot list what %s imports — those files are NOT marker-scanned\n' "$HOOK_SYNTAX_BUN" "$1" >&2
+        ;;
+      'NEWLINE_IN_PATH '*)
+        # The scans could not read it either, as _hook_syntax_newline says.
+        printf 'hook-syntax: NEWLINE IN PATH %s — imported by %s; the content scans read names a line at a time, so it cannot be checked\n' "${line#NEWLINE_IN_PATH }" "$1" >&2
+        rc=1
         ;;
       /*)
         _hook_syntax_seen "$line" && continue
@@ -974,6 +1002,9 @@ _hook_syntax_visit() {
     HOOK_SYNTAX_UNPARSED+=("$file")
     return 0
   fi
+  # Only a file the content scans would read. A skipped one reaches them only
+  # when a bun payload imports it, and bun's import list refuses its name then.
+  _hook_syntax_newline "$file" && return 1
   _hook_syntax_mark "$file"
 
   case "$HOOK_SYNTAX_KIND" in
@@ -1014,6 +1045,19 @@ _hook_syntax_visit() {
   return 0
 }
 
+# $1 = directory. Sets HOOK_SYNTAX_DIR to its physical path, every byte of it;
+# to nothing, returning 1, when it cannot be entered. CDPATH is cleared for the
+# cd: with it exported, cd prints the directory it found, and the captured path
+# would hold that line and pwd's. The x after pwd's output keeps a name that
+# ends in a newline: $(...) strips every trailing newline, so `x<NL>` resolved
+# to its sibling `x`, and the sweep checked that directory in its place.
+HOOK_SYNTAX_DIR=''
+_hook_syntax_resolve() {
+  HOOK_SYNTAX_DIR="$(CDPATH='' cd "$1" 2>/dev/null && pwd -P && printf x)" || return 1
+  HOOK_SYNTAX_DIR="${HOOK_SYNTAX_DIR%x}"
+  HOOK_SYNTAX_DIR="${HOOK_SYNTAX_DIR%"$HOOK_SYNTAX_NL"}"
+}
+
 # Visit every file under a directory. $1 = directory.
 _hook_syntax_walk() {
   local dir="$1" rc=0 f name n=0
@@ -1024,12 +1068,15 @@ _hook_syntax_walk() {
   # One physical spelling of the root. find does not descend a symlinked
   # starting point on its own, and the live install (~/.claude/skills/gstack)
   # is one; every path the sweep compares below must share this prefix.
-  # CDPATH is cleared for the cd: with it exported, cd prints the directory it
-  # found, and the captured root would hold that line and pwd's.
-  dir="$(CDPATH='' cd "$dir" 2>/dev/null && pwd -P)" || {
+  if ! _hook_syntax_resolve "$dir"; then
     printf 'hook-syntax: cannot enter %s\n' "$1" >&2
     return 1
-  }
+  fi
+  dir="$HOOK_SYNTAX_DIR"
+  # A root holding a newline puts one in every path under it: refused once,
+  # here, rather than once per file. Only this spelling is swept, so only it
+  # is checked: a symlink whose own name holds a newline sweeps like any other.
+  _hook_syntax_newline "$dir" && return 1
   local g pat
   local -a expr=() skip=()
   for name in $HOOK_SYNTAX_PRUNE_NAMES; do
@@ -1132,7 +1179,9 @@ hook_syntax_check_file() {
 # $1 = directory; the repo root (the directory holding scripts/) by default.
 hook_syntax_check_tree() {
   local dir="${1:-}" rc=0
-  [ -n "$dir" ] || dir="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)"
+  if [ -z "$dir" ] && _hook_syntax_resolve "$(dirname "${BASH_SOURCE[0]}")/.."; then
+    dir="$HOOK_SYNTAX_DIR"
+  fi
   _hook_syntax_walk "$dir" || rc=1
   _hook_syntax_finish || rc=1
   return "$rc"
@@ -1155,7 +1204,8 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   fi
   _rc=0
   if [ "$#" -eq 0 ]; then
-    _hook_syntax_walk "$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)" || _rc=1
+    _hook_syntax_resolve "$(dirname "${BASH_SOURCE[0]}")/.." || HOOK_SYNTAX_DIR=''
+    _hook_syntax_walk "$HOOK_SYNTAX_DIR" || _rc=1
   else
     for _f in "$@"; do
       # A directory is swept. Reading one as a file would find no shebang and

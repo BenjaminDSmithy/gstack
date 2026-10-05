@@ -894,6 +894,124 @@ describe('hook-syntax: sweep mechanics', () => {
     expect(r.code).toBe(1);
     expect(r.output).toContain('no files found');
   }, TEST_TIMEOUT_MS);
+
+  // The content scans read grep's `name:line:text` output a line at a time, so
+  // no hit ever matched a name holding a newline: a half-merged file there,
+  // and a broken payload its shim named, passed with exit 0.
+  test.skipIf(process.platform === 'win32')('a checked file whose path holds a newline is refused, never passed unscanned', () => {
+    const merged = fixture('nl-markers/a\nb.sh', `#!/bin/bash\n${CONFLICT_HEREDOC}`);
+    fixture('nl-shim/hook\nx', SHIM('payload.ts'));
+    fixture('nl-shim/payload.ts', 'const broken: number = {\n');
+    const real = (rel: string) => fs.realpathSync(path.join(FX, 'fx', rel));
+    const runs: Array<[string, string]> = [
+      [merged, merged],
+      [path.join(FX, 'fx', 'nl-markers'), `${real('nl-markers')}/a\nb.sh`],
+      [path.join(FX, 'fx', 'nl-shim'), `${real('nl-shim')}/hook\nx`],
+    ];
+    for (const [target, named] of runs) {
+      const r = runGate([target]);
+      expect([target, r.code], r.output).toEqual([target, 1]);
+      expect(r.output).toContain(`NEWLINE IN PATH ${named}`);
+    }
+  }, TEST_TIMEOUT_MS);
+
+  test.skipIf(process.platform === 'win32')('a root whose path holds a newline is refused once, not swept blind', () => {
+    // However the root is reached: named directly, through a symlink that has
+    // no newline itself, as `.` from inside it, or as the gate's own root, run
+    // or sourced with no target. A trailing newline is the trap: $(...) strips
+    // it, so `x<NL>` resolved to its healthy sibling `x`, which was swept in
+    // its place and passed.
+    fixture('nl-root/x/ok.sh', '#!/bin/bash\nexit 0\n');
+    for (const [name, linkName] of [['n\nl', 'link-nl'], ['x\n', 'link-x']]) {
+      fixture(`nl-root/${name}/ok.sh`, '#!/bin/bash\nexit 0\n');
+      fixture(`nl-root/${name}/hook`, SHIM('payload.ts'));
+      fixture(`nl-root/${name}/payload.ts`, 'const broken: number = {\n');
+      fixture(`nl-root/${name}/merged.sh`, `#!/bin/bash\n${CONFLICT_HEREDOC}`);
+      const own = fixture(`nl-root/${name}/scripts/hook-syntax.sh`, GATE_SRC);
+      const dir = path.join(FX, 'fx', 'nl-root', name);
+      const link = path.join(FX, 'fx', 'nl-root', linkName);
+      fs.symlinkSync(dir, link);
+      const runs: Array<[string, Captured]> = [
+        ['named', spawnCaptured('/bin/bash', [GATE, '--report', dir])],
+        ['through a symlink', spawnCaptured('/bin/bash', [GATE, '--report', link])],
+        ['as .', spawnCaptured('/bin/bash', [GATE, '--report', '.'], { cwd: dir })],
+        ['own root, run', spawnCaptured('/bin/bash', [own, '--report'])],
+        ['own root, sourced', spawnCaptured('/bin/bash', ['-c', 'source "$1"; hook_syntax_check_tree; rc=$?; hook_syntax_report; exit $rc', 'sh', own])],
+      ];
+      for (const [how, r] of runs) {
+        const label = `${JSON.stringify(name)} ${how}`;
+        const output = `${r.stdout}${r.stderr}`;
+        expect([label, codeOf(r)], output).toEqual([label, 1]);
+        expect(output.split('NEWLINE IN PATH').length - 1, output).toBe(1);
+        expect(output).toContain(`NEWLINE IN PATH ${fs.realpathSync(dir)}`);
+        expect(output).toContain('hook-syntax: 0 checked, 0 skipped');
+      }
+    }
+  }, TEST_TIMEOUT_MS);
+
+  test.skipIf(process.platform === 'win32')('a path holding a newline is never taken for two paths already checked', () => {
+    // The run keeps the paths it checked newline-delimited, so `A<NL><NL>B`
+    // matched the entries A and B once both were checked: a half-merged file
+    // there passed unread, named after them or swept with their directory.
+    fixture('nl-seen/a', '#!/bin/bash\nexit 0\n');
+    fixture('nl-seen/b', '#!/bin/bash\nexit 0\n');
+    const dir = fs.realpathSync(path.join(FX, 'fx', 'nl-seen'));
+    const [a, b] = [path.join(dir, 'a'), path.join(dir, 'b')];
+    const merged = `${a}\n\n${b}`;
+    fs.mkdirSync(path.dirname(merged), { recursive: true });
+    fs.writeFileSync(merged, `#!/bin/bash\n${CONFLICT_HEREDOC}`);
+    for (const last of [merged, dir]) {
+      const r = runGate(['--report', a, b, last]);
+      expect([last, r.code], r.output).toEqual([last, 1]);
+      expect(r.output.split('NEWLINE IN PATH').length - 1, r.output).toBe(1);
+      expect(r.output).toContain(`NEWLINE IN PATH ${merged}`);
+    }
+  }, TEST_TIMEOUT_MS);
+
+  test.skipIf(process.platform === 'win32')('a module a payload imports, whose path holds a newline, is refused', () => {
+    // The sweep skips a .ts no shim names; bun's import list, one path per
+    // line, carries it to the marker scan. Split there, its markers went
+    // unseen: a file named by the first half was scanned in its place and the
+    // run passed, or, with no such file, it was refused as UNREADABLE for a
+    // file the payload never imported.
+    for (const sibling of [true, false]) {
+      const dir = `nl-import-${sibling ? 'sibling' : 'alone'}`;
+      fixture(`${dir}/hook`, SHIM('hook.ts'));
+      fixture(`${dir}/hook.ts`, 'import { msg } from "./a\\nb.ts";\nconsole.log(msg);\n');
+      const mod = fixture(`${dir}/a\nb.ts`, `export const msg = \`\n${LT} HEAD\na\n${EQ}\nb\n${GT} other\n\`;\n`);
+      if (sibling) fixture(`${dir}/a`, 'notes\n');
+      for (const target of [path.join(FX, 'fx', dir, 'hook'), path.join(FX, 'fx', dir)]) {
+        const r = runGate(['--report', target]);
+        expect([target, r.code], r.output).toEqual([target, 1]);
+        expect(r.output).toContain(`NEWLINE IN PATH ${JSON.stringify(fs.realpathSync(mod))} — imported by`);
+        expect(r.output).not.toContain('cannot place');
+        expect(r.output).not.toContain('UNREADABLE');
+      }
+    }
+  }, TEST_TIMEOUT_MS);
+
+  test.skipIf(process.platform === 'win32')('control: a symlink whose own name holds a newline sweeps the directory it names', () => {
+    // Only the resolved root is swept, so only its spelling can put a newline
+    // in a path the scans read.
+    fixture('nl-link/real/ok.sh', '#!/bin/bash\nexit 0\n');
+    const link = path.join(FX, 'fx', 'nl-link', 'li\nnk');
+    fs.symlinkSync(path.join(FX, 'fx', 'nl-link', 'real'), link);
+    const r = runGate(['--report', link]);
+    expect(r.code, r.output).toBe(0);
+    expect(r.output).toBe('hook-syntax: 1 checked, 0 skipped');
+  }, TEST_TIMEOUT_MS);
+
+  test.skipIf(process.platform === 'win32')('control: a skipped file whose name holds a newline does not refuse the tree', () => {
+    // A skipped file no payload imports never reaches the content scans, so
+    // its name costs nothing. One a payload imports is refused through bun's
+    // import list: 'a module a payload imports, whose path holds a newline,
+    // is refused'.
+    fixture('nl-skipped/ok.sh', '#!/bin/bash\nexit 0\n');
+    fixture('nl-skipped/notes\nx.md', '# notes\n');
+    const r = runGate(['--report', path.join(FX, 'fx', 'nl-skipped')]);
+    expect(r.code, r.output).toBe(0);
+    expect(r.output).toBe('hook-syntax: 1 checked, 1 skipped');
+  }, TEST_TIMEOUT_MS);
 });
 
 // ── per-file verdicts ──────────────────────────────────────────────────────
