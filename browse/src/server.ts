@@ -36,6 +36,7 @@ import {
   sessionPersistIntervalMs, SESSION_STATE_FILE,
 } from './session-persist';
 import { emitActivity } from './activity';
+import { IS_TEST_RUN } from './test-runner';
 import { initAuditLog, writeAuditEntry } from './audit';
 import { detachSession } from './cdp-inspector';
 // Bun.spawn used instead of child_process.spawn (compiled bun binaries
@@ -713,24 +714,7 @@ function idleCheckTick() {
     activeShutdown?.();
   }
 }
-// Under the bun test runner the module-scope background timers are a liability,
-// not a feature: importing this file from any test arms an idle poll that fires
-// for the rest of the process and shuts down through `activeShutdown` — which
-// ends in process.exit() and kills the runner mid-run, at exit code 0. The
-// tests that care about idle behaviour drive `__testInternals__.idleCheckTick()`
-// directly, so nothing is lost by not arming the wall-clock poll there.
-//
-// The marker is a global set by test-setup.ts (bunfig's preload), NOT an env
-// var. NODE_ENV was the first attempt and it was wrong: `bun test` sets
-// NODE_ENV=test, and the tests that spawn this server as a SUBPROCESS inherit
-// the environment — so the real daemon under test lost its watchdog and its
-// idle timer too, which is exactly the behaviour watchdog.test.ts exists to
-// check. A global does not cross a process boundary, so an in-process import
-// is disarmed and a spawned daemon is not.
-const IS_TEST_RUN = (globalThis as Record<string, unknown>).__GSTACK_TEST_RUNNER__ === true;
-const idleCheckInterval = IS_TEST_RUN
-  ? (undefined as unknown as ReturnType<typeof setInterval>)
-  : setInterval(idleCheckTick, 60_000);
+const idleCheckInterval = IS_TEST_RUN ? undefined : setInterval(idleCheckTick, 60_000); // see test-runner.ts
 
 // Test-only surface for server-factory.test.ts. Lets the dual-instance
 // idle-timer behavior be exercised deterministically without mutating
@@ -756,13 +740,7 @@ export const __testInternals__ = {
   // need shutdown to fire. Without this, the second test's shutdown
   // returns early at the `if (isShuttingDown) return;` guard.
   resetShutdownState: () => { isShuttingDown = false; },
-  // Disarm the module-level pointer every background path shuts down through
-  // (the idle tick, the parent watchdog, browserManager.onDisconnect, the
-  // signal handlers). A test that builds a handle leaves activeShutdown
-  // pointing at it for the rest of the bun process, so a browser closing or a
-  // timer firing minutes later runs a real shutdown() — which ends in
-  // process.exit() and takes the test runner with it. Tests that call
-  // buildFetchHandler clear it when they are done.
+  // Tests that build a fetch handler clear activeShutdown when done (see test-runner.ts).
   clearActiveShutdown: () => { activeShutdown = null; },
 };
 
@@ -834,9 +812,6 @@ const PARENT_WATCHDOG_INTERVAL_MS =
   Number.isFinite(rawWatchdogIntervalMs) && rawWatchdogIntervalMs > 0
     ? rawWatchdogIntervalMs
     : 15_000;
-// !IS_TEST_RUN for the same reason as idleCheckInterval: this poll reaches
-// activeShutdown, and a shutdown under the test runner exits the process.
-// watchdog.test.ts drives parentWatchdogTick through __testInternals__.
 if (BROWSE_PARENT_PID > 0 && !IS_HEADED_WATCHDOG && !IS_TEST_RUN) {
   setInterval(parentWatchdogTick, PARENT_WATCHDOG_INTERVAL_MS);
 } else if (IS_HEADED_WATCHDOG) {
