@@ -678,7 +678,11 @@ _hook_syntax_walk() {
   # goes to /dev/null here; so each directory is asked directly. `[ -r ]` and
   # `[ -x ]` are builtins over access(): no fork per directory, ACLs and
   # ownership count, and no temp file, so a wiped TMPDIR cannot refuse setup.
-  while IFS= read -r -d '' f; do
+  # The list is read whole, in the C locale, before any file is visited: read
+  # in a UTF-8 locale by bash 5.2, a name ending in an invalid UTF-8 byte took
+  # the NUL after it, and the next name was lost.
+  _hook_syntax_read_list '' < <(find "$dir" \( "${expr[@]:1}" \) -prune -o \( -type f -o -type d \) -print0 2>/dev/null | sort -z)
+  for f in "${HOOK_SYNTAX_LIST[@]}"; do
     if [ -d "$f" ]; then
       if [ ! -r "$f" ] || [ ! -x "$f" ]; then
         printf 'hook-syntax: UNREADABLE directory %s — cannot check what is under it\n' "$f" >&2
@@ -688,7 +692,7 @@ _hook_syntax_walk() {
     fi
     n=$((n + 1))
     _hook_syntax_visit "$f" || rc=1
-  done < <(find "$dir" \( "${expr[@]:1}" \) -prune -o \( -type f -o -type d \) -print0 2>/dev/null | sort -z)
+  done
   # A sweep that found no file at all checked nothing; never let that read
   # green.
   if [ "$n" -eq 0 ]; then

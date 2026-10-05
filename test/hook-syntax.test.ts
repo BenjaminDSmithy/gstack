@@ -55,6 +55,21 @@ const UTF8_LOCALES = ['C.UTF-8', 'en_US.UTF-8'].filter(loc => {
   return r.status === 0;
 });
 
+// Whether the temp filesystem keeps a name that is not valid UTF-8. APFS
+// refuses one (EILSEQ); overlayfs and ext4 keep the bytes as given.
+const BYTE_NAMES = (() => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-hook-syntax-name-'));
+  try {
+    fs.writeFileSync(Buffer.concat([Buffer.from(`${dir}/caf`), Buffer.from([0xe9])]), '');
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'EILSEQ') return false;
+    throw e;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+})();
+
 // One gate run costs a bash fork per file plus a bun bundle per payload. That
 // is well under a second on an idle machine and many times that while the rest
 // of the free suite runs its shards alongside. bun's 5s default would turn that
@@ -627,6 +642,21 @@ describe('hook-syntax: sweep mechanics', () => {
     expect(r.code).toBe(1);
     expect(r.output).toContain('lib/broken.sh');
     expect(r.output).toContain('inner/also-broken.sh');
+  }, TEST_TIMEOUT_MS);
+
+  test.skipIf(!BYTE_NAMES || !UTF8_LOCALES.length)('a name ending in an invalid UTF-8 byte hides no file from the sweep under a UTF-8 locale', () => {
+    // Read in a UTF-8 locale by bash 5.2, such a name takes the NUL after it,
+    // and the name after it is lost; one that sorts last never comes back.
+    // Both files are broken, so a sweep that drops either one is caught.
+    const dir = path.join(FX, 'fx', 'byte-name');
+    fixture('byte-name/d.sh', '#!/bin/bash\nif true; then\n');
+    fs.writeFileSync(Buffer.concat([Buffer.from(`${dir}/caf`), Buffer.from([0xe9])]), '#!/bin/bash\nif true; then\n');
+    for (const loc of UTF8_LOCALES) {
+      const r = runGate(['--report', dir], { LC_ALL: loc, LANG: loc });
+      expect([loc, r.code], r.output).toEqual([loc, 1]);
+      expect([loc, r.output.split('FAILS TO PARSE').length - 1], r.output).toEqual([loc, 2]);
+      expect(r.output).toContain('2 checked, 0 skipped');
+    }
   }, TEST_TIMEOUT_MS);
 
   test('node_modules is pruned, not swept', () => {
