@@ -114,14 +114,15 @@ for (const shell of SHELLS) {
       expect(r.type).toBeUndefined();
     });
 
-    test('an untraceable runtime root falls back to the README checkout at ~/gstack', () => {
+    test('an untraceable runtime root is refused beside a ~/gstack checkout the install registry does not name', () => {
       const home = tmp();
-      const src = source(path.join(home, 'gstack'), true);
+      source(path.join(home, 'gstack'), true);
       const rt = path.join(home, '.codex/skills/gstack');
       fs.mkdirSync(path.join(rt, 'bin'), { recursive: true });
       const r = detect(shell, 'codex', home, tmp());
-      expect(r.type).toBe('global-git');
-      expect(r.dir).toBe(src);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain('ERROR: gstack not found');
+      expect(r.type).toBeUndefined();
     });
 
     test('Codex: a repo-local .agents sidecar resolves to its checkout as local-git', () => {
@@ -134,14 +135,15 @@ for (const shell of SHELLS) {
       expect(r.dir).toBe(src);
     });
 
-    test('Claude: a global install symlinked to its checkout stays global-git at the link', () => {
+    test('Claude: a global install symlinked to its checkout is global-git at the checkout', () => {
       const home = tmp();
       const src = source(path.join(tmp(), 'checkout'), true);
       fs.mkdirSync(path.join(home, '.claude/skills'), { recursive: true });
       fs.symlinkSync(src, path.join(home, '.claude/skills/gstack'));
       const r = detect(shell, 'claude', home, tmp());
       expect(r.type).toBe('global-git');
-      expect(r.dir).toBe(path.join(home, '.claude/skills/gstack'));
+      // Step 2 prints the physical path: each later fence runs in a fresh shell.
+      expect(r.dir).toBe(src);
     });
 
     test('Claude: a global install that is a linked worktree (.git file) is still global-git', () => {
@@ -158,7 +160,7 @@ for (const shell of SHELLS) {
       source(path.join(project, '.claude/skills/gstack'), false);
       const r = detect(shell, 'claude', home, project);
       expect(r.type).toBe('vendored');
-      expect(r.dir).toBe('.claude/skills/gstack');
+      expect(r.dir).toBe(path.join(project, '.claude/skills/gstack'));
 
       const empty = tmp();
       fs.mkdirSync(path.join(empty, '.claude/skills/gstack'), { recursive: true });
@@ -208,7 +210,11 @@ describe('gstack-upgrade template wiring', () => {
 
   test('no bash block calls the running skill through a Claude-only path', () => {
     // Prose may name the path; code must go through $_RT so every host gets its own root.
-    const code = [...tmpl.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]).join('\n');
+    // Upstream's state-root rule (test/state-root-ratchet.test.ts) spells state
+    // reads through the Claude path, and every host render rewrites it to its
+    // own root, so that one form is not a Claude-only call.
+    const code = [...tmpl.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]).join('\n')
+      .replaceAll('GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT)', '');
     expect(code).not.toMatch(/~\/\.claude\/skills\/gstack\/bin/);
     expect(code).not.toContain('"$HOME/.claude/skills/gstack"');
     for (const line of code.split('\n').filter((l) => l.includes('$_RT/'))) {
