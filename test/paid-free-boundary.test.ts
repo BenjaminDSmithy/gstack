@@ -113,16 +113,23 @@ describe('paid/free dependency boundary', () => {
       expect(result.coverage?.unknownFiles).toEqual([]);
       expect(result.selection).toEqual({ e2e: [], judges: [] });
     }
-    for (const file of [
-      'scripts/new-helper.ts', 'scripts/free-test-durations.json', 'scripts/eval-flake-rank.ts',
-      'lib/new-runtime.ts', 'test/helpers/new-helper.ts', 'test/fixtures/new-fixture.ts',
-      '.github/workflows/new-free-tests.yml',
-    ]) {
+    // Tracked files outside every mapping and outside the derivable directories restore the full gate.
+    for (const file of ['ETHOS.md', 'SECURITY.md', 'conductor.json', '.osv-scanner.toml']) {
       const result = computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles: [FREE_ONLY_PR_FILES[0], file] });
       expect(result.coverage?.mode, file).toBe('full-fallback');
       expect(result.coverage?.unknownFiles).toContain(file);
       expect(result.selection.e2e).toEqual(Object.keys(E2E_TIERS).filter(id => E2E_TIERS[id] === 'gate').sort());
       expect(result.selection.judges).toEqual(Object.keys(LLM_JUDGE_TOUCHFILES).sort());
+    }
+    // A tracked file under a derivable directory that no paid case's reference closure reaches is consumed by no paid case.
+    const unconsumed = computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles: ['scripts/eval-flake-rank.ts'] });
+    expect(unconsumed.coverage?.mode).toBe('pr');
+    expect(unconsumed.coverage?.noConsumerFiles).toEqual(['scripts/eval-flake-rank.ts']);
+    // A path absent from the head tree is a deletion: with no live reference it has no consumer.
+    for (const file of ['scripts/new-helper.ts', 'lib/new-runtime.ts', 'test/helpers/new-helper.ts', '.github/workflows/new-free-tests.yml']) {
+      const deleted = computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles: [file] });
+      expect({ file, mode: deleted.coverage?.mode }).toEqual({ file, mode: 'pr' });
+      expect(deleted.coverage?.noConsumerFiles).toEqual([file]);
     }
     const missingBase = computePaidCaseSelection({ profile: 'pr', env: { EVALS_BASE: 'missing-boundary-ref' },
       changedFiles: ['package.json'] });

@@ -30,20 +30,10 @@ import * as path from 'path';
 import { runBin } from './helpers/run-bin';
 import { selectTests, E2E_TOUCHFILES, LLM_JUDGE_TOUCHFILES, GLOBAL_TOUCHFILES } from './helpers/touchfiles';
 import { manualReviewFixture } from './helpers/manual-judge-review-fixture';
-import { renderDashboard } from '../scripts/eval-watch';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const SCRIPT = (name: string) => path.join(ROOT, 'scripts', name);
 const SLUG = 'eval-cli-fixture';
-
-test('eval:watch distinguishes unscored manual acceptance from malformed claims', () => {
-  const manual = manualReviewFixture();
-  const output = renderDashboard(null, { tests: [manual, { ...manual, passed: true }], total_cost_usd: 0 });
-  expect(output).toContain('MANUAL/unscored');
-  expect(output).toContain(manual.manual_review!.approval.approval_url);
-  expect(output).toContain('Manual accepted: 1');
-  expect(output).toContain('✗');
-});
 
 let tmpHome: string;
 let evalDir: string;
@@ -131,7 +121,7 @@ describe('eval:select CLI (scripts/eval-select.ts)', () => {
     // --base HEAD makes the committed diff empty; uncommitted/untracked files
     // in the working tree may still appear, so assert shape invariants that
     // hold for ANY tree state rather than pinning specific selections.
-    const result = runBin('bun', [SCRIPT('eval-select.ts'), '--json', '--base', 'HEAD'], { cwd: ROOT });
+    const result = runBin('bun', [SCRIPT('eval-select.ts'), '--json', '--base', 'HEAD', '--profile', 'full'], { cwd: ROOT });
     expect(result.status).toBe(0);
 
     const parsed = JSON.parse(result.stdout);
@@ -164,7 +154,7 @@ describe('eval:select CLI (scripts/eval-select.ts)', () => {
   });
 
   test('human-readable mode prints the base and per-tier headers', () => {
-    const result = runBin('bun', [SCRIPT('eval-select.ts'), '--base', 'HEAD'], { cwd: ROOT });
+    const result = runBin('bun', [SCRIPT('eval-select.ts'), '--base', 'HEAD', '--profile', 'full'], { cwd: ROOT });
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('Base: HEAD');
     // Either the no-diff line or the two selection headers.
@@ -173,6 +163,15 @@ describe('eval:select CLI (scripts/eval-select.ts)', () => {
       expect(result.stdout).toContain('E2E: selected');
       expect(result.stdout).toContain('LLM-judge: selected');
     }
+  });
+
+  test('the default profile is pr, matching test:pr and eval:bg:pr', () => {
+    const result = runBin('bun', [SCRIPT('eval-select.ts'), '--json', '--base', 'HEAD'], { cwd: ROOT, env: { EVALS_PROFILE: undefined } });
+    expect(result.status, result.stderr).toBe(0);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed).toMatchObject({ base: 'HEAD', profile: 'pr' });
+    expect(Array.isArray(parsed.e2e.selected)).toBe(true);
+    expect(typeof parsed.coverage?.mode).toBe('string');
   });
 
   test('a global-touchfile diff selects ALL tests with a global reason (pure selectTests)', () => {

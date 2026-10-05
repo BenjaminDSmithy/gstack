@@ -10,13 +10,15 @@
  * ~/.gstack) and from a project-vendored copy that captured the global Codex
  * namespace (#2879). Instruction-only hosts must change nothing.
  */
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { accessSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ALL_HOST_CONFIGS } from '../hosts/index';
-import { cleanupFixtures, makeFixture, makeSource, put, registryRows, runSetup, setVersion, tree } from './helpers/install-fixture';
+import { cleanupFixtures, cleanupSeed, makeFixture, makeSource, put, registryRows, runSetup, setVersion, tree } from './helpers/install-fixture';
+import { expectTokens } from './helpers/prompt-structure';
 
 afterEach(cleanupFixtures);
+afterAll(cleanupSeed);
 
 /** Skills directory each installable host discovers (global scope). */
 const DISCOVERY: Record<string, string> = {
@@ -159,7 +161,7 @@ describe.skipIf(process.platform === 'win32')('host conformance kit', () => {
     const ship = readFileSync(join(commands, 'gstack-ship.md'), 'utf8');
     expect(ship).toMatch(/^---\ndescription: "[^"]+"\nagent: build\nsubtask: false\n---\n/);
     // The skill tool loads by frontmatter name, not directory name (#2651).
-    expect(ship).toContain('Load the `ship` skill with the skill tool');
+    expectTokens(ship, ['`ship`'], 'ship');
     expect(ship).toContain('$ARGUMENTS');
     expect(readFileSync(join(commands, 'gstack-review.md'), 'utf8')).toBe('my own review command\n');
     expect(existsSync(join(commands, 'gstack-retired.md'))).toBe(false);

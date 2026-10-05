@@ -42,20 +42,25 @@ afterAll(() => {
 });
 
 
-// QUARANTINED (opt-in via GSTACK_COMPARE_BOARD_TESTS=1): all 16 tests fail
-// identically on origin/main v1.64.1.0, solo, on dev machines — verified per
-// the blame protocol during the 2026-08 test-infra pass. Main's own CI lane
-// skip-lists this file as "pre-existing env failure (needs a display-shaped
-// env)". Fixing the underlying board-vs-headless-env mismatch is tracked
-// follow-up work; until then an always-red file would block every PR now
-// that the free suite is a required check.
-const COMPARE_BOARD_ENABLED = process.env.GSTACK_COMPARE_BOARD_TESTS === '1';
-const describeBoard = COMPARE_BOARD_ENABLED ? describe : describe.skip;
-
 let bm: BrowserManager;
 let boardUrl: string;
 let server: ReturnType<typeof Bun.serve>;
 let tmpDir: string;
+
+/**
+ * The board settles its post-submit state after the feedback POST resolves, a
+ * network round trip after the click. Poll for that settled state instead of
+ * reading it once: a single read races the round trip under a loaded runner.
+ */
+async function settledJs(expression: string, expected: string, timeoutMs = 10_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let value = await handleReadCommand('js', [expression], bm);
+  while (value !== expected && Date.now() < deadline) {
+    await Bun.sleep(25);
+    value = await handleReadCommand('js', [expression], bm);
+  }
+  return value;
+}
 
 // Create a minimal 1x1 pixel PNG for test variants
 function createTestPng(filePath: string): void {
@@ -68,11 +73,6 @@ function createTestPng(filePath: string): void {
 }
 
 beforeAll(async () => {
-  // Skipped describes do NOT skip file-level hooks: this setup (Bun.serve +
-  // BrowserManager launch) still ran with all 16 tests skipped, and under
-  // parallel load it wedges — caught by the runner's in-flight-at-kill
-  // epilogue as the suite's intermittent staller. Gate the hooks too.
-  if (!COMPARE_BOARD_ENABLED) return;
   // Create test PNG files
   tmpDir = '/tmp/compare-board-test-' + Date.now();
   fs.mkdirSync(tmpDir, { recursive: true });
@@ -104,7 +104,6 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (!COMPARE_BOARD_ENABLED) return;
   try { server.stop(); } catch {}
   fs.rmSync(tmpDir, { recursive: true, force: true });
   // Close only this file's own browser — never process.exit(): bun test runs
@@ -117,7 +116,7 @@ afterAll(async () => {
 
 // ─── DOM Structure ──────────────────────────────────────────────
 
-describeBoard('Comparison board DOM structure', () => {
+describe('Comparison board DOM structure', () => {
   test('has hidden status element', async () => {
     const status = await handleReadCommand('js', [
       'document.getElementById("status").textContent'
@@ -170,7 +169,7 @@ describeBoard('Comparison board DOM structure', () => {
 
 // ─── Submit Flow ────────────────────────────────────────────────
 
-describeBoard('Submit feedback flow', () => {
+describe('Submit feedback flow', () => {
   test('submit without interaction returns empty preferred', async () => {
     // Reset page state
     await handleWriteCommand('goto', [boardUrl], bm);
@@ -251,23 +250,19 @@ describeBoard('Submit feedback flow', () => {
   });
 
   test('submit button is disabled after submission', async () => {
-    const disabled = await handleReadCommand('js', [
-      'document.getElementById("submit-btn").disabled'
-    ], bm);
+    const disabled = await settledJs('document.getElementById("submit-btn").disabled', 'true');
     expect(disabled).toBe('true');
   });
 
   test('success message is visible after submission', async () => {
-    const display = await handleReadCommand('js', [
-      'document.getElementById("success-msg").style.display'
-    ], bm);
+    const display = await settledJs('document.getElementById("success-msg").style.display', 'block');
     expect(display).toBe('block');
   });
 });
 
 // ─── Regenerate Flow ────────────────────────────────────────────
 
-describeBoard('Regenerate flow', () => {
+describe('Regenerate flow', () => {
   test('regenerate button sets status to "regenerate"', async () => {
     // Fresh page
     await handleWriteCommand('goto', [boardUrl], bm);
@@ -341,7 +336,7 @@ describeBoard('Regenerate flow', () => {
 
 // ─── Agent Polling Pattern ──────────────────────────────────────
 
-describeBoard('Agent polling pattern (simulates what $B eval does)', () => {
+describe('Agent polling pattern (simulates what $B eval does)', () => {
   test('status is empty before user action', async () => {
     // Fresh page — simulates agent's first poll
     await handleWriteCommand('goto', [boardUrl], bm);

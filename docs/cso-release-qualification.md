@@ -26,6 +26,12 @@ The dedicated Windows CI job checks startup, argument forwarding, and runtime
 injection separately from static audit and private-state support. POSIX
 watchdog execution remains unavailable there.
 
+No qualified runtime or scanner image exists yet, so contained runtime and
+scanner execution is unavailable and setup preloads nothing: the scanner
+catalog is empty while its build inputs await review, and the runtime catalog's
+profiles stay unqualified until a private evaluator, still being built, can
+qualify them.
+
 Every successful fresh install or upgrade asks the trusted launcher to preload
 the current host platform's qualified runtime and scanner images. This is the
 only automatic image acquisition path. It first validates the committed
@@ -48,10 +54,12 @@ egress. `gstack-cso doctor --repo PATH` never downloads; it reports a qualified
 profile unavailable until that exact digest and platform are already present
 in the local daemon.
 
-The ordinary free suite exercises contracts without requiring Docker. The
-`cso-docker-integration` CI job sets `GSTACK_CSO_DOCKER_TESTS=1`; unavailable Docker
-or missing containment prerequisites fail that job. Run it locally with a
-working local daemon:
+The ordinary free suite exercises contracts without requiring Docker. The free
+lane's `cso-docker-integration` job sets `GSTACK_CSO_DOCKER_TESTS=1` and runs
+`test/cso-docker-integration.test.ts`; unavailable Docker or missing containment
+prerequisites fail that job. The node-lifecycle and stack-cold files need a
+staged stack image, so they run in the CSO runtime workflows through
+`test:cso:docker`. Run all three locally with a working local daemon:
 
 ```bash
 bun run build:cso
