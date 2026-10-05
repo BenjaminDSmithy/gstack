@@ -89,7 +89,8 @@ function frontmatterHooks(): Wired[] {
     for (const line of front.split('\n')) {
       const ev = line.match(/^ {2}([A-Za-z]+):\s*$/);
       if (ev) event = ev[1];
-      const cmd = line.match(/command: "bash \$HOME\/\.claude\/skills\/gstack\/([^"\s]+)"/);
+      // Upstream wraps the call: bash -c "exec bash \"$HOME/.claude/skills/gstack/<rel>\"".
+      const cmd = line.match(/command: .*?\$HOME\/\.claude\/skills\/gstack\/([^"'\s\\]+)/);
       if (cmd && !out.has(cmd[1])) out.set(cmd[1], { rel: cmd[1], event, source: `${dir}/SKILL.md.tmpl frontmatter` });
     }
   }
