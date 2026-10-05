@@ -192,6 +192,17 @@ The sweep itself fails rather than reading green when it could not look:
 A symlinked root is resolved and swept through: the live install,
 `~/.claude/skills/gstack`, is often a symlink.
 
+`GREP_OPTIONS` is unset before the first grep, by the gate and at the top of
+`setup`. macOS grep (BSD 2.6.0) still applies it without a warning (GNU grep
+applied it until 3.6), and `--color=always` there wrapped every match in
+escapes: a healthy shim read `MISSING PAYLOAD`, refusing the tree, a payload
+named through an own-directory variable went unchecked, and past the gate
+`setup` read each skill's name back wrapped in escapes and linked the skill
+under that. Run directly, the gate also drops every shell function it started
+with: one the caller exported (`export -f`) runs in place of the command it is
+named after, and a `grep` forcing colour passed a broken payload while a
+`find` that printed nothing refused a healthy tree.
+
 Silent on a healthy tree. Coverage is printed only on request:
 
 ```bash

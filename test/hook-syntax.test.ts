@@ -1933,6 +1933,76 @@ describe('hook-syntax: bun payloads', () => {
   }, TEST_TIMEOUT_MS);
 });
 
+// ── the caller's environment ───────────────────────────────────────────────
+
+// A PATH whose first grep applies GREP_OPTIONS as macOS grep (BSD 2.6.0)
+// does, its words ahead of the arguments. GNU grep has ignored the variable
+// since 3.6, so on Linux a case that left it to the host grep passed whether
+// or not anything unset it.
+function bsdGrepPath(): string {
+  const dir = path.join(FX, 'bsd-grep');
+  if (!fs.existsSync(path.join(dir, 'grep'))) {
+    const real = spawnCaptured('/bin/sh', ['-c', 'command -v grep']).stdout.trim();
+    if (!real.startsWith('/')) throw new Error(`no grep on PATH: ${JSON.stringify(real)}`);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'grep'), `#!/bin/sh\nopts=$GREP_OPTIONS\nunset GREP_OPTIONS\nexec '${real}' $opts "$@"\n`, { mode: 0o755 });
+  }
+  return `${dir}:${process.env.PATH ?? '/usr/bin:/bin'}`;
+}
+
+// A shim over a valid payload, and beside it an own-directory shim over a
+// broken payload and a shell file with conflict markers in a heredoc. What
+// the gate says about each must not change with the caller's environment.
+function expectVerdictsUnchanged(env: Record<string, string>): void {
+  fixture('caller-env/ok/hook', SHIM('hook.ts'));
+  fixture('caller-env/ok/hook.ts', 'export const ok = 1;\n');
+  const ok = runGate(['--report', path.join(FX, 'fx', 'caller-env', 'ok')], env);
+  expect(ok.code, ok.output).toBe(0);
+  expect(ok.output).toBe('hook-syntax: 2 checked, 0 skipped');
+  fixture('caller-env/bad/hook', '#!/usr/bin/env bash\nD="$(cd "$(dirname "$0")" && pwd)"\nexec bun "$D/payload.ts"\n');
+  const payload = fixture('caller-env/bad/payload.ts', 'const broken: number = {\n');
+  const merged = fixture('caller-env/bad/merged.sh', `#!/bin/bash\n${CONFLICT_HEREDOC}`);
+  const bad = runGate([path.join(FX, 'fx', 'caller-env', 'bad')], env);
+  expect(bad.code, bad.output).toBe(1);
+  expect(bad.output).toContain(`FAILS TO PARSE ${fs.realpathSync(payload)}`);
+  expect(bad.output).toContain(`UNRESOLVED CONFLICT MARKERS in ${fs.realpathSync(merged)}`);
+}
+
+// What a function the caller exported (`export -f`) runs in place of: in
+// every bash started with it, the gate included, it shadows the command it
+// is named after.
+const EXPORTED_FUNCTIONS: Array<[string, string]> = [
+  ['grep', 'command grep --color=always "$@"'],
+  ['find', ':'],
+];
+
+describe("hook-syntax: the caller's environment", () => {
+  // A grep forcing --color=always passed a broken payload behind an
+  // own-directory variable; a find that prints nothing refused a healthy tree
+  // as "no files found".
+  for (const [name, body] of EXPORTED_FUNCTIONS) {
+    test(`a ${name} function the caller exported changes no verdict`, () => {
+      expectVerdictsUnchanged({ [`BASH_FUNC_${name}%%`]: `() {  ${body}\n}` });
+    }, TEST_TIMEOUT_MS);
+  }
+
+  test('a shell that sources the gate keeps its own functions', () => {
+    // Only a run drops them: sourced, the shell is the caller's own.
+    const r = spawnCaptured('/bin/bash', ['-c', 'mine() { echo kept; }; . "$1" && mine', 'sh', GATE]);
+    expect([codeOf(r), r.stdout, r.stderr]).toEqual([0, 'kept\n', '']);
+  }, TEST_TIMEOUT_MS);
+
+  test('a colour-forcing GREP_OPTIONS neither invents a missing payload nor hides a broken file', () => {
+    // macOS grep (BSD 2.6.0) still applies GREP_OPTIONS, without a word, and
+    // GNU grep did until 3.6. --color=always wraps every match in escapes: the
+    // path read out of a `bun "$HERE/..."` hit carried them, so a healthy shim
+    // read MISSING PAYLOAD and setup refused the tree, and an own-directory
+    // assignment no longer matched, so its broken payload went unchecked. The
+    // grep first on PATH applies the variable on any host.
+    expectVerdictsUnchanged({ GREP_OPTIONS: '--color=always', PATH: bsdGrepPath() });
+  }, TEST_TIMEOUT_MS);
+});
+
 // ── house rules ────────────────────────────────────────────────────────────
 
 describe.skipIf(process.platform === 'win32')('setup: the canonical tree hooks are registered from', () => {
@@ -2148,12 +2218,13 @@ function mkSetupTree(): { dir: string; home: string } {
   return { dir, home };
 }
 
-function runSetup(dir: string, home: string): Run {
+function runSetup(dir: string, home: string, extra: Record<string, string> = {}): Run {
   // A scrubbed env: if the gate ever let setup through by mistake, every
   // write must land in the scratch HOME, never in a real GSTACK_HOME,
-  // CLAUDE_CONFIG_DIR or CODEX_HOME inherited from the caller.
+  // CLAUDE_CONFIG_DIR or CODEX_HOME inherited from the caller. `extra` adds
+  // the one variable a case is about.
   const r = spawnCaptured('/bin/bash', [path.join(dir, 'tree', 'setup'), '--no-prefix', '--no-team'], {
-    env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, TMPDIR: path.join(dir, 'tmp') },
+    env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, TMPDIR: path.join(dir, 'tmp'), ...extra },
     cwd: path.join(dir, 'tree'),
   });
   const killed = r.signal ? `\n[killed by ${r.signal}]` : '';
@@ -2211,6 +2282,39 @@ describe('setup: the gate refuses before anything is installed', () => {
     expect(r.output).not.toContain('hook-syntax:');
     expect(r.output).toContain(PAST_GATE);
     expect(r.code).not.toBe(0);
+    expect(homeIsEmpty(home)).toBe(true);
+  }, TEST_TIMEOUT_MS);
+
+  // What a user's shell may export that changed the gate's verdict on a
+  // healthy tree. The tree's hook hands a payload to bun, so the payload
+  // search runs too.
+  const CALLER_ENVS: Array<[string, Record<string, string>]> = [
+    ['GREP_OPTIONS=--color=always', { GREP_OPTIONS: '--color=always' }],
+  ];
+  for (const [label, extra] of CALLER_ENVS) {
+    test(`control: a healthy tree gets past the gate with ${label} exported`, () => {
+      const { dir, home } = mkSetupTree();
+      const hooks = path.join(dir, 'tree', 'hosts', 'claude', 'hooks');
+      fs.writeFileSync(path.join(hooks, 'question-preference-hook'), SHIM('question-preference-hook.ts'));
+      fs.writeFileSync(path.join(hooks, 'question-preference-hook.ts'), 'export const ok = 1;\n');
+      const r = runSetup(dir, home, extra);
+      expect(r.output).not.toContain('REFUSING TO REGISTER');
+      expect(r.output).not.toContain('hook-syntax:');
+      expect(r.output).toContain(PAST_GATE);
+      expect(homeIsEmpty(home)).toBe(true);
+    }, TEST_TIMEOUT_MS);
+  }
+
+  test('setup unsets GREP_OPTIONS before its own greps read a match back', () => {
+    // setup takes the name it links each skill under from
+    // `grep -m1 '^name:'`, and macOS grep applies GREP_OPTIONS: with
+    // --color=always the name came back wrapped in escapes, and the skill was
+    // linked under that. The stub setup runs first after the gate makes the
+    // same read, through a grep that applies the variable on any host.
+    const { dir, home } = mkSetupTree();
+    fs.writeFileSync(path.join(dir, 'tree', 'bin', 'gstack-state-root.sh'), `echo "${PAST_GATE}: $(printf 'name: qa\\n' | grep -m1 '^name:')"\nexit 7\n`);
+    const r = runSetup(dir, home, { GREP_OPTIONS: '--color=always', PATH: bsdGrepPath() });
+    expect(r.output).toContain(`${PAST_GATE}: name: qa\n`);
     expect(homeIsEmpty(home)).toBe(true);
   }, TEST_TIMEOUT_MS);
 

@@ -13,6 +13,15 @@ umask 077  # Restrict new files to owner-only (0o600 files, 0o700 dirs)
 # the shebang.
 BASH_COMPAT=50
 
+# GREP_OPTIONS puts its words in front of every grep this script and its
+# children run. macOS grep (BSD 2.6.0) still applies it, without a word; GNU
+# grep has ignored it since 3.6. setup reads matches back (the name each skill
+# is linked under comes out of a grep), and with --color=always that name came
+# back wrapped in escapes and the skill was linked under it. Unset, each grep
+# runs with the options it spells. A caller who never exported it sees no
+# change, and their own shell keeps it.
+unset GREP_OPTIONS
+
 usage() {
   cat <<'EOF'
 gstack setup — install gstack skills + build browse binary

@@ -135,6 +135,27 @@
 # bash is Homebrew's 5.x, which can deadlock writing a heredoc body. This file
 # has no heredocs, and stays bash-3.2-clean.
 
+# What the caller exports must not reach a verdict. macOS grep (BSD 2.6.0)
+# still applies GREP_OPTIONS, without a word, as GNU grep did until 3.6, and
+# `--color=always` there wrapped every match in escapes: a payload path read
+# out of a hit named a file that does not exist, refusing a healthy tree as
+# MISSING PAYLOAD, and an own-directory assignment matched nothing, so a
+# broken payload behind it passed unchecked. No grep here wants an option it
+# did not spell.
+unset GREP_OPTIONS
+
+# A function the caller exported (`export -f`) runs in place of the command it
+# is named after: a grep forcing --color=always passed a broken payload behind
+# an own-directory variable, and a find that printed nothing refused a healthy
+# tree as "no files found". Run directly, this file calls no function it does
+# not define below, so every one its shell started with is dropped first. A
+# shell that sources it keeps its own.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  while read -r _ _ _fn; do
+    unset -f "$_fn"
+  done < <(declare -F)
+fi
+
 # Interpreter seams for the test suite, which points them at names that do not
 # exist to exercise the absent-interpreter paths.
 HOOK_SYNTAX_PYTHON="${HOOK_SYNTAX_PYTHON:-python3}"
