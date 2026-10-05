@@ -136,6 +136,10 @@ if [ -e "$_RT/.git" ]; then
 elif [ -n "$_RT_SRC" ] && [ -e "$_RT_SRC/.git" ]; then
   INSTALL_TYPE="global-git"
   INSTALL_DIR="$_RT_SRC"
+elif _SRC=$(cat "$HOME/.claude/skills/gstack/.source-path" 2>/dev/null) && [ -n "$_SRC" ] && [ -e "$_SRC/.git" ]; then
+  # setup records the checkout behind a runtime root whose assets it copied (Copilot).
+  INSTALL_TYPE="global-git"
+  INSTALL_DIR="$_SRC"
 elif [ -d "$HOME/.gstack/repos/gstack/.git" ]; then
   INSTALL_TYPE="global-git"
   INSTALL_DIR="$HOME/.gstack/repos/gstack"
