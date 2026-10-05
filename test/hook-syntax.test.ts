@@ -559,6 +559,9 @@ describe('hook-syntax: line endings', () => {
     //   end   bash 5.2's read takes the newline after a trailing invalid
     //         byte as part of a character, so the last such line never
     //         comes back
+    // The line scan splits words itself, a byte at a time: to it the nbsp line
+    // is a command whatever grep matched, and a comment's bytes never reach
+    // the own-directory match.
     const own = 'D="$(cd "$(dirname "$0")" && pwd)"';
     const shims: Array<[string, Buffer]> = [
       ['nbsp', Buffer.concat([Buffer.from(`${own}\n`), Buffer.from([0xc2, 0xa0]), Buffer.from('D=/elsewhere || true\n')])],
@@ -1429,6 +1432,109 @@ describe('hook-syntax: bun payloads', () => {
     const r = runGate([path.join(FX, 'fx', 'self-reassign/hook')]);
     expect(r.code, r.output).toBe(1);
     expect(r.output).toContain(`FAILS TO PARSE ${payload}`);
+  }, TEST_TIMEOUT_MS);
+
+  test('an assignment counts at a bun call once bash has run it, on a line above or earlier on the call line', () => {
+    // bash runs `D="$D/lib"; exec bun "$D/payload.ts"` with D already lib/,
+    // and `D="$(cd ... && pwd)"; exec bun ...` with D already the shim's own
+    // directory. Until bash has run the assignment's command, the call is
+    // inside its value, or is a word of the command it only prefixes, and
+    // bash expands the call's $D before it assigns. An assignment that only
+    // prefixes a command (`D=x cmd`), or runs in a pipeline or in the
+    // background, never changes D for the shim. After `|| exec bun`, the call
+    // runs only once the assignment failed. Quotes hide `;`, `|` and `&`.
+    // The shim's own payload.ts and resolve.ts are broken and lib/payload.ts
+    // is valid, so each file the gate refuses is one it followed into the
+    // shim's own directory. A stub bun on PATH records the paths bash hands
+    // it, and each row is checked against that record before the gate runs.
+    const own = 'D="$(cd "$(dirname "$0")" && pwd)"';
+    const rows: Array<[string, string[]]> = [
+      [`${own}\nD="$D/lib"; exec bun "$D/payload.ts"`, []],
+      [`${own}\nD="$D/lib" && exec bun "$D/payload.ts"`, []],
+      [`${own}\nD="$D/lib" || exit 0; exec bun "$D/payload.ts"`, []],
+      [`${own}\nD="$(cd "$D/lib" && pwd)" || exec bun "$D/payload.ts"`, []],
+      [`${own}; exec bun "$D/payload.ts"`, ['payload.ts']],
+      [`${own} && exec bun "$D/payload.ts"`, ['payload.ts']],
+      [`${own}\nD="$D/lib" bun "$D/payload.ts"`, ['payload.ts']],
+      [`${own}\nD=$(cd "$D" && bun "$D/payload.ts")`, ['payload.ts']],
+      [`${own}\nD="$(cd "$D" && bun "$D/payload.ts")"`, ['payload.ts']],
+      [`${own}\nD="$(bun "$D/resolve.ts")"; exec bun "$D/payload.ts"`, ['resolve.ts']],
+      // A prefix, with or without a redirect, sets D for its command alone.
+      [`${own}\nD=/nowhere true; exec bun "$D/payload.ts"`, ['payload.ts']],
+      [`${own}\nD="$D/lib" bun "$D/lib/payload.ts"; exec bun "$D/payload.ts"`, ['payload.ts']],
+      [`${own}\nD=/nowhere 2>&1 bun "$D/payload.ts"`, ['payload.ts']],
+      [`${own}\nD=/nowhere export X=1; exec bun "$D/payload.ts"`, ['payload.ts']],
+      [`D=/nowhere\n${own} true; exec bun "$D/payload.ts"`, []],
+      // The last assignment run before the call wins, wherever it sits.
+      [`${own}\nD="$D/lib"; ${own}; exec bun "$D/payload.ts"`, ['payload.ts']],
+      [`${own}; D="$D/lib"; exec bun "$D/payload.ts"`, []],
+      [`${own}\nD="$D/lib" X="$(bun "$D/payload.ts")"`, []],
+      // Reached only once the cd failed; skipped once an assignment succeeded.
+      [`${own} || exec bun "$D/payload.ts"`, []],
+      [`D=/nowhere || ${own}; exec bun "$D/payload.ts"`, []],
+      // A redirect, or export, still assigns; quotes and $(...) hold words.
+      [`${own}\nD="$D/lib" 2>/dev/null; exec bun "$D/payload.ts"`, []],
+      [`${own}\nexport D="$D/lib"; exec bun "$D/payload.ts"`, []],
+      [`${own}\nD='a | b'; exec bun "$D/payload.ts"`, []],
+      [`${own}\nD="$(echo "/no where")"; exec bun "$D/payload.ts"`, []],
+      // A subshell's assignment, and operators inside quotes.
+      [`${own}\nD="$D/lib" | bun "$D/payload.ts"`, ['payload.ts']],
+      [`${own}\nD="$D/lib" & exec bun "$D/payload.ts"`, ['payload.ts']],
+      [`${own}\nD="a;b" bun "$D/payload.ts"`, ['payload.ts']],
+      [`${own}\nD='x|y' true && exec bun "$D/payload.ts"`, ['payload.ts']],
+      // The same rules on a line above the call.
+      [`${own}\nD=/nowhere true\nexec bun "$D/payload.ts"`, ['payload.ts']],
+      [`${own}\nD="$D/lib" | cat\nexec bun "$D/payload.ts"`, ['payload.ts']],
+      [`${own}\ntrue; D="$D/lib"\nexec bun "$D/payload.ts"`, []],
+    ];
+    const stub = fixture('same-line-assign-bin/bun', '#!/bin/sh\nfor a in "$@"; do printf \'%s\\n\' "$a" >> "$BUN_LOG"; done\n');
+    fs.chmodSync(stub, 0o755);
+    const ran = rows.map(([body], i) => {
+      const dir = path.join(FX, 'fx', `same-line-assign-${i}`);
+      const hook = fixture(`same-line-assign-${i}/hook`, `#!/usr/bin/env bash\n${body}\n`);
+      fixture(`same-line-assign-${i}/lib/payload.ts`, 'export const ok = 1;\n');
+      const log = path.join(dir, 'bun.log');
+      fs.writeFileSync(log, '');
+      spawnCaptured('/bin/bash', [hook], { env: { ...process.env, PATH: `${path.dirname(stub)}:${process.env.PATH}`, BUN_LOG: log } });
+      const handed = fs.readFileSync(log, 'utf-8').split('\n');
+      return [body, ['payload.ts', 'resolve.ts'].filter(name => handed.includes(path.join(dir, name)))];
+    });
+    expect(ran).toEqual(rows); // the premise: what bash hands bun
+    const got = rows.map(([body], i) => {
+      const dir = `same-line-assign-${i}`;
+      const hook = path.join(FX, 'fx', dir, 'hook');
+      const files = ['payload.ts', 'resolve.ts'].map(name => [name, fixture(`${dir}/${name}`, 'const broken: number = {\n')]);
+      const r = runGate([hook]);
+      return [body, files.filter(([, p]) => r.output.includes(`FAILS TO PARSE ${p}`)).map(([name]) => name), r.code];
+    });
+    expect(got).toEqual(rows.map(([body, followed]) => [body, followed, followed.length ? 1 : 0]));
+  }, TEST_TIMEOUT_MS);
+
+  test.skipIf(!UTF8_LOCALES.length)('a line holding invalid UTF-8 bytes is read a byte at a time under a UTF-8 locale', () => {
+    // bash hands bun `<the bytes>/payload.ts` or `/x/payload.ts` for the first
+    // three, in any locale: D is not the shim's own directory. Read as UTF-8,
+    // /bin/bash 3.2 takes an invalid byte and the byte after it as one
+    // character, a `;` or a closing quote included, and the line scan then
+    // followed the shim's own directory. glibc's bash reads them a byte at a
+    // time either way.
+    const own = 'D="$(cd "$(dirname "$0")" && pwd)"';
+    const rows: Array<[string, Buffer, boolean]> = [
+      ['run-on', Buffer.from('D=\xe9\xc3; true', 'latin1'), false],
+      ['quoted', Buffer.from("D='\xe9\xc3'; true", 'latin1'), false],
+      ['prefix-then', Buffer.from('X="\xe9" D=/x', 'latin1'), false],
+      ['control', Buffer.from('D=\xe9 true', 'latin1'), true],
+    ];
+    const got: Array<[string, string, number, boolean]> = [];
+    for (const [name, line] of rows) {
+      const shim = fixture(`scan-bytes-${name}/hook`, '');
+      fs.writeFileSync(shim, Buffer.concat([Buffer.from(`#!/usr/bin/env bash\n${own}\n`), line, Buffer.from('\nexec bun "$D/payload.ts"\n')]));
+      const payload = fixture(`scan-bytes-${name}/payload.ts`, 'const broken: number = {\n');
+      for (const loc of UTF8_LOCALES) {
+        const r = runGate([shim], { LC_ALL: loc, LANG: loc });
+        got.push([name, loc, r.code, r.output.includes(`FAILS TO PARSE ${payload}`)]);
+      }
+    }
+    expect(got).toEqual(rows.flatMap(([name, , followed]) => UTF8_LOCALES.map(loc => [name, loc, followed ? 1 : 0, followed])));
   }, TEST_TIMEOUT_MS);
 
   test('a payload after a bun call that is not followed, on the same line, is still found', () => {

@@ -82,7 +82,7 @@
 # `bash -n` on the shim proves the shim parses and says nothing about the file
 # that runs. So every shell file this run parsed is searched for the paths it
 # hands to bun, and each of those is parsed too. `$HERE` is the usual name;
-# a variable whose last assignment above the call is the shim's own directory,
+# a variable whose last assignment before the call is the shim's own directory,
 # `VAR="$(cd "$(dirname "$0")" && pwd)"` (`pwd -P`, `${BASH_SOURCE[0]}` and a
 # redirect on the cd allowed), counts the same, which is how /autoplan's hook
 # names its payload. The payload is found from the
@@ -178,8 +178,12 @@ HOOK_SYNTAX_NESTED=0
 
 # Set by _hook_syntax_payload when a `bun "$VAR/..."` names the shim's directory.
 HOOK_SYNTAX_FOLLOWED=0
-# Filled by _hook_syntax_bun_calls: one VAR<TAB>rel line per call.
+# Filled by _hook_syntax_bun_calls: one VAR<TAB>rel line per call, and the
+# line's text before each call, one element per call in the same order.
 HOOK_SYNTAX_CALLS=''
+HOOK_SYNTAX_BEFORE=()
+# Set by _hook_syntax_assigns: what a shim line leaves a variable holding.
+HOOK_SYNTAX_VALUE=''
 # Filled by _hook_syntax_read_list: the records it read, one per element.
 HOOK_SYNTAX_LIST=()
 
@@ -448,7 +452,7 @@ _hook_syntax_check_bun() {
 # names somewhere else, and the path is not followed.
 _hook_syntax_payloads() {
   [ "${#HOOK_SYNTAX_SHELLS[@]}" -gt 0 ] || return 0
-  local hits rest hit shim f text line calls call var rel strict rc=0 tab=$'\t'
+  local hits rest hit shim f text line calls call var rel strict k rc=0 tab=$'\t'
   hits=$(LC_ALL=C grep -nHE 'bun[[:space:]]+(run[[:space:]]+)?"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/' -- "${HOOK_SYNTAX_SHELLS[@]}" 2>/dev/null)
   [ -n "$hits" ] || return 0
   rest="$hits"
@@ -475,21 +479,24 @@ _hook_syntax_payloads() {
     # when it is not.
     strict=1
     calls="$HOOK_SYNTAX_CALLS"
+    k=0
     while [ -n "$calls" ]; do
       call="${calls%%"$HOOK_SYNTAX_NL"*}"
       calls="${calls#*"$HOOK_SYNTAX_NL"}"
       var="${call%%"$tab"*}"
       rel="${call#*"$tab"}"
       HOOK_SYNTAX_FOLLOWED=0
-      _hook_syntax_payload "$shim" "$var" "$rel" "$line" "$strict" || rc=1
+      _hook_syntax_payload "$shim" "$var" "$rel" "$line" "$strict" "${HOOK_SYNTAX_BEFORE[k]}" || rc=1
       [ "$HOOK_SYNTAX_FOLLOWED" -eq 1 ] && strict=0
+      k=$((k + 1))
     done
   done
   return "$rc"
 }
 
 # The `bun "$VAR/<rel>"` calls on one shim line, in order, as VAR<TAB>rel
-# lines in HOOK_SYNTAX_CALLS; none for a comment line. $1 = the line's text.
+# lines in HOOK_SYNTAX_CALLS, and the line's text before each one in
+# HOOK_SYNTAX_BEFORE; none for a comment line. $1 = the line's text.
 # Read in the C locale, like the greps: under a UTF-8 locale bash's regex
 # finds no match past an invalid UTF-8 byte, so a call after one went unread.
 _hook_syntax_bun_calls() {
@@ -497,10 +504,12 @@ _hook_syntax_bun_calls() {
   local comment_re='^[[:space:]]*#'
   local bun_re='bun[[:space:]]+(run[[:space:]]+)?"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/([^"]+)"'
   HOOK_SYNTAX_CALLS=''
+  HOOK_SYNTAX_BEFORE=()
   [[ $text =~ $comment_re ]] && return 0
   while [[ $text =~ $bun_re ]]; do
     HOOK_SYNTAX_CALLS="$HOOK_SYNTAX_CALLS${BASH_REMATCH[2]}"$'\t'"${BASH_REMATCH[3]}$HOOK_SYNTAX_NL"
     text="${text#*"${BASH_REMATCH[0]}"}"
+    HOOK_SYNTAX_BEFORE+=("${1%"${BASH_REMATCH[0]}$text"}")
   done
   return 0
 }
@@ -525,25 +534,308 @@ _hook_syntax_match() {
   [[ $1 =~ $2 ]]
 }
 
+# What one shim line does to VAR, read as bash reads it: split into commands
+# at `;`, `&`, `&&`, `||` and `|` outside quotes, `(...)`, `$(...)`, `${...}`
+# and backquotes, each command into words at blanks, and a `#` that opens a
+# word ending the line. $1 = the text, $2 = VAR, $3 = `call` when $1 is a
+# line's text before a bun call. Returns 0 and sets HOOK_SYNTAX_VALUE to what
+# VAR holds at the end of the text, or at the call: the text after `VAR=` in
+# the last assignment of VAR in force there, with a `+` before it for
+# `VAR+=`, or '' at a call that runs only once that assignment has failed.
+# Returns 1 when no assignment of VAR in the text is in force there, and VAR
+# keeps the value it had.
+#
+# An assignment is in force once its command has run, when that command holds
+# only assignments and redirects (`VAR=x`, `VAR=x 2>/dev/null`), or is
+# export, readonly, local, declare or typeset with `VAR=x` as an argument.
+# Commands run as on the path where each of those succeeds and anything else
+# may go either way: a command after `&&` or `||` runs unless the `||` follows
+# one of those. Neither of these changes VAR: an assignment that only prefixes a
+# command (`VAR=x cmd`), which sets VAR for that command alone, and one in a
+# pipeline, or in a list sent to the background with `&`, which runs in a
+# subshell.
+#
+# At a call, the call's own command has not run: bash expands the call before
+# it assigns (`VAR=x bun ...`, `VAR="$(bun "$VAR/x.ts")"`), though an
+# assignment ahead of the one whose value holds the call is in force for it
+# (`X=y VAR="$(bun "$X/x.ts")"`). A call reached only through `||` straight
+# after an assignment of VAR runs once that assignment has failed, and VAR
+# then holds the failed substitution's output, not the value as written.
+#
+# Straight-line reading, as for the lines above the call: a compound command
+# is read as if its parts stood alone (`if`, `then`, `do`, `{`, `!` and the
+# like are skipped, so a `{ ...; }` or `if ... fi` piped or sent to the
+# background is not seen as one), and an assignment inside `(...)` or `$(...)`
+# is not read. Read in the C locale, a byte at a time.
+_hook_syntax_assigns() {
+  local LC_ALL=C text="$1" var="$2" mode="${3:-}"
+  local i=0 base=0 len win run c nx top op adv wstart=-1 stack='' tab=$'\t'
+  # What ends a run of plain bytes in each context.
+  local sp_q="[\\\\']" sp_dq="[\\\\\$\"\`]" sp_bq="[\\\\\`]" sp_br="[\\\\\$\"\`}]"
+  local sp_cmd="[\\\\\$\"'\`()<> $tab#;&|]"
+  local name_re='^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?='
+  local redir_re='^([0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\})?(&>|[<>]([^(]|$))'
+  local redir_only_re='^([0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\})?(&>>?|<<<|<<-?|<>|<&|>&|>>|>\||<|>)$'
+  # VAR as the lists that have ended leave it (set, value), and as the list
+  # still open does (lset, lvalue). For the open list: the operator before the
+  # next command, whether the last command ran, whether it ended ok (it is an
+  # assignment) or either way, and whether it assigned VAR.
+  local set=0 value='' lset=0 lvalue='' prev='' ran=1 status=ok ran_var=0
+  # What _hook_syntax_assigns_words makes of one command's words.
+  local kind asg val neg cmd_at
+  local -a words
+  words=()
+  len=${#text}
+  # Read through a window of the text, a run of plain bytes at a time, and a
+  # word taken out once, when it ends: every expansion of a string costs its
+  # whole length, so reading the text itself byte by byte, or growing a word
+  # byte by byte, is quadratic in a long line. The stack holds the open quotes
+  # and brackets: S '...', Q $'...', " "...", ` `...`, { ${...}, ( (...).
+  win="${text:0:260}"
+  while [ "$i" -lt "$len" ]; do
+    if [ $((i - base)) -ge 256 ]; then
+      base=$i
+      win="${text:base:260}"
+    fi
+    top="${stack#"${stack%?}"}"
+    [ "$wstart" -lt 0 ] && wstart=$i
+    # A run of bytes that mean nothing where they stand is skipped whole.
+    run="${win:i-base}"
+    case "$top" in
+      S) run="${run%%"'"*}" ;;
+      Q) run="${run%%$sp_q*}" ;;
+      '"') run="${run%%$sp_dq*}" ;;
+      '`') run="${run%%$sp_bq*}" ;;
+      '{') run="${run%%$sp_br*}" ;;
+      *) run="${run%%$sp_cmd*}" ;;
+    esac
+    if [ -n "$run" ]; then
+      i=$((i + ${#run}))
+      continue
+    fi
+    c="${win:i-base:1}"
+    nx="${win:i-base+1:1}"
+    if [ "$top" = S ]; then
+      [ "$c" = "'" ] && stack="${stack%?}"
+      i=$((i + 1))
+      continue
+    fi
+    if [ "$c" = '\' ]; then
+      i=$((i + 2))
+      continue
+    fi
+    if [ "$top" = Q ]; then
+      [ "$c" = "'" ] && stack="${stack%?}"
+      i=$((i + 1))
+      continue
+    fi
+    if [ "$c" = '$' ] && [ "$top" != '`' ]; then
+      case "$nx" in
+        '('|'{') stack="$stack$nx"; i=$((i + 2)); continue ;;
+      esac
+    fi
+    case "$top" in
+      '`') [ "$c" = '`' ] && stack="${stack%?}" ;;
+      '"'|'{')
+        case "$top$c" in
+          '""'|'{}') stack="${stack%?}" ;;
+          '"`'|'{"'|'{`') stack="$stack$c" ;;
+        esac
+        ;;
+      *)
+        # A command: the line itself, or one inside (...) or $(...).
+        case "$c$nx" in
+          "\$'"*) stack="${stack}Q"; i=$((i + 2)); continue ;;
+          "'"*) stack="${stack}S" ;;
+          '"'*|'`'*|'('*) stack="$stack$c" ;;
+          ')'*) [ -n "$stack" ] && stack="${stack%?}" ;;
+          # `>&`, `<&` and `>|` are redirects, not operators.
+          '>&'|'<&'|'>|') i=$((i + 2)); continue ;;
+          '&>') [ -z "$stack" ] && { i=$((i + 2)); continue; } ;;
+          ' '*|"$tab"*|'#'*|';'*|'&'*|'|'*)
+            if [ -z "$stack" ]; then
+              op="$c" adv=1
+              case "$c$nx" in
+                '#'*)
+                  if [ "$wstart" -eq "$i" ]; then
+                    wstart=-1
+                    break
+                  fi
+                  op=''
+                  ;;
+                ' '*|"$tab"*) op='' ;;
+                '&&'|'||') op="$c$nx" adv=2 ;;
+                '|&'|';&') adv=2 ;;
+                ';;') adv=2; [ "${win:i-base+2:1}" = '&' ] && adv=3 ;;
+              esac
+              if [ "$c" != '#' ]; then
+                if [ "$i" -gt "$wstart" ]; then
+                  if [ "$wstart" -ge "$base" ]; then
+                    words+=("${win:wstart-base:i-wstart}")
+                  else
+                    words+=("${text:wstart:i-wstart}")
+                  fi
+                fi
+                wstart=-1
+                [ -n "$op" ] && _hook_syntax_assigns_cmd "$op"
+                i=$((i + adv))
+                continue
+              fi
+            fi
+            ;;
+        esac
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  if [ "$mode" = call ]; then
+    # The call's own command, so far: its words, and the one the call is in.
+    if [ "$prev" = '||' ] && [ "$status" = ok ] && [ "$ran_var" -eq 1 ]; then
+      lset=1
+      lvalue=''
+    fi
+    if [ -n "$stack" ] && [ "$wstart" -ge 0 ] && [[ ${text:wstart} =~ $name_re ]]; then
+      _hook_syntax_assigns_words
+      if [ "$kind" = assign ] && [ "$asg" -eq 1 ]; then
+        lset=1
+        lvalue="$val"
+      fi
+    fi
+  else
+    [ "$wstart" -ge 0 ] && words+=("${text:wstart}")
+    [ "${#words[@]}" -gt 0 ] && _hook_syntax_assigns_cmd ''
+  fi
+  if [ "$lset" -eq 1 ]; then
+    set=1
+    value="$lvalue"
+  fi
+  [ "$set" -eq 1 ] || return 1
+  HOOK_SYNTAX_VALUE="$value"
+  return 0
+}
+
+# One command's words, for _hook_syntax_assigns, whose locals it reads and
+# sets (bash scopes them dynamically). kind: `assign` (assignments and
+# redirects alone), `builtin` (export and the like) or `other`; asg=1 and val
+# when it assigns VAR in force, the last such assignment; neg=1 after a `!`.
+_hook_syntax_assigns_words() {
+  local m=${#words[@]} w any=0
+  kind=other asg=0 val='' neg=0 cmd_at=0
+  while [ "$cmd_at" -lt "$m" ]; do
+    case "${words[cmd_at]}" in
+      '!') neg=1 ;;
+      '{'|if|then|else|elif|do|while|until|time) ;;
+      *) break ;;
+    esac
+    cmd_at=$((cmd_at + 1))
+  done
+  while [ "$cmd_at" -lt "$m" ]; do
+    w="${words[cmd_at]}"
+    if [[ $w =~ $name_re ]]; then
+      any=1
+      case "$w" in
+        "$var="*) asg=1; val="${w#"$var="}" ;;
+        "$var+="*) asg=1; val="+${w#"$var+="}" ;;
+      esac
+    elif [[ $w =~ $redir_re ]]; then
+      [[ $w =~ $redir_only_re ]] && cmd_at=$((cmd_at + 1))
+    else
+      break
+    fi
+    cmd_at=$((cmd_at + 1))
+  done
+  if [ "$cmd_at" -ge "$m" ]; then
+    [ "$any" -eq 1 ] && kind=assign
+    return 0
+  fi
+  # A command word: the assignments ahead of it only prefix it.
+  asg=0
+  val=''
+  case "${words[cmd_at]}" in
+    export|readonly|local|declare|typeset)
+      kind=builtin
+      while [ "$cmd_at" -lt "$m" ]; do
+        w="${words[cmd_at]}"
+        case "$w" in
+          "$var="*) asg=1; val="${w#"$var="}" ;;
+          "$var+="*) asg=1; val="+${w#"$var+="}" ;;
+        esac
+        cmd_at=$((cmd_at + 1))
+      done
+      ;;
+  esac
+  return 0
+}
+
+# One command of _hook_syntax_assigns ends at $1, the operator after it ('' at
+# the end of the line). Runs it as the success path does, and records an
+# assignment of VAR it leaves in force.
+_hook_syntax_assigns_cmd() {
+  local after="$1" runs=1
+  _hook_syntax_assigns_words
+  words=()
+  if [ "$prev" = '|' ]; then
+    runs=$ran
+  elif [ "$prev" = '||' ] && [ "$status" = ok ]; then
+    runs=0
+  fi
+  ran=$runs
+  if [ "$runs" -eq 1 ]; then
+    ran_var=0
+    status=other
+    if [ "$prev" != '|' ] && [ "$after" != '|' ]; then
+      if [ "$asg" -eq 1 ]; then
+        lset=1
+        lvalue="$val"
+        ran_var=1
+      fi
+      [ "$kind" != other ] && [ "$neg" -eq 0 ] && status=ok
+    fi
+  fi
+  case "$after" in
+    '&&'|'||'|'|') prev="$after" ;;
+    *)
+      # The list ends. One sent to the background ran in a subshell.
+      if [ "$after" != '&' ] && [ "$lset" -eq 1 ]; then
+        set=1
+        value="$lvalue"
+      fi
+      lset=0 prev='' ran=1 status=ok ran_var=0
+      ;;
+  esac
+}
+
 # One `bun "$VAR/<rel>"` in a shim. $1 = shim, $2 = VAR, $3 = rel, $4 = the
 # line the call is on, $5 = 1 when a missing payload is a failure (sets
-# HOOK_SYNTAX_FOLLOWED=1 when VAR names the shim's directory). VAR other than HERE is followed only when its last
-# assignment above that line is the shim's own directory:
-# `VAR="$(cd "$(dirname "$0")" && pwd)"`, with `pwd -P`, BASH_SOURCE, or a
-# redirect on the cd (`2>/dev/null`, `>/dev/null 2>&1`). An assignment that
-# goes on past the `)"`, such as `.../sub"`, or a later one above the call
-# (`VAR="$VAR/lib"`) names somewhere else. Straight-line reading: a branch or
-# a function body is not followed through.
+# HOOK_SYNTAX_FOLLOWED=1 when VAR names the shim's directory), $6 = the
+# line's text before the call. VAR other than HERE is followed only when what
+# it holds at the call is the shim's own directory, as the lines above leave
+# it and then the text before the call on its own line, each read through
+# _hook_syntax_assigns: `VAR="$(cd "$(dirname "$0")" && pwd)"`, with
+# `pwd -P`, BASH_SOURCE, or a redirect on the cd (`2>/dev/null`,
+# `>/dev/null 2>&1`). An assignment that goes on past the `)"`, such as
+# `.../sub"`, or a later one before the call (`VAR="$VAR/lib"`) names
+# somewhere else. Straight-line reading: a branch or a function body is not
+# followed through.
 _hook_syntax_payload() {
-  local shim="$1" var="$2" rel="$3" at="$4" strict="$5" dir payload ln last=''
-  local assign_re="^[[:space:]]*(export[[:space:]]+|readonly[[:space:]]+|local[[:space:]]+)?$var="
-  local own_dir_re='"\$\(cd "\$\(dirname "\$(0|\{BASH_SOURCE\[0\]\}|BASH_SOURCE)"\)"([[:space:]]+[0-9]*>&?[^[:space:]&;|]+)*[[:space:]]*&&[[:space:]]*pwd( -P)?\)"([[:space:];|&]|$)'
-  local own_re="$assign_re$own_dir_re"
+  local shim="$1" var="$2" rel="$3" at="$4" strict="$5" before="$6" dir payload ln n last=''
+  local assign_re="(^|[^A-Za-z0-9_])$var\\+?="
+  local own_re='^"\$\(cd "\$\(dirname "\$(0|\{BASH_SOURCE\[0\]\}|BASH_SOURCE)"\)"([[:space:]]+[0-9]*>&?[^[:space:]&;|]+)*[[:space:]]*&&[[:space:]]*pwd( -P)?\)"$'
   if [ "$var" != HERE ]; then
     _hook_syntax_read_list "$HOOK_SYNTAX_NL" < <(LC_ALL=C grep -nE "$assign_re" -- "$shim" 2>/dev/null)
     for ln in "${HOOK_SYNTAX_LIST[@]}"; do
-      [ "${ln%%:*}" -lt "$at" ] && last="${ln#*:}"
+      n="${ln%%:*}"
+      if [ "$n" -lt "$at" ] && _hook_syntax_assigns "${ln#*:}" "$var"; then
+        last="$HOOK_SYNTAX_VALUE"
+      fi
     done
+    case "$before" in
+      *"$var="*|*"$var+="*)
+        if _hook_syntax_assigns "$before" "$var" call; then
+          last="$HOOK_SYNTAX_VALUE"
+        fi
+        ;;
+    esac
     [ -n "$last" ] || return 0
     _hook_syntax_match "$last" "$own_re" || return 0
   fi

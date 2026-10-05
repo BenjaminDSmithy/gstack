@@ -213,12 +213,22 @@ one load window, `setup-codex-scope.test.ts` went from 494 to 643 seconds, still
 * **A parse is not a run.** A hook that parses and then fails at runtime is out
   of scope.
 * **A shim that reaches bun any other way** than `bun "$VAR/<path>"`, with
-  `VAR` either `$HERE` or a variable whose last assignment above the call is
+  `VAR` either `$HERE` or a variable whose last assignment before the call is
   the shim's own directory (`VAR="$(cd "$(dirname "$0")" && pwd)"`, as
   `/autoplan`'s `$_AUTOPLAN_HOOK_DIR` is), has its payload unchecked; the shim
-  itself is still parsed. `$HERE` is taken to be the shim's directory however
-  it is set, and the shim is read top to bottom: a branch or a function body is
-  not followed through.
+  itself is still parsed. Each line is split into commands as bash splits it,
+  quotes, `$(...)` and backquotes included, and an assignment counts once bash
+  has run its command: `VAR="$VAR/lib"; exec bun ...` runs lib/'s payload.
+  It does not count while the call sits inside its value
+  (`VAR="$(bun "$VAR/x.ts")"`) or is a word of the command it prefixes
+  (`VAR=x bun ...`), which bash expands before it assigns, nor ever when it
+  only prefixes a command, sits in a pipeline or runs in the background, all
+  of which leave the shim's `VAR` as it was. A call after `||` straight after
+  an assignment runs only once that assignment failed. `$HERE` is taken to be
+  the shim's directory however it is set, and the shim is read top to bottom:
+  a branch, a `{ ...; }` group or a function body is not followed through, a
+  command after `&&` or `||` is taken to run unless the `||` follows an
+  assignment, and an assignment inside `(...)` or `$(...)` is not read.
 * **An interpreter that is absent or cannot run** (`python3`, `bun`, a `PATH`
   bash) is reported as a coverage gap for the parse, never counted as a pass
   and never as a parse failure; the content scans still run. A shell or bun
