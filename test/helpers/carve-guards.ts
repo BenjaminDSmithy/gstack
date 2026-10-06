@@ -351,7 +351,7 @@ do not launch the downstream skill or open a browser.`,
     maxSkeletonBytes: 90_800, // Office-hours + sketch outside voices include host guards and completion checks. + v1.91.19.0 wave: Q<N> open-question prose form (#2729, approved Q3), DESIGN_READY --version probe (B4), Aside ~/.local/bin fallback (E7), verdict-form outside voice (INV-1), plus v1.91.17.0's round accounting (#3022) merged in; measured 89,684 (2026-10-03). fork: +single-select AskUserQuestion doctrine (+774B) over upstream's 89,695; measured 90,469 (2026-10-05, v1.91.24.0)
     minUnionBytes: 115_800, // Phase 4 wave 4; measured union 118,175
     mustContain: ['design doc', 'problem statement'],
-    maxSizeRatio: 1.12,
+    maxSizeRatio: 1.13, // upstream 1.12; measured 146,779 / 131,110 = 1.1195 on v1.91.30.0. fork: +single-select AskUserQuestion doctrine (+774B); measured 147,553 / 131,110 = 1.1254 (2026-10-07, v1.91.30.0)
   },
   'document-release': {
     skill: 'document-release',
