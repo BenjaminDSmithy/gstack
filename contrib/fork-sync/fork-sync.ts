@@ -886,8 +886,64 @@ function addWorktree(cfg: Config, name: string, rev: string): string {
 /** Only ever removes a worktree this run created; its commits stay reachable via refs/fork-sync/*. */
 function removeWorktree(cfg: Config, dir: string): void {
   git(cfg.repo, 'worktree', 'unlock', dir);
-  const r = git(cfg.repo, 'worktree', 'remove', '--force', dir);
+  let r = git(cfg.repo, 'worktree', 'remove', '--force', dir);
+  if (r.code === 0) return;
+  // The suite ran in this tree and can leave a read-only subtree behind (see
+  // removeTree). Measured on git 2.56.0: that remove exits 255 having already
+  // deleted the worktree's admin dir, leaving its files and a .git file that
+  // points nowhere, and a second remove says "is not a working tree". So an
+  // unregistered leftover is finished directly; a registered one is retried.
+  let admin = '';
+  try { admin = fs.readFileSync(path.join(dir, '.git'), 'utf8').replace(/^gitdir:\s*/, '').trim(); } catch { /* no .git file left */ }
+  // Relative under worktree.useRelativePaths, so resolved against the worktree.
+  if (!admin || !fs.existsSync(path.resolve(dir, admin))) {
+    removeTree(dir, (line) => logLine(cfg, line));
+    return;
+  }
+  restoreOwnerWrite(dir);
+  r = git(cfg.repo, 'worktree', 'remove', '--force', dir);
   if (r.code !== 0) logLine(cfg, `WARN could not remove worktree ${dir}: ${r.stderr}`);
+}
+
+/**
+ * `chmod -R u+rwx` over the directories under `dir`, without following links.
+ * Removing an entry needs write and search on its parent, so directories are
+ * all that matter. Best effort: what cannot be changed is left for the retry
+ * to report.
+ */
+export function restoreOwnerWrite(dir: string): void {
+  let st: fs.Stats;
+  try { st = fs.lstatSync(dir); } catch { return; }
+  if (!st.isDirectory()) return;
+  try { fs.chmodSync(dir, st.mode | 0o700); } catch { /* not ours to change */ }
+  let entries: string[];
+  try { entries = fs.readdirSync(dir); } catch { return; }
+  for (const entry of entries) restoreOwnerWrite(path.join(dir, entry));
+}
+
+/**
+ * Remove a directory that tests wrote into. A test killed before its afterAll
+ * can leave a read-only subtree behind: test/helpers/install-fixture.ts locks
+ * its seed checkout with `chmod -R a-w` and unlocks it only in cleanupSeed.
+ * rmSync then throws EACCES, and on 2026-10-05 and 2026-10-06 that throw
+ * ended whole runs as ERROR. So restore owner write (as its removeSeed does)
+ * and retry; if that still fails, warn with the path and carry on. A leftover
+ * temp directory is never worth a run. False when the directory remains.
+ */
+export function removeTree(
+  dir: string,
+  warn: (line: string) => void,
+  rm: (dir: string) => void = (d) => fs.rmSync(d, { recursive: true, force: true }),
+): boolean {
+  try { rm(dir); return true; } catch { /* retried below with owner write restored */ }
+  restoreOwnerWrite(dir);
+  try {
+    rm(dir);
+    return true;
+  } catch (err) {
+    warn(`WARN could not remove ${dir}: ${(err as Error).message}`);
+    return false;
+  }
 }
 
 // ─── Gate ───────────────────────────────────────────────────────────────────
@@ -908,7 +964,7 @@ async function isolatedPasses(cfg: Config, root: string, file: string, logFile: 
     const before = fs.existsSync(logFile) ? fs.statSync(logFile).size : 0;
     const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-fork-sync-iso-'));
     const r = await runLogged(fill(cfg.isolateCmd, { path: path.join(root, file), root }), root, logFile, cfg.isolateTimeoutMs, isolationEnv(scratch));
-    fs.rmSync(scratch, { recursive: true, force: true });
+    removeTree(scratch, (line) => logLine(cfg, line));
     const tail = fs.readFileSync(logFile, 'utf8').slice(before);
     // bun's summary line proves the file ran to completion; exit 0 alone does not.
     if (r.code === 0 && !r.timedOut && /Ran \d+ tests? across \d+ files?/.test(tail)) return true;
@@ -1336,10 +1392,12 @@ export async function run(cfg: Config): Promise<RunResult> {
 /** Keep the newest `keep` run directories; each holds full suite logs. */
 function pruneRuns(cfg: Config, keep: number): void {
   const dir = path.join(cfg.stateDir, 'runs');
+  let runs: string[];
   try {
-    const runs = fs.readdirSync(dir).filter((d) => /^\d{8}-\d{6}$/.test(d)).sort();
-    for (const old of runs.slice(0, Math.max(0, runs.length - keep))) fs.rmSync(path.join(dir, old), { recursive: true, force: true });
-  } catch { /* nothing to prune */ }
+    runs = fs.readdirSync(dir).filter((d) => /^\d{8}-\d{6}$/.test(d)).sort();
+  } catch { return; /* nothing to prune */ }
+  // One directory that will not go must not stop the rest from being pruned.
+  for (const old of runs.slice(0, Math.max(0, runs.length - keep))) removeTree(path.join(dir, old), (line) => logLine(cfg, line));
 }
 
 function setupCommand(cfg: Config): string {

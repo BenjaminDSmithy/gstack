@@ -13,7 +13,7 @@ import * as path from 'path';
 import {
   compareVersions, droppedSubjects, fill, gateCandidates, landingBranchName, nameList,
   fsResolve, oursOnlyUnattributed, parseSuiteLog, renderPlist, samePath, suiteComplete, unvouchedFiles, worktreeKind, defaultConfig,
-  RENDER_HOOKS, RENDER_HOOK_MARKER, renderHookShim, renderHookSkip,
+  RENDER_HOOKS, RENDER_HOOK_MARKER, renderHookShim, renderHookSkip, removeTree, restoreOwnerWrite,
 } from '../contrib/fork-sync/fork-sync';
 
 const ROOT = path.resolve(import.meta.dir, '..');
@@ -476,6 +476,50 @@ describe('small helpers', () => {
   });
 });
 
+describe('scratch cleanup', () => {
+  // The shape test/helpers/install-fixture.ts leaves when a file dies before
+  // its afterAll: a seed checkout under TMPDIR with every write bit removed.
+  const lockedTree = (): string => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-fork-sync-rm-'));
+    const seed = path.join(dir, 'tmp', 'gstack-install-seed-0-x', 'gstack');
+    write(path.join(seed, 'bin', 'tool'), 'seed\n');
+    spawnSync('chmod', ['-R', 'a-w', path.dirname(seed)], { timeout: 30_000 });
+    return dir;
+  };
+
+  test('a read-only subtree is removed after owner write is restored, without a warning', () => {
+    const dir = lockedTree();
+    try {
+      // Root ignores the mode bits, so the failure only reproduces for a user.
+      if (process.getuid?.() !== 0) expect(() => fs.rmSync(dir, { recursive: true, force: true })).toThrow(/EACCES/);
+      const warnings: string[] = [];
+      expect(removeTree(dir, (l) => warnings.push(l))).toBe(true);
+      expect(fs.existsSync(dir)).toBe(false);
+      expect(warnings).toEqual([]);
+    } finally {
+      restoreOwnerWrite(dir);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a directory that still will not go is a WARN naming it, never a throw', () => {
+    const dir = lockedTree();
+    try {
+      const warnings: string[] = [];
+      const refuse = (d: string) => { throw new Error(`EACCES: permission denied, rm '${d}'`); };
+      expect(removeTree(dir, (l) => warnings.push(l), refuse)).toBe(false);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toStartWith('WARN');
+      expect(warnings[0]).toContain(dir);
+      // Owner write was still restored, so a later sweep can remove it.
+      expect(fs.statSync(path.join(dir, 'tmp', 'gstack-install-seed-0-x', 'gstack', 'bin')).mode & 0o200).toBe(0o200);
+    } finally {
+      restoreOwnerWrite(dir);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('render hooks: when a hook rebuilds the live render', () => {
   const at = (hook: string, args: string[], extra: Partial<Parameters<typeof renderHookSkip>[0]> = {}) =>
     renderHookSkip({ hook, args, atLive: true, rebasing: false, picksLeft: null, ...extra });
@@ -626,6 +670,13 @@ function makeSandbox(opts: { pushCarried?: boolean } = {}): Sandbox {
     `#!${BASH}`,
     'root="$2"; rel="${1#"$root"/}"',
     'if [ -f "$root/.fake-iso-fail" ] && grep -qxF "$rel" "$root/.fake-iso-fail"; then echo "(fail) it"; exit 1; fi',
+    // .fake-iso-lock leaves what a file killed before its afterAll leaves: a
+    // read-only seed checkout in TMPDIR (test/helpers/install-fixture.ts).
+    'if [ -f "$root/.fake-iso-lock" ]; then',
+    '  seed="$TMPDIR/gstack-install-seed-0-fake/gstack"',
+    '  mkdir -p "$seed/bin" && echo seed > "$seed/bin/tool" && chmod -R a-w "${seed%/gstack}"',
+    `  echo "$seed" >> ${JSON.stringify(path.join(base, 'iso-locked.log'))}`,
+    'fi',
     'echo "Ran 1 test across 1 file. [1ms]"',
     '',
   ].join('\n'), 0o755);
@@ -954,6 +1005,36 @@ describe('fork-sync run (sandbox repos)', () => {
     const gate = stateJson(sb).lastRun.gate;
     expect(gate.verdict.flaky).toEqual(['test/flaky.test.ts']);
     expect(gate.verdict.regressions).toEqual([]);
+  });
+
+  e2e('read-only subtrees a test leaves in the isolation scratch or the gate worktree are removed; the run carries on', (sb) => {
+    // The scratch is made under TMPDIR; keep it inside the sandbox so what is
+    // left behind can be counted.
+    const tmp = path.join(sb.base, 'tmp');
+    fs.mkdirSync(tmp);
+    sb.env.TMPDIR = tmp;
+    try {
+      commit(sb.durable, sb.env, 'feat: ours has a flaky test that locks its seed', {
+        'test/flaky.test.ts': '//\n', '.fake-iso-lock': 'x\n',
+      });
+      git(sb.durable, sb.env, 'push', '-q', 'origin', 'feat/x-1.0.0');
+      upstreamShips(sb, '1.1.0.0', { 'up.txt': 'up\n' });
+      // Our suite also leaves a read-only directory inside its worktree.
+      const r = runSync(sb, ['--suite-cmd', `${path.join(sb.bin, 'suite')}; s=$?; [ -f test/flaky.test.ts ] && echo '  ✗ test/flaky.test.ts — once'; `
+        + '[ -f .fake-iso-lock ] && mkdir -p .locked/sub && touch .locked/sub/f && chmod -R a-w .locked; exit $s']);
+      // The isolated run really did lock a subtree in its scratch …
+      expect(fs.readFileSync(path.join(sb.base, 'iso-locked.log'), 'utf8')).toContain('gstack-install-seed-0-fake');
+      // … and the run went on to its verdict instead of ending as ERROR.
+      expect(r.out).not.toContain('EACCES');
+      expect(r.out).toContain('LANDED');
+      expect(stateJson(sb).lastRun.gate.verdict.flaky).toEqual(['test/flaky.test.ts']);
+      expect(fs.readdirSync(tmp).filter((n) => n.startsWith('gstack-fork-sync-iso-'))).toEqual([]);
+      expect(r.out).not.toContain('WARN could not remove');
+      expect(fs.readdirSync(path.join(sb.home, 'worktrees', 'durable')).filter((n) => n.startsWith('fork-sync-'))).toEqual([]);
+      expect(liveState(sb).worktrees).toBe(1);
+    } finally {
+      restoreOwnerWrite(sb.base);
+    }
   });
 
   e2e('stale generated output after a clean rebase STOPS and is not regenerated', (sb) => {
