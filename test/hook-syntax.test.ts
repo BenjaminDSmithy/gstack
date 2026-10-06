@@ -1488,7 +1488,12 @@ describe('hook-syntax: house rules', () => {
 // discarded, hence stdout), older ones reach scripts/preflight-codex-overlap.ts
 // first and turn any failure there into `exit 1`. The marker is the signal;
 // the exit code after it is the stub's business.
+//
+// One tree file is real, not a stub: bin/gstack-bun-version.sh. setup's Bun
+// check sources it ABOVE the gate, so without it every run would exit at that
+// check and never reach the gate at all.
 const PAST_GATE = 'PAST THE GATE';
+const BUN_VERSION_HELPER = path.join(ROOT, 'bin', 'gstack-bun-version.sh');
 
 function mkSetupTree(): { dir: string; home: string } {
   const dir = fs.mkdtempSync(path.join(FX, 'setup-'));
@@ -1500,6 +1505,7 @@ function mkSetupTree(): { dir: string; home: string } {
   fs.copyFileSync(SETUP_SCRIPT, path.join(dir, 'tree', 'setup'));
   fs.chmodSync(path.join(dir, 'tree', 'setup'), 0o755);
   fs.copyFileSync(GATE, path.join(dir, 'tree', 'scripts', 'hook-syntax.sh'));
+  fs.copyFileSync(BUN_VERSION_HELPER, path.join(dir, 'tree', 'bin', 'gstack-bun-version.sh'));
   fs.writeFileSync(path.join(dir, 'tree', 'bin', 'gstack-state-root.sh'), `echo "${PAST_GATE}"\nexit 7\n`);
   fs.writeFileSync(path.join(dir, 'tree', 'scripts', 'preflight-codex-overlap.ts'), `console.log(${JSON.stringify(PAST_GATE)});\nprocess.exit(7);\n`);
   return { dir, home };
