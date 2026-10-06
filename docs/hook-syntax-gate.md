@@ -65,7 +65,7 @@ a hook added to either is covered without editing the test.
 | Consumer | Fires on | Verdict |
 | --- | --- | --- |
 | `test/hook-syntax.test.ts` | every `bun run test`, and the required free-suite CI check | fails the suite, naming the file and line |
-| `./setup` | every install, including the one `/gstack-upgrade` runs | **refuses**: nothing is sourced, built, created, linked or registered (only the CRLF heal below runs first; the read-only `./setup --status` exits before the gate and installs nothing) |
+| `./setup` | every install, including the one `/gstack-upgrade` runs | **refuses**: nothing is built, created, linked or registered, and no tree code is sourced except `bin/gstack-bun-version.sh`, which the Bun check above the gate reads (a missing or unloadable copy stops setup there, before anything is installed); the CRLF heal below also runs first, and the read-only `./setup --status` exits before the gate and installs nothing |
 | `./setup`, before its migrations and hook registration | when `~/.claude/skills/gstack` resolves to a checkout other than the one setup runs from (a link to another checkout, or a real directory there, which setup never replaces), on a run that installs for Claude: only such a run registers or re-points a hook into that tree. On a run for another host, the one migration that registers a hook, v1.58.0.0 inside Conductor, names the checkout setup runs from, which the row above has already gated | **runs no migration and registers and re-points no hook** (one migration registers a hook itself; the next `./setup` runs them all), finishes the rest of the install, and exits 1 |
 
 The setup block sits directly after `setup` resolves its own directory — above

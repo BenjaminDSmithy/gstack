@@ -5,7 +5,7 @@
 **`./setup` refuses to wire in a hook that does not parse.**
 **A half-merged hook no longer gets installed and blocks every tool call on your machine.**
 
-Claude Code runs gstack's hooks straight out of the install `./setup` registered. A shell hook exits 2 when bash reaches a line that does not parse, and for a PreToolUse hook exit 2 means "block this tool call", in every Claude Code session that uses that settings file. Until now `./setup` registered whatever the tree held. Now it first parses every shell and Python script in the tree (by shebang, plus any shebang-less `*.sh`) and every TypeScript payload a hook hands to bun, and refuses to install if one fails, naming the file, and the line for a parse error or a conflict marker. It does this before it sources, builds, links or registers anything.
+Claude Code runs gstack's hooks straight out of the install `./setup` registered. A shell hook exits 2 when bash reaches a line that does not parse, and for a PreToolUse hook exit 2 means "block this tool call", in every Claude Code session that uses that settings file. Until now `./setup` registered whatever the tree held. Now it first parses every shell and Python script in the tree (by shebang, plus any shebang-less `*.sh`) and every TypeScript payload a hook hands to bun, and refuses to install if one fails, naming the file, and the line for a parse error or a conflict marker. It does this before it builds, links or registers anything; the only tree file it reads first is the small Bun version helper its Bun check needs.
 
 ### The numbers that matter
 
