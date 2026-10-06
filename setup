@@ -285,7 +285,7 @@ case "$HOST" in
 esac
 
 # Bun versions come from one sourced file (floor and tested; E1).
-. "$(dirname "$0")/bin/gstack-bun-version.sh" 2>/dev/null || { echo "$0: bin/gstack-bun-version.sh is missing; nothing was installed or changed. Fix: reinstall gstack (git clone https://github.com/garrytan/gstack)" >&2; exit 1; }
+[ -r "$(dirname "$0")/bin/gstack-bun-version.sh" ] && . "$(dirname "$0")/bin/gstack-bun-version.sh" 2>/dev/null || { echo "$0: bin/gstack-bun-version.sh is missing; nothing was installed or changed. Fix: reinstall gstack (git clone https://github.com/garrytan/gstack)" >&2; exit 1; }
 if ! command -v bun >/dev/null 2>&1; then
   echo "Error: bun is required but not installed." >&2
   echo "Install with checksum verification:" >&2
