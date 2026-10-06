@@ -1609,10 +1609,12 @@ describe('setup: the gate refuses before anything is installed', () => {
     // gate needs a working Bun for its payload arm. That line must fail closed
     // (exit before anything is installed), and it is the only exception: any
     // other source of a tree path, however it spells the tree root, counts.
-    const BUN_HELPER_SOURCE = '. "$(dirname "$0")/bin/gstack-bun-version.sh" 2>/dev/null || {';
-    const bunHelperAt = SETUP_SRC.indexOf(BUN_HELPER_SOURCE);
+    // The fork guards every source with `[ -r FILE ] && . FILE`
+    // (test/state-root-source-guard.test.ts), so a guarded source counts too.
+    const BUN_HELPER_SOURCE = '[ -r "$(dirname "$0")/bin/gstack-bun-version.sh" ] && . "$(dirname "$0")/bin/gstack-bun-version.sh" 2>/dev/null || {';
+    const bunHelperAt = SETUP_SRC.indexOf(`\n${BUN_HELPER_SOURCE}`);
     expect(bunHelperAt).toBeGreaterThan(-1);
-    const bunHelperLine = SETUP_SRC.slice(bunHelperAt, SETUP_SRC.indexOf('\n', bunHelperAt));
+    const bunHelperLine = SETUP_SRC.slice(bunHelperAt + 1, SETUP_SRC.indexOf('\n', bunHelperAt + 1));
     expect(bunHelperLine).toMatch(/exit 1; \}$/);
     const gateAt = SETUP_SRC.indexOf('HOOK_SYNTAX_GATE="$SOURCE_GSTACK_DIR/scripts/hook-syntax.sh"');
     expect(gateAt).toBeGreaterThan(-1);
@@ -1624,9 +1626,9 @@ describe('setup: the gate refuses before anything is installed', () => {
       else if (inFunction && line === '}') inFunction = false;
       else if (!inFunction && firstUse < 0) {
         const t = line.trim();
-        if (!t.startsWith('#') && !t.startsWith(BUN_HELPER_SOURCE) && (
+        if (!t.startsWith('#') && t !== bunHelperLine && (
           /^(mkdir|ln|cp|rm|mv|_link_or_copy)\s/.test(t)
-          || /^(\.|source)\s+"(\$SOURCE_GSTACK_DIR|\$INSTALL_GSTACK_DIR|\$\(dirname "\$0"\))\//.test(t)
+          || /^(\[ -r "[^"]+" \] && )?(\.|source)\s+"(\$SOURCE_GSTACK_DIR|\$INSTALL_GSTACK_DIR|\$\(dirname "\$0"\))\//.test(t)
           || /^bun\s+"\$SOURCE_GSTACK_DIR\//.test(t)
         )) firstUse = offset;
       }
