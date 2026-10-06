@@ -158,6 +158,13 @@ describe('sourced twin missing', () => {
         // A setup that runs the hook parse gate first needs its checker.
         const gate = path.join(ROOT, 'scripts', 'hook-syntax.sh');
         if (fs.existsSync(gate)) fs.copyFileSync(gate, path.join(tree, 'scripts', 'hook-syntax.sh'));
+        // setup's Bun check sources the real version helper before the gate;
+        // without it every lane stops there, short of the state-root source.
+        const bunHelper = path.join(ROOT, 'bin', 'gstack-bun-version.sh');
+        if (fs.existsSync(bunHelper)) {
+          fs.mkdirSync(path.join(tree, 'bin'), { recursive: true });
+          fs.copyFileSync(bunHelper, path.join(tree, 'bin', 'gstack-bun-version.sh'));
+        }
         // The gate follows every payload setup hands to bun and refuses a
         // missing one before setup reaches its sources, so stub each one.
         const setupText = fs.readFileSync(path.join(ROOT, 'setup'), 'utf-8');
