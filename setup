@@ -312,18 +312,22 @@ SOURCE_GSTACK_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 
 # ─── Hook parse gate ─────────────────────────────────────────
 # REFUSE before this tree's own code is sourced or built, and before anything is
-# linked, copied or registered. The one step that runs first is heal-eol.sh
-# below, which rewrites only tracked, unmodified shell files that an old CRLF
-# checkout left CRLF. (`./setup --status`, near the top, sources two tree
-# scripts to print the install table and exits; it installs nothing and
-# registers nothing.) setup wires gstack hooks into
+# linked, copied or registered. Two steps run first. The Bun check above
+# sources bin/gstack-bun-version.sh (version constants and one comparison
+# function) and runs `bun --version`; it exits 1 before anything is installed
+# if that file is missing or will not load, and the gate needs that Bun for its
+# payload arm. heal-eol.sh below rewrites only tracked, unmodified shell files
+# that an old CRLF checkout left CRLF. (`./setup --status`, near the top,
+# sources two tree scripts to print the install table and exits; it installs
+# nothing and registers nothing.) setup wires gstack hooks into
 # ~/.claude/settings.json by path, and a hook that does not parse exits 2 —
 # which Claude Code reads as "block". A broken PreToolUse hook fails every
 # matching tool call in every session on the machine, not just gstack's.
 # See docs/hook-syntax-gate.md.
 #
-# Position is load-bearing: this sits above the first source, the first bun
-# call and the first mkdir/ln/cp, so a broken tree cannot be half-installed.
+# Position is load-bearing: this sits above every other source, the first bun
+# call into the tree and the first mkdir/ln/cp, so a broken tree cannot be
+# half-installed.
 # test/hook-syntax.test.ts pins that functionally (a refusal leaves HOME empty)
 # and statically.
 #
