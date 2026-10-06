@@ -33,7 +33,14 @@ function pathWithoutBun(base: string): string {
   }).join(':');
 }
 
-/** A `bun` that reports `version`; any other call is recorded and fails, so setup stops right after the gate. */
+/**
+ * A `bun` that reports `version`; any other call is recorded and fails, so setup stops right after the gate.
+ * The one exception is `bun -e`, which only the hook parse gate (scripts/hook-syntax.sh) uses, to build each
+ * hook's TypeScript payload. It goes to the real Bun running this test, so the gate can pass on this tree and
+ * setup reaches its first recorded call. Each run therefore pays for one gate sweep, hence the longer budgets.
+ */
+const SETUP_RUN_TIMEOUT_MS = 90_000;
+const SETUP_TEST_TIMEOUT_MS = 120_000;
 function runSetupWithBun(version: string) {
   const base = tempBase();
   const stub = path.join(base, 'stub');
@@ -46,6 +53,7 @@ function runSetupWithBun(version: string) {
   fs.writeFileSync(path.join(stub, 'bun'), [
     '#!/usr/bin/env bash',
     `if [ "$1" = "--version" ]; then printf '%s\\n' '${version}'; exit 0; fi`,
+    `if [ "$1" = "-e" ]; then exec '${process.execPath}' "$@"; fi`,
     `echo "$*" >> '${calls}'`,
     'echo stubbed-bun-stop >&2',
     'exit 1',
@@ -53,7 +61,7 @@ function runSetupWithBun(version: string) {
   const r = spawnSync('bash', [SETUP, '--claude-model', 'claude-opus-4-8'], {
     encoding: 'utf8',
     env: { PATH: `${stub}:${pathWithoutBun(base)}`, HOME: home, GSTACK_STATE_ROOT: state, TMPDIR: base },
-    timeout: 30_000,
+    timeout: SETUP_RUN_TIMEOUT_MS,
   });
   const bunCalls = fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8') : '';
   const written = [...fs.readdirSync(home), ...fs.readdirSync(state)];
@@ -111,20 +119,20 @@ describe.skipIf(process.platform === 'win32')('Bun floor (E1)', () => {
     expect(r.stderr).toContain('warning: gstack is tested on Bun 1.4.2 (CI pin); found 1.3.14. Upgrade with: bun upgrade');
     expect(r.stderr).not.toContain('gstack needs Bun');
     expect(r.bunCalls).toContain('run scripts/models.ts claude-overlay claude-opus-4-8');
-  });
+  }, SETUP_TEST_TIMEOUT_MS);
 
   test('the tested version passes silently', () => {
     const r = runSetupWithBun('1.4.2');
     expect(r.stderr).not.toMatch(/warning: gstack is tested on Bun|gstack needs Bun|could not read the Bun version/);
     expect(r.bunCalls).toContain('run scripts/models.ts claude-overlay claude-opus-4-8');
-  });
+  }, SETUP_TEST_TIMEOUT_MS);
 
   test('a malformed version warns and continues', () => {
     const r = runSetupWithBun('bun-dev (local build)');
     expect(r.stderr).toContain("warning: could not read the Bun version (bun --version printed 'bun-dev (local build)'); continuing. gstack is tested on Bun 1.4.2");
     expect(r.stderr).not.toContain('gstack needs Bun');
     expect(r.bunCalls).toContain('run scripts/models.ts claude-overlay claude-opus-4-8');
-  });
+  }, SETUP_TEST_TIMEOUT_MS);
 
   test('--help and --status keep working without Bun', () => {
     const base = tempBase();
