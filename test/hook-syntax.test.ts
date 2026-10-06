@@ -1603,6 +1603,17 @@ describe('setup: the gate refuses before anything is installed', () => {
     // Kills "gate moved below the deploy step" directly, in case a refactor
     // lets a refusal reach a write before it exits. A helper DEFINITION writes
     // nothing until it is called, so only top-level lines count.
+    //
+    // One tree file is sourced above the gate on purpose: the Bun check reads
+    // its floor and tested versions from bin/gstack-bun-version.sh, and the
+    // gate needs a working Bun for its payload arm. That line must fail closed
+    // (exit before anything is installed), and it is the only exception: any
+    // other source of a tree path, however it spells the tree root, counts.
+    const BUN_HELPER_SOURCE = '. "$(dirname "$0")/bin/gstack-bun-version.sh" 2>/dev/null || {';
+    const bunHelperAt = SETUP_SRC.indexOf(BUN_HELPER_SOURCE);
+    expect(bunHelperAt).toBeGreaterThan(-1);
+    const bunHelperLine = SETUP_SRC.slice(bunHelperAt, SETUP_SRC.indexOf('\n', bunHelperAt));
+    expect(bunHelperLine).toMatch(/exit 1; \}$/);
     const gateAt = SETUP_SRC.indexOf('HOOK_SYNTAX_GATE="$SOURCE_GSTACK_DIR/scripts/hook-syntax.sh"');
     expect(gateAt).toBeGreaterThan(-1);
     let offset = 0;
@@ -1613,9 +1624,9 @@ describe('setup: the gate refuses before anything is installed', () => {
       else if (inFunction && line === '}') inFunction = false;
       else if (!inFunction && firstUse < 0) {
         const t = line.trim();
-        if (!t.startsWith('#') && (
+        if (!t.startsWith('#') && !t.startsWith(BUN_HELPER_SOURCE) && (
           /^(mkdir|ln|cp|rm|mv|_link_or_copy)\s/.test(t)
-          || /^(\.|source)\s+"\$SOURCE_GSTACK_DIR\//.test(t)
+          || /^(\.|source)\s+"(\$SOURCE_GSTACK_DIR|\$INSTALL_GSTACK_DIR|\$\(dirname "\$0"\))\//.test(t)
           || /^bun\s+"\$SOURCE_GSTACK_DIR\//.test(t)
         )) firstUse = offset;
       }
