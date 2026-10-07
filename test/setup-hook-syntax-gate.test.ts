@@ -83,6 +83,10 @@ function fixtureTree(root: string) {
   }
 }
 
+// Conflict markers are built here so this file never carries one at the start
+// of a line.
+const LT = '<'.repeat(7), EQ = '='.repeat(7), GT = '>'.repeat(7);
+
 function tmpBase(): string {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hook-gate-'));
   bases.push(base);
@@ -131,6 +135,39 @@ describe('gstack-hook-check: what fails', () => {
     const r = check(root);
     expect(r.code).toBe(1);
     expect(r.out).toMatch(new RegExp(`^fail hosts/claude/hooks/question-preference-hook ${shim}:${lines}: syntax error`, 'm'));
+  });
+
+  test('a half-merged shim whose markers sit inside a heredoc still parses, and fails at the first marker', () => {
+    const root = tmpBase();
+    fixtureTree(root);
+    const shim = path.join(root, 'hosts/claude/hooks/question-preference-hook');
+    const before = fs.readFileSync(shim, 'utf8');
+    const first = before.split('\n').length + 1;
+    fs.appendFileSync(shim, `cat >/dev/null <<'EOF'\n${LT} HEAD\nours\n${EQ}\ntheirs\n${GT} main\nEOF\n`);
+    // The gap this closes: bash itself accepts the file.
+    expect(spawnSync('bash', ['-n', shim], { timeout: 15_000 }).status).toBe(0);
+    const r = check(root);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(`fail hosts/claude/hooks/question-preference-hook ${shim}:${first}: unresolved merge conflict marker`);
+    expect(r.out).not.toContain('ok hosts/claude/hooks/question-preference-hook');
+  });
+
+  test('a TypeScript entry with markers inside a template literal still bundles, and fails at the first marker', () => {
+    const root = tmpBase();
+    fixtureTree(root);
+    const ts = path.join(root, 'hosts/claude/hooks/timeline-stop-hook.ts');
+    fs.writeFileSync(ts, `export const x = \`\n${LT} HEAD\na\n${EQ}\nb\n${GT} main\n\`;\n`);
+    const r = check(root);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(`fail hosts/claude/hooks/timeline-stop-hook ${ts}:2: unresolved merge conflict marker`);
+  });
+
+  test('a bare ======= line is an ordinary banner, not a marker', () => {
+    const root = tmpBase();
+    fixtureTree(root);
+    const shim = path.join(root, 'hosts/claude/hooks/question-log-hook');
+    fs.appendFileSync(shim, `cat >/dev/null <<'EOF'\n${EQ}\nEOF\n`);
+    expect(check(root).code).toBe(0);
   });
 
   test('a broken skill-frontmatter hook fails like a setup hook (/freeze, which /guard and /investigate also run)', () => {
@@ -301,5 +338,18 @@ describe('setup: registers the hooks that parse, refuses the rest, exits non-zer
     expect(r.out).toContain('keeps running the broken file until it is fixed');
     expect(r.out).not.toContain('previous install is still active');
     expect(registeredCommands(fx)).toEqual(before);
+  }, SETUP_HOOKS_TEST_MS);
+
+  test('a half-merged skill-frontmatter hook: setup names it, still registers its own hooks, and exits 1', () => {
+    const fx = setupFixture();
+    const broken = shim(fx, 'careful/bin/check-careful.sh');
+    const first = fs.readFileSync(broken, 'utf8').split('\n').length + 1;
+    fs.appendFileSync(broken, `cat >/dev/null <<'EOF'\n${LT} HEAD\nours\n${EQ}\ntheirs\n${GT} main\nEOF\n`);
+    const r = runSetupHooks(fx);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(`  ${broken}:${first}: unresolved merge conflict marker`);
+    expect(r.out).toContain('Skipped: careful/bin/check-careful.sh');
+    expect(r.out).toContain('or that a skill file runs, keeps running the broken file until it is fixed');
+    expect(registeredCommands(fx)).toEqual(ALL.map(rel => shim(fx, rel)).sort());
   }, SETUP_HOOKS_TEST_MS);
 });

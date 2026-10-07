@@ -574,8 +574,10 @@ session. Setup parse-checks every hook it registers, and every hook a skill
 registers while it runs (`/autoplan`, `/careful`, `/freeze` and
 `/plan-ceo-review`; `/guard` and `/investigate` reuse the `/careful` and
 `/freeze` checks): the shim, and the TypeScript it runs with its local imports.
-It registers the hooks that parse, skips the ones listed, finishes the rest
-of the install, and exits non-zero. Claude Code runs hooks
+A merge conflict marker left in a hook is refused too, as `unresolved merge
+conflict marker`, even when the file still parses: markers inside a heredoc or
+a string do. It registers the hooks that parse, skips the ones listed,
+finishes the rest of the install, and exits non-zero. Claude Code runs hooks
 straight from `~/.claude/skills/gstack`, so a skipped hook that an earlier
 setup registered, or that a skill runs, keeps running the broken file until it
 is fixed. This is a gstack bug, or a half-applied edit or merge in your

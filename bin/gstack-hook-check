@@ -24,7 +24,10 @@
 # Each shim is parsed by the interpreter its shebang names (bash -n, sh -n).
 # Each TypeScript entry the shim runs (a `<name>.ts` beside it) is bundled with
 # its local imports into a temp directory, packages external, so a broken or
-# missing local import fails; a missing entry fails.
+# missing local import fails; a missing entry fails. The shim and each entry
+# are also scanned for merge conflict markers: a half-merged hook whose markers
+# sit inside a heredoc, a string or a comment still parses, and still runs the
+# wrong half.
 #
 # Output, one line per hook:
 #   ok <hook>
@@ -108,6 +111,19 @@ first_message() {
 FAILED=0
 fail() { echo "fail $1 $2: $3"; FAILED=1; }
 
+# marker_line <file> — the line number of the first merge conflict marker
+# (`<<<<<<<`, `|||||||` or `>>>>>>>` at the start of a line, then a space or
+# the end of the line), or nothing. A bare `=======` is left alone: it is also
+# an ordinary banner, and a real conflict always carries the other two.
+marker_line() {
+  LC_ALL=C grep -nE '^(<{7}|[|]{7}|>{7})( |$)' "$1" 2>/dev/null | head -1 | cut -d: -f1
+}
+check_markers() {
+  _at=$(marker_line "$2")
+  [ -n "$_at" ] || return 0
+  fail "$1" "$2:$_at" "unresolved merge conflict marker"
+  return 1
+}
 
 for hook in $HOOKS; do
   shim="$ROOT/$hook"
@@ -127,6 +143,7 @@ for hook in $HOOKS; do
     fail "$hook" "$(first_location "$shim" "$err")" "$(first_message "$err")"
     hook_ok=0
   fi
+  check_markers "$hook" "$shim" || hook_ok=0
   dir=$(dirname "$shim")
   for entry in $(grep -v '^[[:space:]]*#' "$shim" | grep -oE '[A-Za-z0-9._-]+\.ts([^A-Za-z0-9_]|$)' | sed -E 's/\.ts.*$/.ts/' | awk '!seen[$0]++'); do
     if [ ! -f "$dir/$entry" ]; then
@@ -138,6 +155,7 @@ for hook in $HOOKS; do
       fail "$hook" "$(first_location "$dir/$entry" "$err")" "$(first_message "$err")"
       hook_ok=0
     fi
+    check_markers "$hook" "$dir/$entry" || hook_ok=0
   done
   [ "$hook_ok" -eq 1 ] && echo "ok $hook"
 done
