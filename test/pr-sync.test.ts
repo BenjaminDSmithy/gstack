@@ -198,6 +198,10 @@ function fakeGh(t: Topo, opts: { state?: string } = {}): GhRunner & { calls: str
     }
     if (args[0] === 'api' && args[1] === 'user') return ok('me\n');
     if (args[0] === 'pr' && args[1] === 'list') return ok('[]');
+    // gstack-pr-watch's poll, run by the default pre-write gate: a quiet PR.
+    if (args[0] === 'api' && args[1] === 'repos/acme/gstack/pulls/7') return ok(JSON.stringify({ state: 'open', merged: false, mergeable_state: 'clean', head: { sha: 'x' } }));
+    if (args[0] === 'api' && (args[1]?.startsWith('repos/acme/gstack/issues/7/comments') || args[1]?.startsWith('repos/acme/gstack/pulls/7/reviews'))) return ok('[]');
+    if (args[0] === 'api' && args.some(a => a.startsWith('repos/acme/gstack/issues/7/timeline'))) return ok('[]');
     return { status: 1, stdout: '', stderr: `unexpected gh ${args.join(' ')}` };
   }) as GhRunner & { calls: string[][] };
   gh.calls = calls;
@@ -465,6 +469,22 @@ describe('push', () => {
     expect(r.code, r.out.join('\n')).toBe(30);
     expect(r.out[0]).toContain('head moved');
     expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(moved);
+  });
+
+  test('the default gate polls the watch: a maintainer-proxy supersede comment stops the push', async () => {
+    const t = topology('p4', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    recordValidation(t, s.sha, 0);
+    const quiet = fakeGh(t);
+    const warned = ((args: string[]) => args[0] === 'api' && args[1]?.startsWith('repos/acme/gstack/issues/7/comments')
+      ? { status: 0, stderr: '', stdout: JSON.stringify([{ id: 5, user: { login: 'capy-ai[bot]', type: 'Bot' }, author_association: 'CONTRIBUTOR', created_at: '2026-10-08T00:00:00Z', body: 'The fix wave rewrote the fix on another branch.' }]) }
+      : quiet(args)) as GhRunner;
+    const r = await run(t, ['push', '--yes'], { gh: warned });
+    expect(r.code, r.out.join('\n')).toBe(30);
+    expect(r.out[0]).toContain('superseded-comment');
+    expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
   });
 
   test('a stale body from an earlier push blocks the next one; abort removes a staged sync', async () => {

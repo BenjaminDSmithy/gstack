@@ -155,7 +155,12 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
       return ok(JSON.stringify({ number: 9, state: opts.state ?? 'OPEN', isDraft: false, headRefOid: git(fork, 'rev-parse', 'refs/heads/pr/b'), url: 'https://github.com/acme/gx/pull/9', headRepositoryOwner: { login: 'me' }, headRepository: { name: 'gx' }, headRefName: 'pr/b', baseRefName: 'main' }));
     }
     if (args[0] === 'api' && args[1] === 'user') return ok(`${opts.viewer ?? 'me'}\n`);
-    if (args[0] === 'api' && args[1] === 'repos/acme/gx/pulls/9') return ok(live.endsWith('\n') ? live : `${live}\n`);
+    if (args[0] === 'api' && args[1] === 'repos/acme/gx/pulls/9' && args.includes('--jq')) return ok(live.endsWith('\n') ? live : `${live}\n`);
+    // gstack-pr-watch's poll, run by the default pre-write gate: a quiet PR.
+    if (args[0] === 'api' && args[1] === 'repos/acme/gx/pulls/9') return ok(JSON.stringify({ state: 'open', merged: false, mergeable_state: 'clean', head: { sha: 'x' } }));
+    if (args[0] === 'api' && (args[1]?.startsWith('repos/acme/gx/issues/9/comments') || args[1]?.startsWith('repos/acme/gx/pulls/9/reviews'))) return ok('[]');
+    if (args[0] === 'api' && args.some(a => a.startsWith('repos/acme/gx/issues/9/timeline'))) return ok('[]');
+    if (args[0] === 'pr' && args[1] === 'list') return ok('[]');
     if (args[0] === 'pr' && args[1] === 'checks') return ok(JSON.stringify([{ name: 'free', bucket: 'pass', link: '' }, { name: 'win', bucket: 'fail', link: '' }, { name: 'docs', bucket: 'skipping', link: '' }]));
     if (args[0] === 'pr' && args[1] === 'edit') {
       const file = args[args.indexOf('--body-file') + 1];
