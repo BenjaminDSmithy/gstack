@@ -1,0 +1,4 @@
+#!/usr/bin/env bun
+import { watchMain } from '../lib/pr-watch';
+
+process.exit(await watchMain(process.argv.slice(2)));
