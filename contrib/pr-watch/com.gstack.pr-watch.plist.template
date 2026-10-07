@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.gstack.pr-watch</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/bash</string><string>@RUNNER@</string></array>
+  <key>StartInterval</key><integer>1800</integer>
+  <key>RunAtLoad</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>@HOME@</string>
+    <key>PATH</key><string>@PATH@</string>
+  </dict>
+  <key>StandardOutPath</key><string>@HOME@/.gstack/analytics/pr-watch.launchd.log</string>
+  <key>StandardErrorPath</key><string>@HOME@/.gstack/analytics/pr-watch.launchd.log</string>
+</dict>
+</plist>
