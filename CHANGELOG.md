@@ -1,5 +1,46 @@
 # Changelog
 
+## [1.91.34.0] - 2026-10-08
+
+**The hook parse check now covers what skill hooks run.**
+**A half-merged hook, helper or import no longer passes as `ok`.**
+
+`./setup` and the auto-updater parse-check gstack's hooks before Claude Code runs them. Until now that meant the hooks setup registers, plus /autoplan's. /careful, /freeze, /guard and /investigate run a PreToolUse check on your Bash, Edit and Write calls, and /plan-ceo-review runs a hand-off hook after Bash calls. None of those were checked, and neither was the helper script the /careful and /freeze checks share. The check now covers every hook a skill registers, the shell helpers each hook sources, and the TypeScript modules it imports. It also refuses a merge conflict marker in any of them, including markers that bash parses without complaint inside a heredoc or a string.
+
+### The numbers that matter
+
+Measured with `bin/gstack-hook-check .` on this tree: macOS, a shared 18-core machine at load average 15 to 19, six timed runs of each version.
+
+| | Before | After |
+|---|---|---|
+| Hooks checked | 6 | 9 |
+| Shell helpers checked | 0 | 4 |
+| Conflict markers that still parse (in a heredoc, a string or a template literal), in a hook, a helper or an imported module | `ok`, exit 0 | refused at the first marker, exit 1 |
+| A malformed `tsconfig.json` or `bunfig.toml` in the directory the check runs from | every TypeScript hook fails | no effect |
+| Time for the whole check | 0.35 to 0.40 s | 0.92 to 1.26 s |
+
+The extra 0.6 s pays for three more hooks, four helpers, and the local modules the TypeScript entries import.
+
+### What this means for you
+
+If a pull or a merge leaves a /careful or /freeze check, or the helper they share, half-merged, `./setup` names the file and line, and the auto-updater holds the update. Before, the skill blocked or prompted on your tool calls until you found the file yourself. The auto-updater also stops holding updates because the project you happen to be in has a broken `tsconfig.json`. Nothing to do: run `./setup` as usual.
+
+### Itemized changes
+
+#### Fixed
+
+- `bin/gstack-hook-check` also checks every gstack path a skill's frontmatter hook command runs (`SKILL.md` and each `<skill>/SKILL.md`): `careful/bin/check-careful.sh`, `freeze/bin/check-freeze.sh`, `plan-ceo-review/bin/mode-handoff-hook`, and the /autoplan hook it used to name by hand. It reads CRLF `SKILL.md` files and runs under BusyBox awk.
+- It parses each shell helper a hook sources, and what those source in turn: every `# shellcheck source=` path, and every `*.sh` path on a line that runs `.` or `source`, or assigned to a variable such a line sources. That is `careful/bin/hook-extract.sh` and the `bin/gstack-state-root.sh` it sources, and the three files `bin/gstack-session-update` sources. A script a hook only runs is not parsed as its helper.
+- TypeScript hooks are bundled from the gstack tree, not the directory the check runs from, so a malformed `tsconfig.json` or `bunfig.toml` there no longer fails every TypeScript hook. The auto-updater runs the check from your current project.
+- It refuses a merge conflict marker (`<<<<<<<`, `|||||||` or `>>>>>>>` at the start of a line) in a hook, its helpers, its TypeScript entry, and every local module the entry bundles, as `unresolved merge conflict marker`, even when the file parses. A bare `=======` line is not a marker. With a bun whose `build` has no `--metafile`, only the entry is scanned among the TypeScript files.
+- `docs/troubleshooting.md` describes this for setup and for the auto-updater.
+
+#### For contributors
+
+- `test/setup-hook-syntax-gate.test.ts` derives the skill hooks and each hook's helpers on its own, and its fixture tree carries both. It adds 15 cases; 11 of them, and the rewritten list test, fail against the previous check. The setup cases get 120 s budgets.
+
+Contributed by @BenjaminDSmithy.
+
 ## [1.91.33.0] - 2026-10-06
 
 **A red eval case now gets one clear verdict from its measurement: meets, qualified, extend once, or fix.**
