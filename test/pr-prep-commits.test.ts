@@ -1,0 +1,130 @@
+/**
+ * gstack-pr-prep-commits: the audit skips merges, release-only commits and
+ * empty `ci:` re-runs; a commit audited before (matched by patch-id, so a
+ * rebase keeps the match) only re-queries what is new and keeps its old
+ * verdict, so `worst` never drops; an unreported commit is UNVERIFIED; and
+ * the branch's own open PR is never scored against itself.
+ */
+import { describe, test, expect, beforeAll, afterAll, setDefaultTimeout } from 'bun:test';
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { listAuditCommits, stampReport, dropSelf, worstOf, searchQualifier, commitsMain } from '../lib/pr-prep-commits';
+import { defaultGit } from '../lib/pr-context';
+
+setDefaultTimeout(60_000);
+
+let ROOT = '';
+let repo = '';
+let base = '';
+const sha: Record<string, string> = {};
+
+function git(...args: string[]): string {
+  const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8', timeout: 30_000, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com' } });
+  if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
+  return r.stdout.trim();
+}
+function commit(name: string, files: Record<string, string>, msg: string): void {
+  for (const [f, t] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(repo, f)), { recursive: true });
+    fs.writeFileSync(path.join(repo, f), t);
+  }
+  git('add', '-A');
+  git('commit', '-q', '--allow-empty', '-m', msg);
+  sha[name] = git('rev-parse', 'HEAD');
+}
+
+beforeAll(() => {
+  ROOT = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pr-prep-commits-')));
+  repo = path.join(ROOT, 'repo');
+  fs.mkdirSync(repo);
+  git('init', '-q', '-b', 'main');
+  commit('base', { 'VERSION': '1.0.0.0\n', 'CHANGELOG.md': '# C\n', 'lib/z.ts': 'z\n' }, 'base');
+  base = sha.base;
+  git('checkout', '-q', '-b', 'pr/a');
+  commit('c1', { 'lib/a.ts': 'a\n' }, 'feat: a');
+  commit('c2', { 'VERSION': '1.0.1.0\n', 'CHANGELOG.md': '# C\n\n## [1.0.1.0]\n' }, 'chore(release): 1.0.1.0');
+  commit('c3', {}, 'ci: re-run after a Bun IOCP crash');
+  git('checkout', '-q', 'main');
+  commit('m1', { 'lib/main.ts': 'm\n' }, 'main moves (#5)');
+  git('checkout', '-q', 'pr/a');
+  git('merge', '-q', '--no-edit', 'main');
+  commit('c4', { 'lib/b.ts': 'b\n' }, 'fix: b');
+  // The audit's base is upstream's pinned tip, which already holds m1.
+  base = sha.m1;
+});
+afterAll(() => fs.rmSync(ROOT, { recursive: true, force: true }));
+
+describe('listAuditCommits', () => {
+  test('merges, release-only and empty commits carry no new work', () => {
+    const l = listAuditCommits(defaultGit, repo, base, null);
+    expect(l.audit.map(c => c.sha)).toEqual([sha.c1, sha.c4]);
+    expect(l.audit.every(c => c.mode === 'NEW')).toBe(true);
+    expect(l.skipped.map(s => [s.sha, s.reason])).toEqual([[sha.c2, 'release-only'], [sha.c3, 'empty']]);
+  });
+
+  test('a commit audited before carries its verdict and searches only newer items; UNVERIFIED is re-checked in full', () => {
+    const first = listAuditCommits(defaultGit, repo, base, null);
+    const prior = { generated_at: '2026-10-05T10:00:00Z', commits: [], audited: [{ patchId: first.audit[0].patchId, sha: 'f'.repeat(40), bucket: 'OVERLAP' }, { patchId: first.audit[1].patchId, sha: sha.c4, bucket: 'UNVERIFIED' }] };
+    const l = listAuditCommits(defaultGit, repo, base, prior);
+    expect(l.audit.map(c => c.mode)).toEqual(['CARRY', 'RECHECK']);
+    expect(searchQualifier(l.audit[0])).toBe('updated:>=2026-10-05');
+    expect(searchQualifier(l.audit[1])).toBeNull();
+  });
+});
+
+describe('stampReport', () => {
+  const now = new Date('2026-10-08T00:00:00Z');
+  test('worst never drops for a carried commit; an unreported commit is UNVERIFIED; stamps are not typed by the agent', () => {
+    const first = listAuditCommits(defaultGit, repo, base, null);
+    const prior = { generated_at: '2026-10-05T10:00:00Z', audited: [{ patchId: first.audit[0].patchId, sha: sha.c1, bucket: 'OVERLAP' }] };
+    const l = listAuditCommits(defaultGit, repo, base, prior);
+    const r = stampReport({ summary: 'x', worst: 'CLEAN', commits: [{ sha: sha.c1.slice(0, 8), bucket: 'CLEAN' }] }, l, now) as Record<string, any>;
+    expect(r.commits.map((c: { bucket: string }) => c.bucket)).toEqual(['OVERLAP', 'UNVERIFIED']);
+    expect(r.worst).toBe('UNVERIFIED');
+    expect(r).toMatchObject({ head: git('rev-parse', 'HEAD'), base_sha: base, generated_at: now.toISOString() });
+    expect(r.audited.map((a: { sha: string }) => a.sha)).toEqual([sha.c1, sha.c4]);
+  });
+
+  test('a malformed report and an unknown bucket fail closed', () => {
+    const l = listAuditCommits(defaultGit, repo, base, null);
+    expect(() => stampReport({ commits: [] }, l, now)).toThrow();
+    expect(worstOf(['CLEAN', 'MAYBE'])).toBe('UNVERIFIED');
+    expect(worstOf(['CLEAN', 'SIBLING', 'EXACT_DUP', 'UNVERIFIED'])).toBe('EXACT_DUP');
+  });
+});
+
+describe('dropSelf', () => {
+  test('drops the own PR by number or head ref + owner, keeps another fork\'s same-named branch', () => {
+    const cands = [
+      { number: 3066, headRefName: 'pr/x', headRepositoryOwner: { login: 'Me' } },
+      { number: 1, headRefName: 'pr/x', headRepositoryOwner: { login: 'me' } },
+      { number: 2, headRefName: 'pr/x', headRepositoryOwner: { login: 'someone' } },
+      { number: 3, headRefName: 'other', author: { login: 'me' } },
+    ];
+    expect(dropSelf(cands, { number: 3066, headRef: 'pr/x', headOwner: 'me' }).map(c => c.number)).toEqual([2, 3]);
+  });
+});
+
+describe('CLI', () => {
+  test('stamp writes the /ship report and the persistent copy; the next list carries from it', async () => {
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(ROOT, 'home') };
+    const out: string[] = [];
+    const run = (argv: string[]) => commitsMain([...argv, '--cwd', repo], { out: l => out.push(l), env, now: () => new Date('2026-10-08T00:00:00Z') });
+    const agent = path.join(ROOT, 'agent.json');
+    fs.writeFileSync(agent, JSON.stringify({ summary: '2 CLEAN', commits: [{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4, bucket: 'SIBLING' }] }));
+    const ship = path.join(ROOT, 'ship-report.json');
+    expect(await run(['stamp', '--base', base, '--report', agent, '--out', ship])).toBe(0);
+    expect(out.at(-1)).toBe(`PR_PREP_REPORT: ${ship} (SIBLING)`);
+    expect(await run(['paths'])).toBe(0);
+    const persisted = out.at(-1)!;
+    expect(JSON.parse(fs.readFileSync(persisted, 'utf8')).worst).toBe('SIBLING');
+    expect(await run(['list', '--base', base])).toBe(0);
+    const listed = JSON.parse(out.at(-1)!);
+    expect(listed.audit.map((c: { mode: string }) => c.mode)).toEqual(['CARRY', 'CARRY']);
+    fs.writeFileSync(agent, '{"nope": 1}');
+    expect(await run(['stamp', '--base', base, '--report', agent, '--out', ship])).toBe(2);
+    expect(JSON.parse(fs.readFileSync(ship, 'utf8')).worst).toBe('SIBLING');
+  });
+});

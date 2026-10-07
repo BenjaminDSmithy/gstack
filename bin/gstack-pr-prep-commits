@@ -1,0 +1,4 @@
+#!/usr/bin/env bun
+import { commitsMain } from '../lib/pr-prep-commits';
+
+process.exit(await commitsMain(process.argv.slice(2)));
