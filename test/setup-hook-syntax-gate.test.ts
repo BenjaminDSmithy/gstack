@@ -213,6 +213,11 @@ describe('setup: registers the hooks that parse, refuses the rest, exits non-zer
   const shim = (fx: Fx, rel: string) => path.join(fx.canonical, rel);
   const ALL = ['bin/gstack-session-update', 'hosts/claude/hooks/question-log-hook', 'hosts/claude/hooks/question-preference-hook',
     'hosts/claude/hooks/auq-error-fallback-hook', 'hosts/claude/hooks/timeline-stop-hook'];
+  // Each case runs the hook sections once or twice, and each run parses every
+  // hook and bundles its TypeScript. A run took 2.5 s at load 48, so a case
+  // that runs it twice can pass a bare `bun test`'s 5 s default (the free
+  // runner allows 30 s).
+  const SETUP_HOOKS_TEST_MS = 120_000;
 
   test('healthy install registers every hook and finishes', () => {
     const fx = setupFixture();
@@ -221,7 +226,7 @@ describe('setup: registers the hooks that parse, refuses the rest, exits non-zer
     expect(r.code).toBe(0);
     expect(r.out).not.toContain('refusing to register');
     expect(registeredCommands(fx)).toEqual(ALL.map(rel => shim(fx, rel)).sort());
-  });
+  }, SETUP_HOOKS_TEST_MS);
 
   test('fresh install: the unparseable hook is not registered, the rest are, and setup exits 1 with file:line', () => {
     const fx = setupFixture();
@@ -240,7 +245,7 @@ describe('setup: registers the hooks that parse, refuses the rest, exits non-zer
     expect(r.out).not.toContain('previous install is still active');
     expect(r.out).not.toContain('no stable install');
     expect(registeredCommands(fx)).toEqual(ALL.filter(rel => rel !== 'hosts/claude/hooks/question-log-hook').map(rel => shim(fx, rel)).sort());
-  });
+  }, SETUP_HOOKS_TEST_MS);
 
   test('upgrade over live registrations: the others stay registered, the broken one is not re-registered, exit 1', () => {
     const fx = setupFixture();
@@ -257,5 +262,5 @@ describe('setup: registers the hooks that parse, refuses the rest, exits non-zer
     expect(r.out).toContain('keeps running the broken file until it is fixed');
     expect(r.out).not.toContain('previous install is still active');
     expect(registeredCommands(fx)).toEqual(before);
-  });
+  }, SETUP_HOOKS_TEST_MS);
 });
