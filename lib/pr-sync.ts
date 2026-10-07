@@ -1,0 +1,880 @@
+/**
+ * pr-sync — keep an open upstream PR current with its base branch, the way
+ * the #3032 effort did it by hand ten times: merge (never rebase, never
+ * force), resolve the release files mechanically, re-version through the
+ * merged tree's own bin/gstack-next-version, prove the PR's code diff did not
+ * change, then push fast-forward only once the owner says yes.
+ *
+ *   gstack-pr-sync plan   --pr <n|url> [--repo o/r] [--cwd <pr worktree>]
+ *   gstack-pr-sync merge  --pr <n|url> [...] [--worktree-root <dir>] [--fork-claims]
+ *   gstack-pr-sync push   --pr <n|url> [...] --yes [--accept-diff-change]
+ *   gstack-pr-sync abort  --pr <n|url> [...]
+ *   gstack-pr-sync status --pr <n|url> [...]
+ *
+ * Every merge happens in a detached scratch worktree at H0 (the PR head as
+ * the remote has it), `<root>/<topic>-sync`, so the owner's PR worktree is
+ * never left mid-merge. Any failure after the scratch worktree exists
+ * removes it. `merge` leaves a committed sync in the scratch worktree and a
+ * `sync.json` beside the PR state; `push` publishes exactly that commit.
+ *
+ * gstack-shaped trees only: the merged tree must carry bin/gstack-next-version,
+ * bin/gstack-version-bump, scripts/detect-bump.ts and scripts/gen-agents-digest.ts.
+ */
+
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  PrContextError, RELEASE_FILES, defaultGh, defaultGit, parsePrRefFor, upstreamRepoFromGh,
+  remoteForRepo, pinBranch, readPr, viewerLogin, assertWritableIdentity, topicFor, prStateDir,
+  readStateFor, writeState, withPrLock, receiptedSend, requireApproval,
+  type GhResult, type GhRunner, type GitRunner, type PrInfo, type PrState,
+} from './pr-context';
+
+export const SYNC_EXIT = {
+  SYNCED: 0, ERROR: 1, USAGE: 2, NOTHING: 10, CODE_CONFLICT: 20, DIFF_CHANGED: 21, PRECONDITION: 30,
+  VALIDATION: 31, BODY_STALE: 32, REMOTE_MOVED: 40, HOOK_REFUSED: 41, LOCKED: 45, DIRTY: 50, VERSION_SOURCE: 60,
+} as const;
+
+export const SYNC_USAGE = `gstack-pr-sync <plan|merge|push|abort|status> --pr <number|url> [options]
+
+Keeps an open upstream PR current with its base branch: merge (never rebase,
+never force), resolve VERSION, package.json, the agents digest and the
+CHANGELOG mechanically (upstream's entries byte-identical, ours on top),
+re-version with the merged tree's bin/gstack-next-version, prove the PR's
+code diff is unchanged (release and generated files excluded), and push
+fast-forward only after the owner's yes and a green validation of the
+exact commit.
+
+  plan     read-only: pins both heads, checks the preconditions, classifies
+           the conflicts a merge would hit
+  merge    builds and commits the sync in a scratch worktree
+           (<worktree-root>/<topic>-sync); nothing is pushed
+  push     publishes the staged sync commit (needs --yes); then fast-
+           forwards the local PR branch and removes the scratch worktree
+  abort    removes the staged sync
+  status   prints the staged sync and whether it may be pushed
+
+Options:
+  --pr N|URL              the upstream PR (required)
+  --repo OWNER/NAME       upstream repo (default: gh repo view in --cwd)
+  --cwd DIR               the PR worktree, on the PR's head branch (default: .)
+  --worktree-root DIR     scratch worktree parent (default: ~/worktrees/<repo name>)
+  --fork-claims           also read open fork PRs' VERSION (advisory, <= 40 reads)
+  --yes                   the owner approved this push in this turn
+  --accept-diff-change    push even though the code-diff proof says CHANGED
+
+First line of output: RESULT <WORD> ...
+
+Exit codes: 0 synced/pushed/ok, 1 error, 2 usage or approval missing,
+10 nothing to do, 20 code conflict (resolve by hand), 21 code diff changed
+(review; push needs --accept-diff-change), 30 precondition, 31 validation
+missing or red for the staged commit, 32 PR body still stale from an earlier
+push, 40 remote moved or not fast-forward, 41 a push hook refused,
+45 lock busy, 50 a sync is already staged or the local branch has unpushed
+commits, 60 the version queue could not be read (never guessed).`;
+
+// ── pure helpers ────────────────────────────────────────────────────────────
+
+const VERSION4_RE = /^\d+\.\d+\.\d+\.\d+$/;
+const HEADING_RE = /^## \[([^\]]+)\]/;
+const MARKER_RE = /^(<{7}|={7}|>{7})(?: |$)/m;
+/** Generated files whose source is not a sibling `.tmpl` (CLAUDE.md, gen-skill-docs). */
+const GENERATED_EXTRA = ['review/design-checklist.md', 'lib/dom-dump.js', 'gstack/llms.txt'];
+/** Release tooling: if both sides changed it, the mechanical resolution is not trustworthy. */
+const RELEASE_TOOLING = ['bin/gstack-next-version', 'bin/gstack-version-bump', 'lib/version-source.ts', 'scripts/gen-agents-digest.ts', 'scripts/detect-bump.ts'];
+const PLATFORM_FILES = ['bin/gstack-next-version', 'bin/gstack-version-bump', 'scripts/detect-bump.ts', 'scripts/gen-agents-digest.ts'];
+const DIGEST = 'agents-digest/gstack-AGENTS.md';
+
+export function cmpVersion(a: string, b: string): number {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d) return d < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+/** `git merge-tree --write-tree --name-only --no-messages`: tree, then conflicted paths up to the first blank line. */
+export function parseMergeTree(stdout: string): { tree: string; conflicts: string[] } {
+  const lines = stdout.replace(/\r/g, '').split('\n');
+  const tree = (lines[0] ?? '').trim();
+  if (!/^[0-9a-f]{40,64}$/.test(tree)) throw new PrContextError('git merge-tree printed no tree id', 1);
+  const conflicts: string[] = [];
+  for (const line of lines.slice(1)) {
+    if (line === '') break;
+    if (!conflicts.includes(line)) conflicts.push(line);
+  }
+  return { tree, conflicts };
+}
+
+export function classifyConflicts(paths: readonly string[], isGenerated: (p: string) => boolean): { release: string[]; generated: string[]; code: string[] } {
+  const out = { release: [] as string[], generated: [] as string[], code: [] as string[] };
+  for (const p of paths) {
+    if (RELEASE_FILES.includes(p)) out.release.push(p);
+    else if (!p.endsWith('.tmpl') && isGenerated(p)) out.generated.push(p);
+    else out.code.push(p);
+  }
+  return out;
+}
+
+/** Offset of the first `## [` release heading (CHANGELOG entries key on this, nothing looser). */
+export function firstEntryOffset(text: string): number {
+  const m = /^## \[/m.exec(text);
+  return m ? m.index : text.length;
+}
+
+/**
+ * The PR's CHANGELOG block: what the head inserted at the top of the base's
+ * entries, and nothing else. Null when the head changed anything beyond one
+ * inserted block (an older entry edited, the header changed).
+ */
+export function changelogBlock(base: string, head: string): { block: string; headings: string[] } | null {
+  const i0 = firstEntryOffset(base);
+  const j0 = firstEntryOffset(head);
+  if (base.slice(0, i0) !== head.slice(0, j0)) return null;
+  const n = head.length - base.length;
+  if (n < 0) return null;
+  const block = head.slice(j0, j0 + n);
+  if (head !== base.slice(0, i0) + block + base.slice(i0)) return null;
+  const headings = block.split('\n').map(l => HEADING_RE.exec(l)?.[1]).filter((v): v is string => !!v);
+  return { block, headings };
+}
+
+export function rebuildChangelog(base: string, block: string): string {
+  const i = firstEntryOffset(base);
+  return base.slice(0, i) + block + base.slice(i);
+}
+
+/** Rewrites only the block's first line to `## [V] - <date>`. */
+export function renameBlockHeading(block: string, version: string, date: string): string {
+  const nl = block.indexOf('\n');
+  const first = nl < 0 ? block : block.slice(0, nl);
+  if (!HEADING_RE.test(first)) throw new PrContextError('the CHANGELOG block does not start with a ## [version] heading', 30);
+  return `## [${version}] - ${date}` + (nl < 0 ? '' : block.slice(nl));
+}
+
+export function blockDate(block: string): string | null {
+  return /^## \[[^\]]+\] - (\d{4}-\d{2}-\d{2})/.exec(block)?.[1] ?? null;
+}
+
+export function jsonSameExceptVersion(a: string, b: string): boolean {
+  try {
+    const ja = JSON.parse(a) as Record<string, unknown>;
+    const jb = JSON.parse(b) as Record<string, unknown>;
+    delete ja.version;
+    delete jb.version;
+    return JSON.stringify(ja) === JSON.stringify(jb);
+  } catch {
+    return false;
+  }
+}
+
+export interface QueueAnswer { version: string; claimed: string[]; reason: string; warnings: string[] }
+
+/** Qualify bin/gstack-next-version's JSON; anything short of a live, fork-correct answer is refused (code 60). */
+export function qualifyQueue(r: GhResult, mainVersion: string): QueueAnswer {
+  const refuse = (why: string) => new PrContextError(`bin/gstack-next-version unusable: ${why}`, SYNC_EXIT.VERSION_SOURCE);
+  if (r.status !== 0) throw refuse(`exit ${r.status ?? 'none'}${r.error ? ` (${r.error})` : ''}: ${r.stderr.trim().split('\n').at(-1) ?? ''}`);
+  let j: Record<string, unknown>;
+  try {
+    j = JSON.parse(r.stdout) as Record<string, unknown>;
+  } catch {
+    throw refuse('output is not JSON');
+  }
+  if (j.offline !== false) throw refuse('offline answer (the queue was not read)');
+  if (j.fallback !== null && j.fallback !== undefined) throw refuse(`fallback "${String(j.fallback)}" reads the wrong repo for an upstream PR`);
+  if (j.base_version !== mainVersion) throw refuse(`base_version ${String(j.base_version)} is not upstream's ${mainVersion}`);
+  if (typeof j.version !== 'string' || !VERSION4_RE.test(j.version)) throw refuse(`version ${JSON.stringify(j.version)} is not X.Y.Z.W`);
+  if (!Array.isArray(j.claimed)) throw refuse('claimed[] missing');
+  const claimed = j.claimed.map(c => (c as { version?: unknown })?.version).filter((v): v is string => typeof v === 'string');
+  const warnings = Array.isArray(j.warnings) ? j.warnings.filter((w): w is string => typeof w === 'string') : [];
+  return { version: j.version, claimed, reason: typeof j.reason === 'string' ? j.reason : '', warnings };
+}
+
+/** Keep our version when it is above main and unclaimed (CI's own rule); else take the queue's slot. */
+export function pickVersion(ours: string, main: string, q: QueueAnswer): { version: string; kept: boolean } {
+  if (VERSION4_RE.test(ours) && cmpVersion(ours, main) > 0 && !q.claimed.includes(ours)) return { version: ours, kept: true };
+  return { version: q.version, kept: false };
+}
+
+export type ProofVerdict = 'IDENTICAL' | 'CONTEXT-ONLY' | 'CHANGED';
+
+// ── runners ─────────────────────────────────────────────────────────────────
+
+export type ToolRunner = (cmd: string, args: string[], opts: { cwd: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; input?: string }) => GhResult;
+
+export const defaultTool: ToolRunner = (cmd, args, opts) => {
+  const timeout = opts.timeoutMs ?? 600_000;
+  const r = spawnSync(cmd, args, { cwd: opts.cwd, env: { ...process.env, ...opts.env }, input: opts.input, encoding: 'utf8', timeout, maxBuffer: 64 * 1024 * 1024 });
+  if (r.error) return { status: null, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: `${cmd}: ${r.error.message}` };
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+};
+
+export interface PreWriteGateCtx { gh: GhRunner; repo: string; number: number; expectHead: string; state: PrState | null }
+export type PreWriteGate = (ctx: PreWriteGateCtx) => { ok: boolean; reason: string };
+
+/** Default gate: the PR is still OPEN at the head we staged against, and no P0/P1 signal waits for the owner. */
+export const defaultPreWriteGate: PreWriteGate = ({ gh, repo, number, expectHead, state }) => {
+  const pr = readPr(gh, repo, number);
+  if (pr.state !== 'OPEN') return { ok: false, reason: `PR #${number} is ${pr.state}` };
+  if (pr.headOid !== expectHead) return { ok: false, reason: `PR head moved to ${pr.headOid.slice(0, 12)} (staged against ${expectHead.slice(0, 12)})` };
+  const unacked = (state?.signals.latched ?? []).filter(s => !(state?.signals.acked ?? []).includes(s.id));
+  if (unacked.length) return { ok: false, reason: `unacknowledged ${unacked.map(s => `${s.level} ${s.kind}`).join(', ')}` };
+  return { ok: true, reason: 'ok' };
+};
+
+export interface SyncDeps {
+  gh: GhRunner;
+  git: GitRunner;
+  tool: ToolRunner;
+  env: NodeJS.ProcessEnv;
+  now: () => Date;
+  out: (line: string) => void;
+  err: (line: string) => void;
+  preWriteGate: PreWriteGate;
+  /** Pause between head read-backs after a push (GitHub can lag a few seconds). */
+  readbackDelayMs: number;
+}
+
+const realDeps = (): SyncDeps => ({
+  gh: defaultGh, git: defaultGit, tool: defaultTool, env: process.env, now: () => new Date(),
+  out: l => process.stdout.write(l + '\n'), err: l => process.stderr.write(l + '\n'), preWriteGate: defaultPreWriteGate,
+  readbackDelayMs: 2_000,
+});
+
+// ── staged-sync record ──────────────────────────────────────────────────────
+
+export interface StagedSync {
+  v: 1; repo: string; number: number; headRef: string; kind: 'merge' | 'release-only';
+  h0: string; base: string; baseRef: string; mainVersion: string; oldVersion: string; version: string;
+  sha: string; proof: ProofVerdict; changedFiles: string[]; scratch: string; at: string;
+}
+
+const syncFile = (dir: string) => path.join(dir, 'sync.json');
+
+export function readStagedSync(dir: string, pr: { repo: string; number: number }): StagedSync | null {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(syncFile(dir), 'utf8');
+  } catch {
+    return null;
+  }
+  const s = JSON.parse(raw) as StagedSync;
+  if (s?.v !== 1 || s.repo !== pr.repo || s.number !== pr.number) throw new PrContextError(`${syncFile(dir)} belongs to another PR`, 30);
+  return s;
+}
+
+function writeStagedSync(dir: string, s: StagedSync): void {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tmp = `${syncFile(dir)}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(s, null, 2) + '\n', { mode: 0o600 });
+  fs.renameSync(tmp, syncFile(dir));
+}
+
+export function freshState(pr: PrInfo, extra: { headRemote: string | null; upstreamRemote: string | null }): PrState {
+  return {
+    v: 1, topic: topicFor(pr.headRef), repo: pr.repo, number: pr.number, headRef: pr.headRef, headOwner: pr.headOwner,
+    headRemote: extra.headRemote, upstreamRemote: extra.upstreamRemote, defaultBranch: pr.baseRef,
+    focused: null, validation: null, bodyStaleSince: null, lastPublishedBodySha256: null,
+    signals: { latched: [], acked: [] }, audit: null,
+  };
+}
+
+// ── context ─────────────────────────────────────────────────────────────────
+
+interface Flags {
+  sub: string; pr: string | null; repo: string | null; cwd: string; worktreeRoot: string | null;
+  forkClaims: boolean; acceptDiffChange: boolean; argv: string[];
+}
+
+const VALUE_FLAGS = ['--pr', '--repo', '--cwd', '--worktree-root'];
+
+export function parseSyncArgs(argv: string[]): Flags {
+  const f: Flags = { sub: argv[0] ?? '', pr: null, repo: null, cwd: process.cwd(), worktreeRoot: null, forkClaims: false, acceptDiffChange: false, argv };
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--') break;
+    const val = () => {
+      const v = argv[++i];
+      if (v === undefined || v.startsWith('--')) throw new PrContextError(`${a} needs a value`, 2);
+      return v;
+    };
+    if (a === '--pr') f.pr = val();
+    else if (a === '--repo') f.repo = val();
+    else if (a === '--cwd') f.cwd = path.resolve(val());
+    else if (a === '--worktree-root') f.worktreeRoot = path.resolve(val());
+    else if (a === '--fork-claims') f.forkClaims = true;
+    else if (a === '--accept-diff-change') f.acceptDiffChange = true;
+    else if (a === '--yes') { /* checked by requireApproval */ }
+    else throw new PrContextError(`unknown option ${a}`, 2);
+  }
+  return f;
+}
+
+interface Ctx {
+  d: SyncDeps; f: Flags; cwd: string; repo: string; pr: PrInfo; headRemote: string; upRemote: string;
+  topic: string; stateDir: string;
+}
+
+function gitOk(d: SyncDeps, cwd: string, args: string[], what: string, opts: { env?: NodeJS.ProcessEnv; input?: string; timeoutMs?: number } = {}): string {
+  const r = d.git(args, { cwd, ...opts });
+  if (r.status !== 0) throw new PrContextError(`${what} failed: ${(r.error ?? r.stderr).trim().split('\n').slice(-2).join(' / ')}`, 1);
+  return r.stdout;
+}
+
+function show(d: SyncDeps, cwd: string, rev: string, file: string): string | null {
+  const r = d.git(['show', `${rev}:${file}`], { cwd });
+  return r.status === 0 ? r.stdout : null;
+}
+
+function isAncestor(d: SyncDeps, cwd: string, a: string, b: string): boolean {
+  const r = d.git(['merge-base', '--is-ancestor', a, b], { cwd });
+  if (r.status === 0) return true;
+  if (r.status === 1) return false;
+  throw new PrContextError(`git merge-base --is-ancestor failed: ${r.stderr.trim()}`, 1);
+}
+
+function resolveCtx(d: SyncDeps, f: Flags): Ctx {
+  if (!f.pr) throw new PrContextError('--pr is required', 2);
+  const repo = f.repo ?? upstreamRepoFromGh(d.gh, f.cwd);
+  const n = parsePrRefFor(f.pr, repo);
+  const pr = readPr(d.gh, repo, n);
+  assertWritableIdentity(pr, viewerLogin(d.gh));
+  const headRemote = remoteForRepo(d.git, f.cwd, pr.headRepo);
+  if (!headRemote) throw new PrContextError(`no git remote in ${f.cwd} points at ${pr.headRepo}`, 30);
+  const upRemote = remoteForRepo(d.git, f.cwd, repo);
+  if (!upRemote) throw new PrContextError(`no git remote in ${f.cwd} points at ${repo}`, 30);
+  const branch = gitOk(d, f.cwd, ['rev-parse', '--abbrev-ref', 'HEAD'], 'git rev-parse').trim();
+  if (branch !== pr.headRef) throw new PrContextError(`the PR worktree is on ${branch}, not the PR head branch ${pr.headRef} (keep the local name equal to the head ref)`, 30);
+  const topic = topicFor(pr.headRef);
+  return { d, f, cwd: f.cwd, repo, pr, headRemote, upRemote, topic, stateDir: prStateDir({ cwd: f.cwd, topic, env: d.env }) };
+}
+
+interface Pinned { h0: string; b: string; m0: string; mainVersion: string; oldVersion: string; baseVersion: string }
+
+function pinHeads(c: Ctx): Pinned {
+  const { d, cwd, pr } = c;
+  const h0 = pinBranch(d.git, cwd, c.headRemote, pr.headRef).sha;
+  if (h0 !== pr.headOid) throw new PrContextError(`${c.headRemote}/${pr.headRef} is ${h0.slice(0, 12)} but the PR reports ${pr.headOid.slice(0, 12)}: someone pushed; re-run`, SYNC_EXIT.REMOTE_MOVED);
+  const b = pinBranch(d.git, cwd, c.upRemote, pr.baseRef).sha;
+  const local = gitOk(d, cwd, ['rev-parse', 'HEAD'], 'git rev-parse HEAD').trim();
+  if (local !== h0 && !isAncestor(d, cwd, local, h0)) {
+    throw new PrContextError(`the local ${pr.headRef} has commits that are not on ${c.headRemote} (push or drop them first; a sync never carries unpublished work)`, SYNC_EXIT.DIRTY);
+  }
+  const m0 = gitOk(d, cwd, ['merge-base', h0, b], 'git merge-base').trim();
+  const v = (rev: string) => (show(d, cwd, rev, 'VERSION') ?? '').trim();
+  return { h0, b, m0, mainVersion: v(b), oldVersion: v(h0), baseVersion: v(m0) };
+}
+
+interface Pre { block: string | null; release: boolean }
+
+/** Preconditions on the state before the sync (code 30 on any failure). */
+function preconditions(c: Ctx, p: Pinned): Pre {
+  const { d, cwd } = c;
+  const fail = (why: string) => new PrContextError(`precondition: ${why}`, SYNC_EXIT.PRECONDITION);
+  for (const file of PLATFORM_FILES) {
+    if (d.git(['cat-file', '-e', `${p.b}:${file}`], { cwd }).status !== 0) throw fail(`${file} is missing upstream; gstack-pr-sync only syncs gstack-shaped trees`);
+  }
+  const clBase = show(d, cwd, p.m0, 'CHANGELOG.md') ?? '';
+  const clHead = show(d, cwd, p.h0, 'CHANGELOG.md') ?? '';
+  const cb = changelogBlock(clBase, clHead);
+  if (!cb) throw fail('the PR changes CHANGELOG.md beyond one entry inserted on top (an older entry or the header was edited)');
+  const pkgBase = show(d, cwd, p.m0, 'package.json');
+  const pkgHead = show(d, cwd, p.h0, 'package.json');
+  if (pkgBase !== null && pkgHead !== null && !jsonSameExceptVersion(pkgBase, pkgHead)) throw fail('the PR changes package.json beyond .version, so package.json is code for this PR');
+  let release = true;
+  if (cb.headings.length === 0) {
+    if (p.oldVersion === p.baseVersion) release = false;
+    else throw fail(`VERSION moved ${p.baseVersion} -> ${p.oldVersion} with no CHANGELOG entry`);
+  } else if (cb.headings.length > 1) {
+    throw fail(`the PR carries ${cb.headings.length} CHANGELOG entries; collapse them into one first`);
+  } else if (cb.headings[0] !== p.oldVersion) {
+    throw fail(`the CHANGELOG entry is [${cb.headings[0]}] but VERSION is ${p.oldVersion}`);
+  }
+  const ours = new Set(gitOk(d, cwd, ['diff', '--name-only', p.m0, p.h0], 'git diff').split('\n').filter(Boolean));
+  const theirs = gitOk(d, cwd, ['diff', '--name-only', p.m0, p.b], 'git diff').split('\n').filter(Boolean);
+  const both = RELEASE_TOOLING.filter(t => ours.has(t) && theirs.includes(t));
+  if (both.length) throw fail(`release tooling changed on both sides (${both.join(', ')}); sync by hand`);
+  return { block: release ? cb.block : null, release };
+}
+
+function isGeneratedIn(d: SyncDeps, cwd: string, revs: string[]): (p: string) => boolean {
+  return p => GENERATED_EXTRA.includes(p) || revs.some(rev => d.git(['cat-file', '-e', `${rev}:${p}.tmpl`], { cwd }).status === 0);
+}
+
+/** Read-only dry run: objects go to a throwaway directory, the repo is not touched. */
+function dryMerge(c: Ctx, p: Pinned): { tree: string; conflicts: string[]; clean: boolean } {
+  const { d, cwd } = c;
+  const common = path.resolve(cwd, gitOk(d, cwd, ['rev-parse', '--git-common-dir'], 'git rev-parse').trim());
+  const objdir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-pr-sync-objects-'));
+  try {
+    const r = d.git(['merge-tree', '--write-tree', '--name-only', '--no-messages', p.h0, p.b], {
+      cwd, env: { GIT_OBJECT_DIRECTORY: objdir, GIT_ALTERNATE_OBJECT_DIRECTORIES: path.join(common, 'objects') },
+    });
+    if (r.status !== 0 && r.status !== 1) throw new PrContextError(`git merge-tree failed: ${r.stderr.trim()}`, 1);
+    return { ...parseMergeTree(r.stdout), clean: r.status === 0 };
+  } finally {
+    fs.rmSync(objdir, { recursive: true, force: true });
+  }
+}
+
+// ── plan ────────────────────────────────────────────────────────────────────
+
+function cmdPlan(c: Ctx): number {
+  const p = pinHeads(c);
+  const pre = preconditions(c, p);
+  const upToDate = isAncestor(c.d, c.cwd, p.b, p.h0);
+  if (upToDate) {
+    c.d.out(`RESULT UP_TO_DATE head=${p.h0.slice(0, 12)} base=${p.b.slice(0, 12)} version=${p.oldVersion}`);
+    c.d.out('NOTE merge would only re-check the version queue');
+    return SYNC_EXIT.NOTHING;
+  }
+  const m = dryMerge(c, p);
+  const cls = classifyConflicts(m.conflicts, isGeneratedIn(c.d, c.cwd, [p.b, p.h0]));
+  const word = cls.code.length ? 'CODE_CONFLICT' : 'MECHANICAL';
+  c.d.out(`RESULT ${word} head=${p.h0.slice(0, 12)} base=${p.b.slice(0, 12)} main=${p.mainVersion} ours=${p.oldVersion} release=${pre.release ? 'yes' : 'no'}`);
+  for (const [k, list] of Object.entries(cls)) for (const file of list) c.d.out(`CONFLICT\t${k}\t${file}`);
+  return cls.code.length ? SYNC_EXIT.CODE_CONFLICT : SYNC_EXIT.SYNCED;
+}
+
+// ── merge ───────────────────────────────────────────────────────────────────
+
+function removeScratch(c: Ctx, scratch: string): void {
+  const r = c.d.git(['worktree', 'remove', '--force', scratch], { cwd: c.cwd });
+  if (r.status !== 0 && fs.existsSync(scratch)) fs.rmSync(scratch, { recursive: true, force: true });
+  c.d.git(['worktree', 'prune'], { cwd: c.cwd });
+}
+
+function patchId(d: SyncDeps, cwd: string, a: string, b: string, file: string | null, unified: number): string {
+  const args = ['diff', `-U${unified}`, '--no-color', '--no-ext-diff', a, b];
+  if (file) args.push('--', file);
+  const diff = d.git(args, { cwd });
+  if (diff.status !== 0) throw new PrContextError(`git diff for patch-id failed: ${diff.stderr.trim()}`, 1);
+  if (!diff.stdout) return '';
+  const id = d.git(['patch-id', '--stable'], { cwd, input: diff.stdout });
+  return (id.stdout.trim().split(/\s+/)[0] ?? '');
+}
+
+function diffNames(d: SyncDeps, cwd: string, a: string, b: string, exclude: string[]): string[] {
+  const args = ['diff', '--name-only', a, b, '--', '.', ...exclude.map(e => `:(exclude)${e}`)];
+  return gitOk(d, cwd, args, 'git diff --name-only').split('\n').filter(Boolean).sort();
+}
+
+/** L2: the PR's per-file diff before (M0..H0) and after (B..T2) the sync. */
+export function proveDiff(d: SyncDeps, cwd: string, x: { m0: string; h0: string; b: string; t2: string; exclude: string[] }): { verdict: ProofVerdict; changed: string[]; oldId: string; newId: string } {
+  const oldFiles = diffNames(d, cwd, x.m0, x.h0, x.exclude);
+  const newFiles = diffNames(d, cwd, x.b, x.t2, x.exclude);
+  const mainTouched = new Set(diffNames(d, cwd, x.m0, x.b, []));
+  const changed: string[] = [];
+  let context = false;
+  for (const f of [...new Set([...oldFiles, ...newFiles])].sort()) {
+    if (!oldFiles.includes(f) || !newFiles.includes(f)) { changed.push(f); continue; }
+    if (patchId(d, cwd, x.m0, x.h0, f, 3) === patchId(d, cwd, x.b, x.t2, f, 3)) continue;
+    if (mainTouched.has(f) && patchId(d, cwd, x.m0, x.h0, f, 0) === patchId(d, cwd, x.b, x.t2, f, 0)) { context = true; continue; }
+    changed.push(f);
+  }
+  const verdict: ProofVerdict = changed.length ? 'CHANGED' : context ? 'CONTEXT-ONLY' : 'IDENTICAL';
+  return { verdict, changed, oldId: patchId(d, cwd, x.m0, x.h0, null, 3).slice(0, 12), newId: patchId(d, cwd, x.b, x.t2, null, 3).slice(0, 12) };
+}
+
+function localDate(now: Date): string {
+  const z = (n: number) => String(n).padStart(2, '0');
+  return `${now.getFullYear()}-${z(now.getMonth() + 1)}-${z(now.getDate())}`;
+}
+
+function readQueue(c: Ctx, scratch: string, p: Pinned, level: string): QueueAnswer {
+  const r = c.d.tool(path.join(scratch, 'bin', 'gstack-next-version'), [
+    '--base', c.pr.baseRef, '--bump', level, '--current-version', p.mainVersion, '--workspace-root', 'null', '--exclude-pr', String(c.pr.number),
+  ], { cwd: scratch, env: { GH_REPO: c.repo }, timeoutMs: 300_000 });
+  return qualifyQueue(r, p.mainVersion);
+}
+
+/** Advisory: maintainers honour fork PRs' VERSION claims that next-version cannot see. */
+function forkClaims(c: Ctx, version: string): string[] {
+  const notes: string[] = [];
+  const list = c.d.gh(['pr', 'list', '--repo', c.repo, '--state', 'open', '--base', c.pr.baseRef, '--limit', '200', '--json', 'number,headRefOid,headRepositoryOwner,headRepository,updatedAt']);
+  if (list.status !== 0) return ['fork-claim scan skipped: gh pr list failed'];
+  let prs: { number: number; headRefOid: string; headRepositoryOwner?: { login?: string }; headRepository?: { name?: string }; updatedAt?: string }[];
+  try {
+    prs = JSON.parse(list.stdout);
+  } catch {
+    return ['fork-claim scan skipped: gh pr list printed no JSON'];
+  }
+  if (prs.length >= 200) notes.push('the open-PR listing hit its 200 limit: the queue view is truncated');
+  const owner = c.repo.split('/')[0].toLowerCase();
+  const forks = prs
+    .filter(x => x.number !== c.pr.number && x.headRepositoryOwner?.login && x.headRepositoryOwner.login.toLowerCase() !== owner && x.headRepository?.name)
+    .sort((a, b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')))
+    .slice(0, 40);
+  for (const x of forks) {
+    const r = c.d.gh(['api', '-H', 'Accept: application/vnd.github.raw', `repos/${x.headRepositoryOwner?.login}/${x.headRepository?.name}/contents/VERSION?ref=${x.headRefOid}`]);
+    if (r.status === 0 && r.stdout.trim() === version) notes.push(`fork PR #${x.number} also carries VERSION ${version} (advisory: maintainers honour fork claims)`);
+  }
+  return notes;
+}
+
+function writeFile(dir: string, rel: string, text: string): void {
+  fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+  fs.writeFileSync(path.join(dir, rel), text);
+}
+
+interface MergeResult { code: number; staged: StagedSync | null }
+
+function cmdMerge(c: Ctx): number {
+  const { d } = c;
+  const p = pinHeads(c);
+  const pre = preconditions(c, p);
+  const upToDate = isAncestor(d, c.cwd, p.b, p.h0);
+  let dry: { tree: string; conflicts: string[]; clean: boolean } | null = null;
+  let generatedConflicts: string[] = [];
+  const isGen = isGeneratedIn(d, c.cwd, [p.b, p.h0]);
+  if (!upToDate) {
+    dry = dryMerge(c, p);
+    const cls = classifyConflicts(dry.conflicts, isGen);
+    if (cls.code.length) {
+      d.out(`RESULT CODE_CONFLICT head=${p.h0.slice(0, 12)} base=${p.b.slice(0, 12)}`);
+      for (const file of cls.code) d.out(`CONFLICT\tcode\t${file}`);
+      return SYNC_EXIT.CODE_CONFLICT;
+    }
+    generatedConflicts = cls.generated;
+  }
+  const existing = readStagedSync(c.stateDir, c.pr);
+  const root = c.f.worktreeRoot ?? path.join(os.homedir(), 'worktrees', c.repo.split('/')[1]);
+  const scratch = path.join(root, `${c.topic}-sync`);
+  if (existing || fs.existsSync(scratch)) {
+    throw new PrContextError(`a sync is already staged at ${existing?.scratch ?? scratch}: push it or run \`gstack-pr-sync abort\``, SYNC_EXIT.DIRTY);
+  }
+  fs.mkdirSync(root, { recursive: true });
+  gitOk(d, c.cwd, ['worktree', 'add', '--detach', scratch, p.h0], 'git worktree add');
+  let done = false;
+  const onSignal = () => {
+    if (!done) removeScratch(c, scratch);
+    process.exit(130);
+  };
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
+  try {
+    const r = stageSync(c, p, pre, scratch, upToDate, dry, generatedConflicts);
+    done = r.staged !== null;
+    if (!done) removeScratch(c, scratch);
+    return r.code;
+  } catch (error) {
+    removeScratch(c, scratch);
+    throw error;
+  } finally {
+    process.removeListener('SIGINT', onSignal);
+    process.removeListener('SIGTERM', onSignal);
+  }
+}
+
+function stageSync(c: Ctx, p: Pinned, pre: Pre, scratch: string, upToDate: boolean, dry: { tree: string; conflicts: string[] } | null, generatedConflicts: string[]): MergeResult {
+  const { d } = c;
+  const s = (args: string[], what: string, opts: { env?: NodeJS.ProcessEnv; input?: string } = {}) => gitOk(d, scratch, args, what, opts);
+  if (fs.existsSync(path.join(scratch, 'bun.lock'))) {
+    const inst = d.tool('bun', ['install', '--frozen-lockfile'], { cwd: scratch, timeoutMs: 300_000 });
+    if (inst.status !== 0) throw new PrContextError(`bun install in the scratch worktree failed: ${(inst.error ?? inst.stderr).trim().split('\n').at(-1)}`, 1);
+  }
+  let automerge: string | null = null;
+  if (!upToDate && dry) {
+    const m = d.git(['merge', '--no-ff', '--no-commit', p.b], { cwd: scratch });
+    if (m.status !== 0 && m.status !== 1) throw new PrContextError(`git merge failed: ${m.stderr.trim()}`, 1);
+    const unmerged = s(['diff', '--name-only', '--diff-filter=U'], 'git diff').split('\n').filter(Boolean).sort();
+    if (unmerged.join('\n') !== [...dry.conflicts].sort().join('\n')) {
+      throw new PrContextError(`the merge conflicted on ${unmerged.join(', ') || 'nothing'}, not the dry run's ${dry.conflicts.join(', ') || 'nothing'}`, 1);
+    }
+    // The automerge tree, for L1. Its objects land in the repo (unreferenced, gc-able).
+    const mt = d.git(['merge-tree', '--write-tree', '--name-only', '--no-messages', p.h0, p.b], { cwd: scratch });
+    if (mt.status !== 0 && mt.status !== 1) throw new PrContextError(`git merge-tree failed: ${mt.stderr.trim()}`, 1);
+    automerge = parseMergeTree(mt.stdout).tree;
+    for (const file of ['VERSION', 'package.json', DIGEST]) {
+      const text = show(d, scratch, p.b, file);
+      if (text !== null) writeFile(scratch, file, text);
+    }
+    writeFile(scratch, 'CHANGELOG.md', show(d, scratch, p.b, 'CHANGELOG.md') ?? '');
+    s(['add', '--', ...RELEASE_FILES.filter(f => fs.existsSync(path.join(scratch, f)))], 'git add release files');
+  }
+
+  // Version: re-check the queue on every sync, including the up-to-date path.
+  let version = p.oldVersion;
+  let kept = true;
+  let queue: QueueAnswer | null = null;
+  const advisories: string[] = [];
+  if (pre.release) {
+    const level = d.tool('bun', ['run', 'scripts/detect-bump.ts', p.baseVersion, p.oldVersion], { cwd: scratch, timeoutMs: 60_000 });
+    const lvl = level.stdout.trim();
+    if (level.status !== 0 || !/^(major|minor|patch|micro)$/.test(lvl)) throw new PrContextError(`scripts/detect-bump.ts gave no level: ${level.stderr.trim()}`, SYNC_EXIT.VERSION_SOURCE);
+    if (!upToDate) writeFile(scratch, 'VERSION', `${p.mainVersion}\n`);
+    queue = readQueue(c, scratch, p, lvl);
+    ({ version, kept } = pickVersion(p.oldVersion, p.mainVersion, queue));
+    if (c.f.forkClaims) advisories.push(...forkClaims(c, version));
+  }
+  if (upToDate && version === p.oldVersion) {
+    d.out(`RESULT NOTHING head=${p.h0.slice(0, 12)} base=${p.b.slice(0, 12)} version=${version} (up to date, version unclaimed)`);
+    for (const a of advisories) d.out(`ADVISORY ${a}`);
+    return { code: SYNC_EXIT.NOTHING, staged: null };
+  }
+
+  // Generated files: regenerate when the merge conflicted on them or left them stale.
+  const regenerated = new Set<string>(generatedConflicts);
+  const gen = (dry: boolean) => d.tool('bun', ['run', 'gen:skill-docs', ...(dry ? ['--dry-run'] : [])], { cwd: scratch, timeoutMs: 600_000 });
+  if (!upToDate && (generatedConflicts.length || gen(true).status !== 0)) {
+    const g = gen(false);
+    if (g.status !== 0) throw new PrContextError(`gen:skill-docs failed in the scratch worktree: ${(g.error ?? g.stderr).trim().split('\n').at(-1)}`, 1);
+    // Only what the generator itself rewrote (worktree vs index); the merge's own staged files are not its doing.
+    const touched = s(['diff', '--name-only'], 'git diff').split('\n').filter(Boolean);
+    for (const file of touched) {
+      if (RELEASE_FILES.includes(file)) continue;
+      if (!GENERATED_EXTRA.includes(file) && !fs.existsSync(path.join(scratch, `${file}.tmpl`))) {
+        throw new PrContextError(`gen:skill-docs changed ${file}, which is not a generated file`, 1);
+      }
+      regenerated.add(file);
+    }
+    if (regenerated.size) s(['add', '--', ...regenerated], 'git add generated');
+  }
+
+  // Release files: VERSION, package.json and the digest via the merged tree's own tool, then the CHANGELOG splice.
+  let newBlock = '';
+  if (pre.release) {
+    const bump = d.tool(path.join(scratch, 'bin', 'gstack-version-bump'), ['write', '--version', version, '--regen-digest'], { cwd: scratch, timeoutMs: 120_000 });
+    let wrote: Record<string, unknown> = {};
+    try {
+      wrote = JSON.parse(bump.stdout) as Record<string, unknown>;
+    } catch { /* checked below */ }
+    if (bump.status !== 0 || wrote.wrote !== version || wrote.packageJson !== true) {
+      throw new PrContextError(`bin/gstack-version-bump write --version ${version} failed (exit ${bump.status}): ${bump.stderr.trim().split('\n').at(-1) ?? ''}`, bump.status === 3 ? 1 : SYNC_EXIT.VERSION_SOURCE);
+    }
+    if (wrote.agentsDigest !== true) {
+      const dg = d.tool('bun', ['scripts/gen-agents-digest.ts'], { cwd: scratch, timeoutMs: 120_000 });
+      if (dg.status !== 0) throw new PrContextError('scripts/gen-agents-digest.ts failed', 1);
+    }
+    // Up to date means B is an ancestor of H0, so B is also the merge base: one formula for both paths.
+    const baseCl = show(d, scratch, p.b, 'CHANGELOG.md') ?? '';
+    const date = version === p.oldVersion ? (blockDate(pre.block ?? '') ?? localDate(d.now())) : localDate(d.now());
+    newBlock = renameBlockHeading(pre.block ?? '', version, date);
+    writeFile(scratch, 'CHANGELOG.md', rebuildChangelog(baseCl, newBlock));
+    s(['add', '--', ...RELEASE_FILES.filter(f => fs.existsSync(path.join(scratch, f)))], 'git add release files');
+  }
+  if (!upToDate) {
+    const final = gen(true);
+    if (final.status !== 0) throw new PrContextError('gen:skill-docs --dry-run still reports STALE files after the sync', 1);
+  }
+
+  checkInvariants(c, p, pre, scratch, version, queue, newBlock);
+
+  // Proof. L1: nothing outside release and generated files differs from git's own automerge.
+  const t2 = s(['write-tree'], 'git write-tree').trim();
+  const exclude = [...RELEASE_FILES, ...regenerated];
+  let proof: { verdict: ProofVerdict; changed: string[]; oldId: string; newId: string } = { verdict: 'IDENTICAL', changed: [], oldId: '', newId: '' };
+  if (!upToDate && automerge) {
+    const l1 = diffNames(d, scratch, automerge, t2, exclude);
+    const genOrTmplExclude = exclude.concat(listGenerated(d, scratch, t2));
+    proof = proveDiff(d, scratch, { m0: p.m0, h0: p.h0, b: p.b, t2, exclude: genOrTmplExclude });
+    if (l1.length) proof = { ...proof, verdict: 'CHANGED', changed: [...new Set([...proof.changed, ...l1])].sort() };
+  }
+
+  const msg = commitMessage(c, p, { upToDate, conflicts: dry?.conflicts ?? [], version, kept, regenerated: regenerated.size, proof });
+  s(['commit', '-q', '-F', '-'], 'git commit', { input: msg });
+  const sha = s(['rev-parse', 'HEAD'], 'git rev-parse').trim();
+  const staged: StagedSync = {
+    v: 1, repo: c.repo, number: c.pr.number, headRef: c.pr.headRef, kind: upToDate ? 'release-only' : 'merge',
+    h0: p.h0, base: p.b, baseRef: c.pr.baseRef, mainVersion: p.mainVersion, oldVersion: p.oldVersion, version,
+    sha, proof: proof.verdict, changedFiles: proof.changed, scratch, at: d.now().toISOString(),
+  };
+  withPrLock(c.stateDir, () => {
+    const st = readStateFor(c.stateDir, c.pr) ?? freshState(c.pr, { headRemote: c.headRemote, upstreamRemote: c.upRemote });
+    writeState(c.stateDir, st);
+    writeStagedSync(c.stateDir, staged);
+  });
+  const code = proof.verdict === 'CHANGED' ? SYNC_EXIT.DIFF_CHANGED : SYNC_EXIT.SYNCED;
+  d.out(`RESULT ${code ? 'DIFF_CHANGED' : 'STAGED'} sha=${sha.slice(0, 12)} kind=${staged.kind} version=${p.oldVersion}->${version} proof=${proof.verdict} scratch=${scratch}`);
+  for (const f of proof.changed) d.out(`CHANGED\t${f}`);
+  for (const a of advisories) d.out(`ADVISORY ${a}`);
+  for (const w of queue?.warnings ?? []) d.out(`QUEUE_WARNING ${w}`);
+  d.out('NEXT run gstack-pr-validate in the scratch worktree, then `gstack-pr-sync push --yes` after the owner approves');
+  return { code, staged };
+}
+
+/** Tracked generated files in a tree: a sibling .tmpl exists, or a known extra. */
+function listGenerated(d: SyncDeps, cwd: string, tree: string): string[] {
+  const files = gitOk(d, cwd, ['ls-tree', '-r', '--name-only', tree], 'git ls-tree').split('\n').filter(Boolean);
+  const set = new Set(files);
+  return files.filter(f => GENERATED_EXTRA.includes(f) || set.has(`${f}.tmpl`));
+}
+
+function checkInvariants(c: Ctx, p: Pinned, pre: Pre, scratch: string, version: string, queue: QueueAnswer | null, newBlock: string): void {
+  const { d } = c;
+  const fail = (why: string) => new PrContextError(`invariant: ${why}`, 1);
+  const read = (f: string) => (fs.existsSync(path.join(scratch, f)) ? fs.readFileSync(path.join(scratch, f), 'utf8') : null);
+  const base = p.b;
+  if (pre.release) {
+    if ((read('VERSION') ?? '').trim() !== version) throw fail('VERSION does not hold the chosen version');
+    if (cmpVersion(version, p.mainVersion) <= 0) throw fail(`version ${version} is not above upstream's ${p.mainVersion}`);
+    if (queue?.claimed.includes(version)) throw fail(`version ${version} is claimed`);
+    const pkg = read('package.json');
+    const pkgBase = show(d, scratch, base, 'package.json');
+    if (pkg !== null && pkgBase !== null) {
+      if (!jsonSameExceptVersion(pkg, pkgBase)) throw fail('package.json differs from upstream beyond .version');
+      if ((JSON.parse(pkg) as { version?: string }).version !== version.split('.').slice(0, 3).join('.')) throw fail('package.json version does not match');
+    }
+    const digest = read(DIGEST);
+    if (digest !== null && !digest.startsWith(`# gstack digest v${version}`)) throw fail('the agents digest does not name the new version');
+  }
+  const cl = read('CHANGELOG.md') ?? '';
+  const baseCl = show(d, scratch, base, 'CHANGELOG.md') ?? '';
+  if (pre.release) {
+    // Upstream's part byte-identical, ours on top, our entry's body unchanged.
+    if (cl !== rebuildChangelog(baseCl, newBlock)) throw fail('CHANGELOG.md is not upstream\'s file with our one entry on top');
+    const bodyOf = (b: string) => b.slice(b.indexOf('\n') + 1);
+    if (bodyOf(newBlock) !== bodyOf(pre.block ?? '')) throw fail('our CHANGELOG entry body changed');
+    const top = HEADING_RE.exec(cl.slice(firstEntryOffset(cl)))?.[1];
+    if (top !== version) throw fail(`the top CHANGELOG heading is [${top}], not [${version}]`);
+  } else if (cl !== baseCl) {
+    throw fail('CHANGELOG.md is not upstream\'s file');
+  }
+  const headings = cl.split('\n').map(l => HEADING_RE.exec(l)?.[1]).filter(Boolean);
+  if (new Set(headings).size !== headings.length) throw fail('duplicate CHANGELOG headings');
+  for (const f of RELEASE_FILES) {
+    const t = read(f);
+    if (t !== null && MARKER_RE.test(t)) throw fail(`${f} still holds conflict markers`);
+  }
+  const unmerged = gitOk(d, scratch, ['diff', '--name-only', '--diff-filter=U'], 'git diff').trim();
+  if (unmerged) throw fail(`unmerged paths remain: ${unmerged.replace(/\n/g, ', ')}`);
+}
+
+function commitMessage(c: Ctx, p: Pinned, x: { upToDate: boolean; conflicts: string[]; version: string; kept: boolean; regenerated: number; proof: { verdict: ProofVerdict; changed: string[]; oldId: string; newId: string } }): string {
+  const short = (s: string) => s.slice(0, 9);
+  const how = x.kept ? 'kept (above upstream and unclaimed)' : 're-slotted by bin/gstack-next-version';
+  if (x.upToDate) {
+    return [
+      `chore(release): re-version to ${x.version}`,
+      '',
+      `The PR is up to date with upstream ${c.pr.baseRef} (${short(p.b)}, v${p.mainVersion}), but`,
+      `${p.oldVersion} can no longer be used: ${how}. VERSION, package.json, the`,
+      'agents digest and the CHANGELOG heading move to the new version; no code changes.',
+      '',
+    ].join('\n');
+  }
+  const lines = [
+    `Merge upstream ${c.pr.baseRef} (v${p.mainVersion}) into ${c.pr.headRef}`,
+    '',
+    `Upstream ${c.pr.baseRef} moved to ${short(p.b)} (v${p.mainVersion}).`,
+    x.conflicts.length ? `Conflicts: ${x.conflicts.join(', ')}.` : 'No conflicts.',
+    'Release files resolved mechanically: VERSION, package.json and the agents',
+    "digest from upstream, then our CHANGELOG entry on top of upstream's entries,",
+    'which are byte-identical.',
+    `Version: ${p.oldVersion} -> ${x.version}, ${how}.`,
+  ];
+  if (x.regenerated) lines.push(`Generated files regenerated: ${x.regenerated} (gen:skill-docs --dry-run clean).`);
+  lines.push(`PR diff without release and generated files: ${x.proof.verdict} (patch-id ${x.proof.oldId || '-'} -> ${x.proof.newId || '-'}).`);
+  if (x.proof.changed.length) lines.push(`Changed for review: ${x.proof.changed.join(', ')}.`);
+  lines.push('');
+  return lines.join('\n');
+}
+
+// ── push / abort / status ───────────────────────────────────────────────────
+
+function cmdPush(c: Ctx): number {
+  const { d } = c;
+  requireApproval(c.f.argv, { valueFlags: VALUE_FLAGS });
+  return withPrLock(c.stateDir, () => {
+    const staged = readStagedSync(c.stateDir, c.pr);
+    if (!staged) throw new PrContextError('no sync is staged: run `gstack-pr-sync merge` first', SYNC_EXIT.PRECONDITION);
+    const state = readStateFor(c.stateDir, c.pr);
+    if (state?.bodyStaleSince) throw new PrContextError(`the PR body is still stale since the push of ${state.bodyStaleSince.slice(0, 12)}: publish the body first`, SYNC_EXIT.BODY_STALE);
+    if (!state?.validation || state.validation.sha !== staged.sha) throw new PrContextError(`no validation recorded for ${staged.sha.slice(0, 12)}: run gstack-pr-validate in ${staged.scratch}`, SYNC_EXIT.VALIDATION);
+    if (state.validation.worst !== 0) throw new PrContextError(`validation of ${staged.sha.slice(0, 12)} is red (${state.validation.summary})`, SYNC_EXIT.VALIDATION);
+    if (staged.proof === 'CHANGED' && !c.f.acceptDiffChange) throw new PrContextError(`the code-diff proof says CHANGED (${staged.changedFiles.join(', ')}); review, then pass --accept-diff-change`, SYNC_EXIT.DIFF_CHANGED);
+    const head = gitOk(d, staged.scratch, ['rev-parse', 'HEAD'], 'git rev-parse').trim();
+    if (head !== staged.sha) throw new PrContextError(`the scratch worktree moved to ${head.slice(0, 12)} after the sync was staged`, SYNC_EXIT.PRECONDITION);
+    const parent = gitOk(d, staged.scratch, ['rev-parse', `${staged.sha}^1`], 'git rev-parse').trim();
+    if (parent !== staged.h0) throw new PrContextError('the staged commit is not one commit on top of the PR head', SYNC_EXIT.PRECONDITION);
+    const gate = d.preWriteGate({ gh: d.gh, repo: c.repo, number: c.pr.number, expectHead: staged.h0, state });
+    if (!gate.ok) throw new PrContextError(`pre-write gate: ${gate.reason}`, SYNC_EXIT.PRECONDITION);
+    const now = pinBranch(d.git, c.cwd, c.headRemote, c.pr.headRef).sha;
+    if (now !== staged.h0) throw new PrContextError(`${c.headRemote}/${c.pr.headRef} moved to ${now.slice(0, 12)}; abort and re-sync`, SYNC_EXIT.REMOTE_MOVED);
+    const r = receiptedSend({ host: 'github.com', payloadClass: 'pr-sync-push', consent: 'user ran /pr-prep', env: d.env }, () =>
+      d.git(['push', c.headRemote, `${staged.sha}:refs/heads/${c.pr.headRef}`], { cwd: staged.scratch, timeoutMs: 300_000 }));
+    if (r.status !== 0) {
+      const text = `${r.error ?? ''}\n${r.stderr}`;
+      if (/hook declined|pre-push hook|pre-receive hook declined/i.test(text)) throw new PrContextError('a push hook refused the sync: stop and report it (never --no-verify)', SYNC_EXIT.HOOK_REFUSED);
+      if (/non-fast-forward|fetch first|rejected/i.test(text)) throw new PrContextError('the push was not a fast-forward: abort and re-sync', SYNC_EXIT.REMOTE_MOVED);
+      throw new PrContextError(`git push failed: ${text.trim().split('\n').at(-1)}`, 1);
+    }
+    let seen = '';
+    for (let i = 0; i < 5; i++) {
+      seen = readPr(d.gh, c.repo, c.pr.number).headOid;
+      if (seen === staged.sha) break;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, d.readbackDelayMs);
+    }
+    const after = readStateFor(c.stateDir, c.pr) ?? state;
+    writeState(c.stateDir, { ...after, bodyStaleSince: staged.sha });
+    fs.rmSync(syncFile(c.stateDir), { force: true });
+    let local = 'local branch not moved (dirty or diverged)';
+    const clean = d.git(['status', '--porcelain', '--untracked-files=no'], { cwd: c.cwd });
+    if (clean.status === 0 && !clean.stdout.trim()) {
+      const ff = d.git(['merge', '--ff-only', '-q', staged.sha], { cwd: c.cwd });
+      if (ff.status === 0) local = `local ${c.pr.headRef} fast-forwarded`;
+    }
+    removeScratch(c, staged.scratch);
+    d.out(`RESULT PUSHED sha=${staged.sha.slice(0, 12)} pr=${c.pr.number} readback=${seen === staged.sha ? 'ok' : `pending (${seen.slice(0, 12)})`}`);
+    d.out(`NOTE ${local}; scratch removed; the PR body is stale until gstack-pr-body publish`);
+    return SYNC_EXIT.SYNCED;
+  });
+}
+
+function cmdAbort(c: Ctx): number {
+  return withPrLock(c.stateDir, () => {
+    const staged = readStagedSync(c.stateDir, c.pr);
+    const root = c.f.worktreeRoot ?? path.join(os.homedir(), 'worktrees', c.repo.split('/')[1]);
+    const scratch = staged?.scratch ?? path.join(root, `${c.topic}-sync`);
+    if (fs.existsSync(scratch)) removeScratch(c, scratch);
+    fs.rmSync(syncFile(c.stateDir), { force: true });
+    c.d.out(`RESULT ABORTED scratch=${scratch}`);
+    return SYNC_EXIT.SYNCED;
+  });
+}
+
+function cmdStatus(c: Ctx): number {
+  const staged = readStagedSync(c.stateDir, c.pr);
+  if (!staged) {
+    c.d.out('RESULT NONE no sync staged');
+    return SYNC_EXIT.SYNCED;
+  }
+  const state = readStateFor(c.stateDir, c.pr);
+  const validated = state?.validation?.sha === staged.sha ? (state.validation.worst === 0 ? 'green' : 'red') : 'missing';
+  c.d.out(`RESULT STAGED sha=${staged.sha.slice(0, 12)} kind=${staged.kind} version=${staged.oldVersion}->${staged.version} proof=${staged.proof} validation=${validated} scratch=${staged.scratch}`);
+  return SYNC_EXIT.SYNCED;
+}
+
+// ── main ────────────────────────────────────────────────────────────────────
+
+export async function syncMain(argv: string[], deps: Partial<SyncDeps> = {}): Promise<number> {
+  const d = { ...realDeps(), ...deps };
+  if (!argv.length || argv.includes('--help') || argv.includes('-h')) {
+    d.out(SYNC_USAGE);
+    return argv.length ? SYNC_EXIT.SYNCED : SYNC_EXIT.USAGE;
+  }
+  try {
+    const f = parseSyncArgs(argv);
+    if (!['plan', 'merge', 'push', 'abort', 'status'].includes(f.sub)) throw new PrContextError(`unknown subcommand ${JSON.stringify(f.sub)}`, 2);
+    const c = resolveCtx(d, f);
+    switch (f.sub) {
+      case 'plan': return cmdPlan(c);
+      case 'merge': return cmdMerge(c);
+      case 'push': return cmdPush(c);
+      case 'abort': return cmdAbort(c);
+      default: return cmdStatus(c);
+    }
+  } catch (error) {
+    if (error instanceof PrContextError) {
+      const word = error.code === 2 ? 'USAGE' : error.code === 30 ? 'PRECONDITION' : error.code === 40 ? 'REMOTE_MOVED' : 'ERROR';
+      d.out(`RESULT ${word} ${error.message}`);
+      return error.code;
+    }
+    d.out(`RESULT ERROR ${(error as Error).message}`);
+    return SYNC_EXIT.ERROR;
+  }
+}
