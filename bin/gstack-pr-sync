@@ -1,0 +1,4 @@
+#!/usr/bin/env bun
+import { syncMain } from '../lib/pr-sync';
+
+process.exit(await syncMain(process.argv.slice(2)));
