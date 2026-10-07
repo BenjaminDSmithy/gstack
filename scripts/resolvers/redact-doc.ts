@@ -74,11 +74,6 @@ exit-3/2/0 handling. On exit 3, do NOT ${sink.blockVerb}; HIGH has no skip. Pass
 same \`$REDACT_FILE\` downstream so the bytes scanned are the bytes sent.`;
   }
 
-  // The scan file gets an explicit TMPDIR-rooted template. Bare `mktemp` on
-  // macOS behaves as `-t tmp`, which prefers confstr(_CS_DARWIN_USER_TEMP_DIR)
-  // over TMPDIR, so a paused MEDIUM body escaped the caller's (and the
-  // hermetic test runner's) temp root. GNU mktemp already honours TMPDIR;
-  // the template makes every platform agree.
   return `#### Redaction scan — ${sinkLabel} (${sink.noun})
 
 Scan-at-sink on the EXACT bytes that will be sent: they live in the private file

@@ -75,15 +75,17 @@ rm -f "$REDACT_FILE"
     });
     const stdout = result.stdout.toString();
     const printed = /^REDACT_FILE: (.+)$/m.exec(stdout)?.[1];
-    return { code: result.exitCode, tmp: temps, stdout, stderr: result.stderr.toString(),
+    return { code: result.exitCode, tmp: join(scratch, '.gstack', 'tmp'), stdout, stderr: result.stderr.toString(),
       sinks: readdirSync(sinks).map(name => ({ name, body: readFileSync(join(sinks, name), 'utf8') })),
       pending: [temps, systemTemps, join(scratch, '.gstack', 'tmp')].flatMap(dir => readdirSync(dir).map(name => readFileSync(join(dir, name), 'utf8'))),
       printed: printed && existsSync(printed) ? readFileSync(printed, 'utf8') : undefined };
   } finally { rmSync(scratch, { recursive: true, force: true }); }
 }
 
-// The scan file must live in the caller's TMPDIR: otherwise `pending` checks
-// an empty directory and passes vacuously (bare mktemp on macOS ignores TMPDIR).
+// The scan file must live in the private directory the fence creates under
+// the state root (`${_GT}`, upstream v1.91.32.0), never the system temp dir:
+// otherwise `pending` checks an empty directory and passes vacuously (a bare
+// mktemp on macOS ignores TMPDIR and lands in the per-user temp dir).
 function printedDir(stdout: string, label: string): string | undefined {
   const path = stdout.match(new RegExp(`^${label}: (.+)$`, 'm'))?.[1];
   return path === undefined ? undefined : dirname(path);
