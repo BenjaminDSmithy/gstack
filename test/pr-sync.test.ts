@@ -487,6 +487,24 @@ describe('push', () => {
     expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
   });
 
+  test('retrigger pushes one empty ci: commit on the head, with approval, and marks the body stale', async () => {
+    const t = topology('p5', { pr: ourFeature });
+    const msg = path.join(t.base, 'ci-msg.txt');
+    fs.writeFileSync(msg, 'feat: not a ci message\n');
+    expect((await run(t, ['retrigger', '--message', msg])).code).toBe(2);
+    expect((await run(t, ['retrigger', '--message', msg, '--yes'])).code).toBe(2);
+    fs.writeFileSync(msg, 'ci: re-run CI after a Bun IOCP crash on windows-free-shard (4)\n\nRun 1 failed with no failing test.\n');
+    const h0 = git(t.fork, 'rev-parse', 'refs/heads/pr/feat');
+    const r = await run(t, ['retrigger', '--message', msg, '--yes']);
+    expect(r.code, r.out.join('\n')).toBe(0);
+    const head = git(t.fork, 'rev-parse', 'refs/heads/pr/feat');
+    expect(git(t.fork, 'rev-parse', `${head}^`)).toBe(h0);
+    expect(git(t.fork, 'rev-parse', `${head}^{tree}`)).toBe(git(t.fork, 'rev-parse', `${h0}^{tree}`));
+    expect(git(t.fork, 'log', '-1', '--format=%s', head)).toBe('ci: re-run CI after a Bun IOCP crash on windows-free-shard (4)');
+    expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBe(head);
+    expect((await run(t, ['retrigger', '--message', msg, '--yes'])).code).toBe(32);
+  });
+
   test('a stale body from an earlier push blocks the next one; abort removes a staged sync', async () => {
     const t = topology('p3', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
     queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });

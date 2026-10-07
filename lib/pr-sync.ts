@@ -56,6 +56,9 @@ exact commit.
            forwards the local PR branch and removes the scratch worktree
   abort    removes the staged sync
   status   prints the staged sync and whether it may be pushed
+  retrigger  pushes ONE empty commit on top of the PR head with the
+           message file gstack-pr-ci-triage drafted (needs --yes and
+           --message); the tree is unchanged, so no new validation
 
 Options:
   --pr N|URL              the upstream PR (required)
@@ -65,6 +68,7 @@ Options:
   --fork-claims           also read open fork PRs' VERSION (advisory, <= 40 reads)
   --yes                   the owner approved this push in this turn
   --accept-diff-change    push even though the code-diff proof says CHANGED
+  --message FILE          retrigger: the drafted ci: commit message
 
 First line of output: RESULT <WORD> ...
 
@@ -291,13 +295,13 @@ export function freshState(pr: PrInfo, extra: { headRemote: string | null; upstr
 
 interface Flags {
   sub: string; pr: string | null; repo: string | null; cwd: string; worktreeRoot: string | null;
-  forkClaims: boolean; acceptDiffChange: boolean; argv: string[];
+  forkClaims: boolean; acceptDiffChange: boolean; message: string | null; argv: string[];
 }
 
-const VALUE_FLAGS = ['--pr', '--repo', '--cwd', '--worktree-root'];
+const VALUE_FLAGS = ['--pr', '--repo', '--cwd', '--worktree-root', '--message'];
 
 export function parseSyncArgs(argv: string[]): Flags {
-  const f: Flags = { sub: argv[0] ?? '', pr: null, repo: null, cwd: process.cwd(), worktreeRoot: null, forkClaims: false, acceptDiffChange: false, argv };
+  const f: Flags = { sub: argv[0] ?? '', pr: null, repo: null, cwd: process.cwd(), worktreeRoot: null, forkClaims: false, acceptDiffChange: false, message: null, argv };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--') break;
@@ -310,6 +314,7 @@ export function parseSyncArgs(argv: string[]): Flags {
     else if (a === '--repo') f.repo = val();
     else if (a === '--cwd') f.cwd = path.resolve(val());
     else if (a === '--worktree-root') f.worktreeRoot = path.resolve(val());
+    else if (a === '--message') f.message = path.resolve(val());
     else if (a === '--fork-claims') f.forkClaims = true;
     else if (a === '--accept-diff-change') f.acceptDiffChange = true;
     else if (a === '--yes') { /* checked by requireApproval */ }
@@ -832,6 +837,47 @@ function cmdPush(c: Ctx): number {
   });
 }
 
+/**
+ * One empty `ci:` commit on top of the PR head, pushed fast-forward: the
+ * re-run a fork contributor can trigger when `gh run rerun` is refused.
+ * Same gates as a sync push (approval, pre-write poll, remote still at H0,
+ * receipt); no validation, because the tree is the head's own.
+ */
+function cmdRetrigger(c: Ctx): number {
+  const { d } = c;
+  requireApproval(c.f.argv, { valueFlags: VALUE_FLAGS });
+  if (!c.f.message || !fs.existsSync(c.f.message)) throw new PrContextError('--message <drafted ci: message file> is required', 2);
+  const msg = fs.readFileSync(c.f.message, 'utf8');
+  if (!/^ci: /.test(msg)) throw new PrContextError('the message must be a ci: commit message (draft it with gstack-pr-ci-triage)', 2);
+  if (readStagedSync(c.stateDir, c.pr)) throw new PrContextError('a sync is staged: push or abort it first', SYNC_EXIT.DIRTY);
+  const st0 = readStateFor(c.stateDir, c.pr);
+  if (st0?.bodyStaleSince) throw new PrContextError(`the PR body is still stale since the push of ${st0.bodyStaleSince.slice(0, 12)}: publish the body first`, SYNC_EXIT.BODY_STALE);
+  const h0 = pinBranch(d.git, c.cwd, c.headRemote, c.pr.headRef).sha;
+  if (h0 !== c.pr.headOid) throw new PrContextError(`${c.headRemote}/${c.pr.headRef} is ${h0.slice(0, 12)} but the PR reports ${c.pr.headOid.slice(0, 12)}`, SYNC_EXIT.REMOTE_MOVED);
+  const gate = d.preWriteGate({ gh: d.gh, git: d.git, env: d.env, cwd: c.cwd, repo: c.repo, number: c.pr.number, expectHead: h0, state: st0 });
+  if (!gate.ok) throw new PrContextError(`pre-write gate: ${gate.reason}`, SYNC_EXIT.PRECONDITION);
+  return withPrLock(c.stateDir, () => {
+    const tree = gitOk(d, c.cwd, ['rev-parse', `${h0}^{tree}`], 'git rev-parse').trim();
+    const sha = gitOk(d, c.cwd, ['commit-tree', tree, '-p', h0, '-F', '-'], 'git commit-tree', { input: msg }).trim();
+    if (pinBranch(d.git, c.cwd, c.headRemote, c.pr.headRef).sha !== h0) throw new PrContextError('the remote head moved', SYNC_EXIT.REMOTE_MOVED);
+    const r = receiptedSend({ host: 'github.com', payloadClass: 'pr-ci-retrigger-push', consent: 'user ran /pr-prep', env: d.env }, () =>
+      d.git(['push', c.headRemote, `${sha}:refs/heads/${c.pr.headRef}`], { cwd: c.cwd, timeoutMs: 300_000 }));
+    if (r.status !== 0) {
+      const text = `${r.error ?? ''}\n${r.stderr}`;
+      if (/hook declined|pre-push hook|pre-receive hook declined/i.test(text)) throw new PrContextError('a push hook refused the commit: stop and report it (never --no-verify)', SYNC_EXIT.HOOK_REFUSED);
+      if (/non-fast-forward|fetch first|rejected/i.test(text)) throw new PrContextError('the push was not a fast-forward', SYNC_EXIT.REMOTE_MOVED);
+      throw new PrContextError(`git push failed: ${text.trim().split('\n').at(-1)}`, 1);
+    }
+    const st = readStateFor(c.stateDir, c.pr) ?? freshState(c.pr, { headRemote: c.headRemote, upstreamRemote: c.upRemote });
+    writeState(c.stateDir, { ...st, bodyStaleSince: sha });
+    const clean = d.git(['status', '--porcelain', '--untracked-files=no'], { cwd: c.cwd });
+    const ff = clean.status === 0 && !clean.stdout.trim() && d.git(['merge', '--ff-only', '-q', sha], { cwd: c.cwd }).status === 0;
+    d.out(`RESULT PUSHED sha=${sha.slice(0, 12)} pr=${c.pr.number} kind=ci-retrigger`);
+    d.out(`NOTE ${ff ? `local ${c.pr.headRef} fast-forwarded` : 'local branch not moved (dirty or diverged)'}; the PR body is stale until gstack-pr-body publish`);
+    return SYNC_EXIT.SYNCED;
+  });
+}
+
 function cmdAbort(c: Ctx): number {
   return withPrLock(c.stateDir, () => {
     const staged = readStagedSync(c.stateDir, c.pr);
@@ -866,12 +912,13 @@ export async function syncMain(argv: string[], deps: Partial<SyncDeps> = {}): Pr
   }
   try {
     const f = parseSyncArgs(argv);
-    if (!['plan', 'merge', 'push', 'abort', 'status'].includes(f.sub)) throw new PrContextError(`unknown subcommand ${JSON.stringify(f.sub)}`, 2);
+    if (!['plan', 'merge', 'push', 'retrigger', 'abort', 'status'].includes(f.sub)) throw new PrContextError(`unknown subcommand ${JSON.stringify(f.sub)}`, 2);
     const c = resolveCtx(d, f);
     switch (f.sub) {
       case 'plan': return cmdPlan(c);
       case 'merge': return cmdMerge(c);
       case 'push': return cmdPush(c);
+      case 'retrigger': return cmdRetrigger(c);
       case 'abort': return cmdAbort(c);
       default: return cmdStatus(c);
     }
