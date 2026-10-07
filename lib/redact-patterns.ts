@@ -350,9 +350,13 @@ export function isCiRunIdentifier(span: string, match: RegExpExecArray): boolean
  * `version `), or a Keep a Changelog heading `## [1.2.3.4]`. The same digits
  * after `host:`, `server = ` or in prose that merely mentions a version still
  * report, and the pre-push hook's VERSION-file rule (#2856) is unchanged.
+ * A markdown code span around the key (`` `VERSION` 1.2.3.4 ``) and an arrow
+ * separator (`VERSION → 1.2.3.4`, `->`, `=>`) count as the bare key, which is
+ * how PR bodies state a release; an arrow with no version key before it
+ * (`gateway → 8.8.8.8`) still reports.
  */
 const VERSION_DECLARATION_BEFORE =
-  /(?:\b[Vv]ersion|\bVERSION|[a-z0-9_]Version|[_-][Vv]ersion|_VERSION)["'\]]?(?:[ \t]*[:=(>][ \t]*|[ \t]+)["']?$/;
+  /(?:\b[Vv]ersion|\bVERSION|[a-z0-9_]Version|[_-][Vv]ersion|_VERSION)["'`\]]?(?:[ \t]*(?:[:=(>]|->|=>|→)[ \t]*|[ \t]+)["'`]?$/;
 const CHANGELOG_HEADING_BEFORE = /^#{1,6}[ \t]+\[$/;
 export function isDeclaredVersion(match: RegExpExecArray): boolean {
   const input = match.input ?? "";

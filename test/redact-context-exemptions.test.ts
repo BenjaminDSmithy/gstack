@@ -145,6 +145,11 @@ describe("pii.ip_public: a four-part version needs a version declaration (#2784)
       "<Version>1.128.1.0</Version>",
       '[assembly: AssemblyVersion("1.0.0.0")]',
       "released v1.128.1.0 today",
+      "- `VERSION` → 1.91.28.0, above main",
+      "`VERSION` 1.91.34.0",
+      "`VERSION`: 1.91.28.0",
+      "VERSION -> 1.91.28.0",
+      "`version` => `1.91.28.0`",
     ],
     [
       "1.128.1.0",
@@ -157,6 +162,13 @@ describe("pii.ip_public: a four-part version needs a version declaration (#2784)
       "conversion 1.128.1.0",
       "## 1.128.1.0 is our egress",
       "## [1.128.1.0 mirror]",
+      "gateway → 8.8.8.8",
+      "lb -> 1.91.28.10",
+      "client 1.91.28.10 connected",
+      "| edge | 1.91.28.10 |",
+      "`VERSION` endpoint at 8.8.8.8",
+      "Version → bump; resolver 8.8.4.4",
+      "the server's 8.8.8.8",
     ],
   );
 });
