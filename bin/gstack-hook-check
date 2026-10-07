@@ -53,6 +53,9 @@ if [ -z "$ROOT" ] || [ ! -d "$ROOT" ]; then
   echo "usage: gstack-hook-check [--setup <file>] [--list] <gstack root>" >&2
   exit 2
 fi
+# Absolute, so the bundles below can run from the tree root (see BUILD_DIR).
+case "$ROOT" in /*) ;; *) ROOT="$PWD/$ROOT" ;; esac
+[ "$ROOT" = / ] || ROOT=${ROOT%/}
 SETUP_FILE="${SETUP_FILE:-$ROOT/setup}"
 
 # frontmatter_hooks — the gstack paths named on `command:` lines inside each
@@ -105,7 +108,11 @@ trap 'rm -rf "$TMP_OUT"' EXIT
 # anywhere in it.
 META=0
 "$BUN" build --help 2>/dev/null | grep -q -- '--metafile' && META=1
-CWD_P=$(pwd -P)
+# Bundles run from the tree root, never the caller's directory: bun reads the
+# bunfig.toml and tsconfig.json it finds there, and the auto-updater runs this
+# from whatever project the session is in. The metafile names inputs relative
+# to that directory, physically resolved.
+BUILD_DIR=$(cd -P "$ROOT" && pwd) || { echo "gstack-hook-check: cannot enter $ROOT" >&2; exit 1; }
 
 # first_location <file> <tool output> — "<file>:<line>" from bun's "at f:l:c"
 # or bash's "f: line N:" (falls back to <file>).
@@ -289,7 +296,7 @@ for hook in $HOOKS; do
     rm -f "$meta"
     _mf=""
     [ "$META" -eq 1 ] && _mf="--metafile=$meta"
-    if ! err=$("$BUN" build --target=bun --packages=external --outdir "$TMP_OUT/$(basename "$hook")" ${_mf:+"$_mf"} "$dir/$entry" 2>&1 >/dev/null); then
+    if ! err=$(cd "$BUILD_DIR" && "$BUN" build --target=bun --packages=external --outdir "$TMP_OUT/$(basename "$hook")" ${_mf:+"$_mf"} "$dir/$entry" 2>&1 >/dev/null); then
       fail "$hook" "$(first_location "$dir/$entry" "$err")" "$(first_message "$err")"
       hook_ok=0
     fi
@@ -298,13 +305,15 @@ for hook in $HOOKS; do
     _inputs=""
     [ -f "$meta" ] && _inputs=$(metafile_inputs "$meta")
     [ -n "$_inputs" ] || continue
-    _entry_p=$(physical "$dir/$entry")
+    _entry_rel="${dir#"$ROOT"/}/$entry"
     IFS=$NL
     for rel in $_inputs; do
       IFS=$_ifs
-      case "$rel" in /*) mod="$rel" ;; *) mod="$CWD_P/$rel" ;; esac
-      case "$mod" in */../*|*/./*) mod=$(physical "$mod") ;; esac
-      [ -f "$mod" ] && [ "$mod" != "$_entry_p" ] || continue
+      [ "$rel" != "$_entry_rel" ] || continue
+      # Inside the tree: report it under <root> as given, so a caller that
+      # strips its own <root>/ prefix (the auto-updater) still can.
+      case "$rel" in /*) mod="$rel" ;; ../*) mod=$(physical "$BUILD_DIR/$rel") ;; *) mod="$ROOT/$rel" ;; esac
+      [ -f "$mod" ] || continue
       _scan="$_scan$NL$mod"
     done
     IFS=$_ifs

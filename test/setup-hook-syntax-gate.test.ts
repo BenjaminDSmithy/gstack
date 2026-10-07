@@ -110,7 +110,11 @@ function tmpBase(): string {
 }
 
 function check(root: string) {
-  const r = spawnSync('bash', [CHECK, root], { encoding: 'utf8', timeout: 30_000 });
+  return checkFrom(root, ROOT);
+}
+
+function checkFrom(root: string, cwd: string) {
+  const r = spawnSync('bash', [CHECK, root], { encoding: 'utf8', timeout: 30_000, cwd });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 }
 
@@ -243,6 +247,19 @@ describe('gstack-hook-check: what fails', () => {
     fs.writeFileSync(path.join(root, 'hooks/worker.sh'), '#!/usr/bin/env bash\nwhile read -r l; do echo "$l"; done < <(echo a)\n', { mode: 0o755 });
     const r = check(root);
     expect(r.out.trim()).toBe('ok hooks/plain');
+    expect(r.code).toBe(0);
+  });
+
+  test('a malformed tsconfig.json or bunfig.toml in the caller\'s directory does not fail the hooks', () => {
+    // The auto-updater runs the check from whatever project the session is in.
+    const root = tmpBase();
+    fixtureTree(root);
+    const project = path.join(tmpBase(), 'project');
+    fs.mkdirSync(project);
+    fs.writeFileSync(path.join(project, 'tsconfig.json'), '{ this is not json\n');
+    fs.writeFileSync(path.join(project, 'bunfig.toml'), '[test\nbroken\n');
+    const r = checkFrom(root, project);
+    expect(r.out).not.toContain('fail ');
     expect(r.code).toBe(0);
   });
 
