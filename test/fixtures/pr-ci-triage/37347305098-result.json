@@ -1,0 +1,9 @@
+{
+  "outcome": {
+    "status": "timed-out",
+    "exitCode": null,
+    "elapsedMs": 562659,
+    "failingFiles": [],
+    "sawTerminalSummary": null
+  }
+}
