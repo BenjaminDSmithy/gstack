@@ -572,15 +572,16 @@ Bun first.
 that does not parse exits 2, which blocks the tool call it guards in every
 session. Setup parse-checks every hook it registers, and every hook a skill
 registers while it runs (`/autoplan`, `/careful`, `/freeze` and
-`/plan-ceo-review`; `/guard` and `/investigate` reuse the `/careful` and
-`/freeze` checks): the shim, and the TypeScript it runs with its local imports.
-A merge conflict marker left in a hook is refused too, as `unresolved merge
-conflict marker`, even when the file still parses: markers inside a heredoc or
-a string do. It registers the hooks that parse, skips the ones listed,
-finishes the rest of the install, and exits non-zero. Claude Code runs hooks
-straight from `~/.claude/skills/gstack`, so a skipped hook that an earlier
-setup registered, or that a skill runs, keeps running the broken file until it
-is fixed. This is a gstack bug, or a half-applied edit or merge in your
+`/plan-ceo-review`; `/guard` reuses the `/careful` and `/freeze` checks, and
+`/investigate` the `/freeze` one): the shim, the shell helpers it sources (such
+as `careful/bin/hook-extract.sh`), and the TypeScript it runs with its local
+imports. A merge conflict marker left in any of those files is refused too, as
+`unresolved merge conflict marker`, even when the file still parses: markers
+inside a heredoc or a string do. It registers the hooks that parse, skips the
+ones listed, finishes the rest of the install, and exits non-zero. Claude Code
+runs hooks straight from `~/.claude/skills/gstack`, so a skipped hook that an
+earlier setup registered, or that a skill runs, keeps running the broken file
+until it is fixed. This is a gstack bug, or a half-applied edit or merge in your
 checkout: report the printed `<file>:<line>`.
 
 **Fix.**
@@ -597,7 +598,9 @@ cd ~/.claude/skills/gstack && ./setup
 ### `gstack auto-update: update held (hook-does-not-parse: <file>:<line>: <error>); nothing was installed or changed, and your current hooks keep running. ...`
 
 **Meaning.** Team-mode auto-update fetched a release with a hook that does not
-parse. It checked the incoming revision before moving your checkout, so your
+parse, or that still holds a merge conflict marker (the same check setup runs,
+skill hooks and the helpers they source included). It checked the incoming
+revision before moving your checkout, so your
 checkout, installed skills and registered hooks stay at the current revision.
 gstack checks again at the next update check and installs the first release
 whose hooks parse. This is a gstack bug: report the printed `<file>:<line>`.

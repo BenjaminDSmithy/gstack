@@ -69,13 +69,28 @@ for (const rel of SKILL_FILES) {
   if (hooks.length) FRONTMATTER_HOOKS.set(rel, [...new Set(hooks)]);
 }
 
-/** A gstack tree with the real hook shims, trivial TypeScript entries, and the frontmatter of each skill that registers a hook. */
+// The shell files a shim sources, read here independently of the checker: the
+// paths its `# shellcheck source=` directives name, and each `<name>.sh` a
+// non-comment line names beside it.
+function helpersOf(hook: string): string[] {
+  const text = fs.readFileSync(path.join(ROOT, hook), 'utf8');
+  const declared = [...text.matchAll(/^\s*#\s*shellcheck\s.*source=(\S+)/gm)].map(m => m[1]!);
+  const beside = text.split('\n').filter(l => !/^\s*#/.test(l))
+    .flatMap(l => l.match(/[A-Za-z0-9._-]+\.sh/g) ?? []).map(n => path.join(path.dirname(hook), n));
+  return [...new Set([...declared, ...beside])].filter(rel => rel !== hook && fs.existsSync(path.join(ROOT, rel)));
+}
+
+/** A gstack tree with the real hook shims and the helpers they source, trivial TypeScript entries, and the frontmatter of each skill that registers a hook. */
 function fixtureTree(root: string) {
   for (const hook of HOOKS) {
     fs.mkdirSync(path.dirname(path.join(root, hook)), { recursive: true });
     fs.copyFileSync(path.join(ROOT, hook), path.join(root, hook));
     fs.chmodSync(path.join(root, hook), 0o755);
     if (fs.existsSync(path.join(ROOT, `${hook}.ts`))) fs.writeFileSync(path.join(root, `${hook}.ts`), 'export const ok = 1;\n');
+    for (const helper of helpersOf(hook)) {
+      fs.mkdirSync(path.dirname(path.join(root, helper)), { recursive: true });
+      fs.copyFileSync(path.join(ROOT, helper), path.join(root, helper));
+    }
   }
   fs.copyFileSync(path.join(ROOT, 'setup'), path.join(root, 'setup'));
   for (const rel of FRONTMATTER_HOOKS.keys()) {
@@ -186,6 +201,94 @@ describe('gstack-hook-check: what fails', () => {
     const ts = path.join(root, 'hosts/claude/hooks/timeline-stop-hook.ts');
     fs.writeFileSync(ts, `export const x = \`\n${LT} HEAD\na\n${EQ}\nb\n${GT} main\n\`;\n`);
     const r = check(root);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(`fail hosts/claude/hooks/timeline-stop-hook ${ts}:2: unresolved merge conflict marker`);
+  });
+
+  test('a half-merged helper the /careful and /freeze checks source fails both, at the helper', () => {
+    const root = tmpBase();
+    fixtureTree(root);
+    const helper = path.join(root, 'careful/bin/hook-extract.sh');
+    expect(fs.existsSync(helper)).toBe(true);
+    const first = fs.readFileSync(helper, 'utf8').split('\n').length + 1;
+    fs.appendFileSync(helper, `cat >/dev/null <<'EOF'\n${LT} HEAD\nours\n${EQ}\ntheirs\n${GT} main\nEOF\n`);
+    const r = check(root);
+    expect(r.code).toBe(1);
+    for (const hook of ['careful/bin/check-careful.sh', 'freeze/bin/check-freeze.sh']) {
+      expect(r.out).toContain(`fail ${hook} ${helper}:${first}: unresolved merge conflict marker`);
+    }
+  });
+
+  test('a helper that a helper sources is checked too (/careful and /freeze reach bin/gstack-state-root.sh through hook-extract.sh)', () => {
+    const root = tmpBase();
+    fixtureTree(root);
+    const helper = path.join(root, 'bin/gstack-state-root.sh');
+    expect(fs.existsSync(helper)).toBe(true);
+    const lines = fs.readFileSync(helper, 'utf8').split('\n').length;
+    fs.appendFileSync(helper, 'if then\n');
+    const r = check(root);
+    expect(r.code).toBe(1);
+    for (const hook of ['careful/bin/check-careful.sh', 'freeze/bin/check-freeze.sh', 'bin/gstack-session-update']) {
+      expect(r.out).toMatch(new RegExp(`^fail ${hook.replace(/\./g, '\\.')} ${helper}:${lines}: syntax error`, 'm'));
+    }
+  });
+
+  test('a script a hook only runs, not sources, is not parsed as its helper', () => {
+    // A POSIX sh shim may exec a bash worker beside it; parsing that worker
+    // with sh would refuse a hook that runs fine.
+    const root = tmpBase();
+    fs.mkdirSync(path.join(root, 'hooks'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'setup'), 'X="$(_hook_command_path hooks/plain || true)"\n');
+    fs.writeFileSync(path.join(root, 'hooks/plain'), '#!/bin/sh\nexec "$(dirname "$0")/worker.sh" "$@"\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(root, 'hooks/worker.sh'), '#!/usr/bin/env bash\nwhile read -r l; do echo "$l"; done < <(echo a)\n', { mode: 0o755 });
+    const r = check(root);
+    expect(r.out.trim()).toBe('ok hooks/plain');
+    expect(r.code).toBe(0);
+  });
+
+  test('a helper the auto-updater sources that does not parse fails its hook with the helper file and line', () => {
+    const root = tmpBase();
+    fixtureTree(root);
+    const helper = path.join(root, 'bin/gstack-egress-lib.sh');
+    expect(fs.existsSync(helper)).toBe(true);
+    const lines = fs.readFileSync(helper, 'utf8').split('\n').length;
+    fs.appendFileSync(helper, 'if then\n');
+    const r = check(root);
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(new RegExp(`^fail bin/gstack-session-update ${helper}:${lines}: syntax error`, 'm'));
+  });
+
+  const bunHasMetafile = (spawnSync('bun', ['build', '--help'], { encoding: 'utf8', timeout: 15_000 }).stdout ?? '').includes('--metafile');
+  test.skipIf(!bunHasMetafile)('a module a TypeScript entry imports fails at its first marker, even inside a template literal', () => {
+    const root = tmpBase();
+    fixtureTree(root);
+    const dir = path.join(root, 'hosts/claude/hooks');
+    fs.writeFileSync(path.join(dir, 'question-log-hook.ts'), "import { banner } from './hook-log';\nconsole.log(banner);\n");
+    const mod = path.join(dir, 'hook-log.ts');
+    fs.writeFileSync(mod, `export const banner = \`\n${LT} HEAD\na\n${EQ}\nb\n${GT} main\n\`;\n`);
+    const r = check(root);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(`fail hosts/claude/hooks/question-log-hook ${fs.realpathSync(mod)}:2: unresolved merge conflict marker`);
+  });
+
+  test('a bun whose build has no --metafile falls back to scanning the entry alone, with no false failure', () => {
+    const root = tmpBase();
+    fixtureTree(root);
+    const oldBun = path.join(root, 'old-bun');
+    fs.writeFileSync(oldBun, [
+      '#!/bin/bash',
+      `if [ "$1" = build ] && [ "$2" = --help ]; then '${process.execPath}' build --help | grep -v -- --metafile; exit 0; fi`,
+      'for a in "$@"; do case "$a" in --metafile*) echo "error: unknown flag $a" >&2; exit 1 ;; esac; done',
+      `exec '${process.execPath}' "$@"`,
+    ].join('\n') + '\n', { mode: 0o755 });
+    const run = () => {
+      const r = spawnSync('bash', [CHECK, root], { encoding: 'utf8', timeout: 30_000, env: { ...process.env, GSTACK_HOOK_CHECK_BUN: oldBun } });
+      return { code: r.status, out: `${r.stdout}${r.stderr}` };
+    };
+    expect(run().code).toBe(0);
+    const ts = path.join(root, 'hosts/claude/hooks/timeline-stop-hook.ts');
+    fs.writeFileSync(ts, `export const x = \`\n${LT} HEAD\n\`;\n`);
+    const r = run();
     expect(r.code).toBe(1);
     expect(r.out).toContain(`fail hosts/claude/hooks/timeline-stop-hook ${ts}:2: unresolved merge conflict marker`);
   });

@@ -21,12 +21,14 @@
 # one fails exactly like a broken setup hook; a broken PreToolUse one blocks
 # the tool call. test/setup-hook-syntax-gate.test.ts keeps the lists equal.
 #
-# Each shim is parsed by the interpreter its shebang names (bash -n, sh -n).
-# Each TypeScript entry the shim runs (a `<name>.ts` beside it) is bundled with
-# its local imports into a temp directory, packages external, so a broken or
-# missing local import fails; a missing entry fails. The shim and each entry
-# are also scanned for merge conflict markers: a half-merged hook whose markers
-# sit inside a heredoc, a string or a comment still parses, and still runs the
+# Each shim is parsed by the interpreter its shebang names (bash -n, sh -n),
+# and so is each shell helper it sources (see helpers_of). Each TypeScript
+# entry the shim runs (a `<name>.ts` beside it) is bundled with its local
+# imports into a temp directory, packages external, so a broken or missing
+# local import fails; a missing entry fails. The shim, its helpers, each entry
+# and (when bun can name them) each local module the entry bundles are also
+# scanned for merge conflict markers: a half-merged hook whose markers sit
+# inside a heredoc, a string or a comment still parses, and still runs the
 # wrong half.
 #
 # Output, one line per hook:
@@ -97,6 +99,13 @@ if ! command -v "$BUN" >/dev/null 2>&1; then
 fi
 TMP_OUT=$(mktemp -d "${TMPDIR:-/tmp}/gstack-hook-check.XXXXXX") || { echo "gstack-hook-check: cannot create a temp directory" >&2; exit 1; }
 trap 'rm -rf "$TMP_OUT"' EXIT
+# A bun whose `build` takes --metafile names every local module an entry
+# bundles, so each is scanned for conflict markers too. Without it (an older
+# bun) only the entry file is scanned; the bundle still fails on a syntax error
+# anywhere in it.
+META=0
+"$BUN" build --help 2>/dev/null | grep -q -- '--metafile' && META=1
+CWD_P=$(pwd -P)
 
 # first_location <file> <tool output> — "<file>:<line>" from bun's "at f:l:c"
 # or bash's "f: line N:" (falls back to <file>).
@@ -115,18 +124,128 @@ first_message() {
 FAILED=0
 fail() { echo "fail $1 $2: $3"; FAILED=1; }
 
-# marker_line <file> — the line number of the first merge conflict marker
-# (`<<<<<<<`, `|||||||` or `>>>>>>>` at the start of a line, then a space or
-# the end of the line), or nothing. A bare `=======` is left alone: it is also
-# an ordinary banner, and a real conflict always carries the other two.
-marker_line() {
-  LC_ALL=C grep -nE '^(<{7}|[|]{7}|>{7})( |$)' "$1" 2>/dev/null | head -1 | cut -d: -f1
-}
-check_markers() {
-  _at=$(marker_line "$2")
-  [ -n "$_at" ] || return 0
-  fail "$1" "$2:$_at" "unresolved merge conflict marker"
+NL='
+'
+
+# report_markers <hook> <files, one per line> — fails the hook at the first
+# merge conflict marker in each file: `<<<<<<<`, `|||||||` or `>>>>>>>` at the
+# start of a line, then a space or the end of the line. A bare `=======` is
+# left alone: it is also an ordinary banner, and a real conflict always carries
+# the other two. One grep for all of a hook's files.
+report_markers() {
+  [ -n "$2" ] || return 0
+  _out=$(IFS=$NL; set -f; LC_ALL=C grep -nHE '^(<{7}|[|]{7}|>{7})( |$)' -- $2 2>/dev/null)
+  [ -n "$_out" ] || return 0
+  _hits=$(printf '%s\n' "$_out" | awk -F: '!seen[$1]++ { print $1 ":" $2 }')
+  _rifs=$IFS; IFS=$NL
+  for _hit in $_hits; do fail "$1" "$_hit" "unresolved merge conflict marker"; done
+  IFS=$_rifs
   return 1
+}
+
+# sourced_by <file> — the shell files <file> sources directly: each path a
+# `# shellcheck source=<path>` directive names, each `*.sh` path on a line that
+# runs `.` or `source`, and each `*.sh` path assigned to a variable such a line
+# sources (`H="$DIR/hook-extract.sh"` ... `. "$H"`). A script it only runs is
+# not a helper: it is parsed by its own shebang when it runs, not by <file>'s.
+# A path resolves from the tree root, then beside <file>, then with its first
+# segment (a `$DIR/` or `${BASH_SOURCE%/*}/` prefix) dropped; the first that
+# exists wins, with `.` and `..` folded so the path stays under <root>.
+sourced_by() {
+  # String regexes, not /.../ literals: see frontmatter_hooks on BusyBox awk.
+  awk -v root="$ROOT" -v dir="${1%/*}" -v self="$1" '
+    function norm(p,   a, n, i, k, st, out) {
+      n = split(p, a, "/"); k = 0
+      for (i = 1; i <= n; i++) {
+        if (a[i] == "" || a[i] == ".") continue
+        if (a[i] == ".." && k > 0 && st[k] != "..") { k--; continue }
+        st[++k] = a[i]
+      }
+      out = ""
+      for (i = 1; i <= k; i++) out = out "/" st[i]
+      return out
+    }
+    function exists(p,   line, r) { r = (getline line < p); close(p); return r >= 0 }
+    function resolve(t,   c, i, n, parts) {
+      if (substr(t, 1, 1) != "/") {
+        c = norm(root "/" t); if (exists(c)) return c
+        c = norm(dir "/" t); if (exists(c)) return c
+      }
+      i = index(t, "/")
+      if (i > 0) { c = norm(dir "/" substr(t, i + 1)); if (exists(c)) return c }
+      n = split(t, parts, "/"); c = norm(dir "/" parts[n]); if (exists(c)) return c
+      return ""
+    }
+    function paths(s) {
+      while (match(s, "[A-Za-z0-9._/-]*[.]sh")) {
+        tok[++nt] = substr(s, RSTART, RLENGTH)
+        s = substr(s, RSTART + RLENGTH)
+      }
+    }
+    /^[[:space:]]*#/ {
+      if ($0 ~ "^[[:space:]]*#[[:space:]]*shellcheck[[:space:]]" && match($0, "source=[^[:space:]]+"))
+        tok[++nt] = substr($0, RSTART + 7, RLENGTH - 7)
+      next
+    }
+    {
+      if (match($0, "^[[:space:]]*(local[[:space:]]+|export[[:space:]]+|readonly[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=")) {
+        name = substr($0, RSTART, RLENGTH - 1)
+        sub("^[[:space:]]*(local[[:space:]]+|export[[:space:]]+|readonly[[:space:]]+)?", "", name)
+        assigned[name] = assigned[name] " " $0
+      }
+      if (match($0, "(^|[;&|!({])[[:space:]]*([.]|source)[[:space:]]+[^[:space:]]")) {
+        s = substr($0, RSTART)
+        paths(s)
+        while (match(s, "[$][{]?[A-Za-z_][A-Za-z0-9_]*")) {
+          v = substr(s, RSTART, RLENGTH); sub("^[$][{]?", "", v); sourced[v] = 1
+          s = substr(s, RSTART + RLENGTH)
+        }
+      }
+    }
+    END {
+      for (v in sourced) if (v in assigned) paths(assigned[v])
+      for (i = 1; i <= nt; i++) {
+        p = resolve(tok[i])
+        if (p != "" && p != self && !(p in seen)) { seen[p] = 1; print p }
+      }
+    }
+  ' "$1" 2>/dev/null
+}
+
+# helpers_of <shim> — every shell file the shim sources, and what those source
+# in turn (four levels): /careful and /freeze source
+# careful/bin/hook-extract.sh, which sources bin/gstack-state-root.sh. A broken
+# one makes them deny or ask on every call while the shim itself still parses.
+helpers_of() {
+  _seen="$NL$1$NL" _queue=$1 _depth=0
+  _hifs=$IFS
+  while [ -n "$_queue" ] && [ "$_depth" -lt 4 ]; do
+    _next=""
+    IFS=$NL
+    for _f in $_queue; do
+      for _c in $(sourced_by "$_f"); do
+        case "$_seen" in *"$NL$_c$NL"*) continue ;; esac
+        _seen="$_seen$_c$NL"
+        printf '%s\n' "$_c"
+        _next="$_next$_c$NL"
+      done
+    done
+    IFS=$_hifs
+    _queue=$_next _depth=$((_depth + 1))
+  done
+}
+
+# metafile_inputs <metafile> — the "inputs" keys of a bun build metafile,
+# relative to the directory bun ran in. An unexpected layout yields nothing,
+# and the caller falls back to scanning the entry alone.
+metafile_inputs() {
+  awk '/^  "inputs": \{$/ { f = 1; next } f && /^  \}/ { exit }
+       f && /^    "[^"]+": \{$/ { sub(/^    "/, ""); sub(/": \{$/, ""); print }' "$1" 2>/dev/null
+}
+
+# physical <path> — the path with symlinks and `..` resolved.
+physical() {
+  ( cd -P "${1%/*}" 2>/dev/null && printf '%s/%s\n' "$PWD" "${1##*/}" )
 }
 
 for hook in $HOOKS; do
@@ -147,7 +266,18 @@ for hook in $HOOKS; do
     fail "$hook" "$(first_location "$shim" "$err")" "$(first_message "$err")"
     hook_ok=0
   fi
-  check_markers "$hook" "$shim" || hook_ok=0
+  _scan=$shim   # every file this hook runs, scanned for markers at the end
+  _helpers=$(helpers_of "$shim")
+  _ifs=$IFS; IFS=$NL
+  for helper in $_helpers; do
+    IFS=$_ifs
+    if ! err=$("$interp" -n "$helper" 2>&1); then
+      fail "$hook" "$(first_location "$helper" "$err")" "$(first_message "$err")"
+      hook_ok=0
+    fi
+    _scan="$_scan$NL$helper"
+  done
+  IFS=$_ifs
   dir=$(dirname "$shim")
   for entry in $(grep -v '^[[:space:]]*#' "$shim" | grep -oE '[A-Za-z0-9._-]+\.ts([^A-Za-z0-9_]|$)' | sed -E 's/\.ts.*$/.ts/' | awk '!seen[$0]++'); do
     if [ ! -f "$dir/$entry" ]; then
@@ -155,12 +285,31 @@ for hook in $HOOKS; do
       hook_ok=0
       continue
     fi
-    if ! err=$("$BUN" build --target=bun --packages=external --outdir "$TMP_OUT/$(basename "$hook")" "$dir/$entry" 2>&1 >/dev/null); then
+    meta="$TMP_OUT/meta.json"
+    rm -f "$meta"
+    _mf=""
+    [ "$META" -eq 1 ] && _mf="--metafile=$meta"
+    if ! err=$("$BUN" build --target=bun --packages=external --outdir "$TMP_OUT/$(basename "$hook")" ${_mf:+"$_mf"} "$dir/$entry" 2>&1 >/dev/null); then
       fail "$hook" "$(first_location "$dir/$entry" "$err")" "$(first_message "$err")"
       hook_ok=0
     fi
-    check_markers "$hook" "$dir/$entry" || hook_ok=0
+    _scan="$_scan$NL$dir/$entry"
+    # Every other local module the entry bundles.
+    _inputs=""
+    [ -f "$meta" ] && _inputs=$(metafile_inputs "$meta")
+    [ -n "$_inputs" ] || continue
+    _entry_p=$(physical "$dir/$entry")
+    IFS=$NL
+    for rel in $_inputs; do
+      IFS=$_ifs
+      case "$rel" in /*) mod="$rel" ;; *) mod="$CWD_P/$rel" ;; esac
+      case "$mod" in */../*|*/./*) mod=$(physical "$mod") ;; esac
+      [ -f "$mod" ] && [ "$mod" != "$_entry_p" ] || continue
+      _scan="$_scan$NL$mod"
+    done
+    IFS=$_ifs
   done
+  report_markers "$hook" "$_scan" || hook_ok=0
   [ "$hook_ok" -eq 1 ] && echo "ok $hook"
 done
 exit "$FAILED"
