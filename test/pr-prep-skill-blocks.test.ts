@@ -20,6 +20,7 @@ import { spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { expectMentions } from './helpers/prompt-structure';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const SKILL_MD = fs.readFileSync(path.join(ROOT, 'pr-prep', 'SKILL.md'), 'utf-8');
@@ -93,8 +94,14 @@ describe('pr-prep Step 3: fetch health is checked before the guard', () => {
   test('block checks gh exit status and JSON shape before piping to the guard', () => {
     expect(FETCH_BLOCK).toContain(`jq -e 'type == "array"'`);
     expect(FETCH_BLOCK).toContain('FETCH_STATUS:');
-    expect(sectionAfter('## Step 3:')).toContain('An envelope proves only that the guard ran, not that the fetch ran');
-    expect(sectionAfter('## Step 3:')).toMatch(/zsh does NOT word-split/);
+    // Safety lines, on meaning: an envelope is no evidence the fetch ran, and
+    // zsh leaves an unquoted variable as one word. Bold markers go first: a
+    // sentence ending in `.**` would not split from the next one, and the
+    // next sentence's words could stand in for a dropped rule.
+    expectMentions(sectionAfter('## Step 3:').replaceAll('**', ''), [
+      ['envelope', 'guard', 'fetch'],
+      ['zsh', 'unquoted', 'split'],
+    ], 'pr-prep Step 3');
   });
 
   for (const shell of SHELLS) {
