@@ -153,7 +153,9 @@ describe.skipIf(process.platform === 'win32')('gstack-session-update: incoming h
     const src = fs.readFileSync(SCRIPT, 'utf8');
     const bun = src.indexOf('HELD=$(gstack_bun_incoming_hold');
     const hooks = src.indexOf('HELD=$(hook_incoming_hold');
-    const ff = src.indexOf('merge --ff-only');
+    // Fork: bin/gstack-gate-incoming --fast-forward takes the fast-forward
+    // (after its own whole-tree gate); upstream's `merge --ff-only` is gone.
+    const ff = src.indexOf('gstack-gate-incoming" --fast-forward');
     expect(bun).toBeGreaterThan(-1);
     expect(hooks).toBeGreaterThan(bun);
     expect(ff).toBeGreaterThan(hooks);

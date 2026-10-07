@@ -3860,7 +3860,10 @@ _hook_command_path() {
 # hooks that parse, refuses the ones that do not (the resolver skips them), and
 # exits non-zero at the end with the file and line. The auto-updater runs the
 # same check before the checkout moves.
-if [ -d "$CANONICAL_GSTACK_ROOT" ]; then
+# Fork: a canonical install that already failed the whole-tree gate above
+# registers no hook at all, so this per-hook pass would only print a "register
+# as usual" list that is not true; it stands down.
+if [ -d "$CANONICAL_GSTACK_ROOT" ] && [ "${_CANONICAL_HOOKS_REFUSED:-0}" -eq 0 ]; then
   _HOOK_CHECK_RC=0
   _HOOK_CHECK_OUT=$(GSTACK_HOOK_CHECK_BUN="$BUN_CMD" "$SOURCE_GSTACK_DIR/bin/gstack-hook-check" \
     --setup "$SOURCE_GSTACK_DIR/setup" "$CANONICAL_GSTACK_ROOT") || _HOOK_CHECK_RC=$?
@@ -4579,19 +4582,18 @@ if [ ${#_BACKED_UP_SKILL_MDS[@]} -gt 0 ]; then
   log "Moved ${#_BACKED_UP_SKILL_MDS[@]} customized SKILL.md file(s) to $_SKILL_BACKUP_ROOT before installing gstack's: ${_BACKED_UP_SKILL_MDS[*]}"
   log "  Those were gstack-generated files you had edited; restore anything you meant to keep under a different skill name."
 fi
+if [ -n "${_HOOK_REFUSED:-}" ]; then
+  echo "" >&2
+  echo "gstack setup: everything else is installed, but these hooks were not registered because they do not parse: $_HOOK_REFUSED(first: $_HOOK_REFUSED_AT). This is a gstack bug; report $_HOOK_REFUSED_AT. https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md#setup-hook-does-not-parse" >&2
+  exit 1
+fi
 
-# Two parse gates can refuse hooks: bin/gstack-hook-check per hook, and the
-# fork's whole-tree gate on a canonical install that is not this checkout
-# (before # 8), which refuses every hook and runs no migration. Everything else
-# completed; say which applied, last, and fail.
-if [ -n "${_HOOK_REFUSED:-}" ] || [ "${_CANONICAL_HOOKS_REFUSED:-0}" -eq 1 ]; then
-  if [ -n "${_HOOK_REFUSED:-}" ]; then
-    echo "" >&2
-    echo "gstack setup: everything else is installed, but these hooks were not registered because they do not parse: $_HOOK_REFUSED(first: $_HOOK_REFUSED_AT). This is a gstack bug; report $_HOOK_REFUSED_AT. https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md#setup-hook-does-not-parse" >&2
-  fi
-  if [ "${_CANONICAL_HOOKS_REFUSED:-0}" -eq 1 ]; then
-    echo "" >&2
-    echo "setup finished WITHOUT registering hooks or running migrations: $_CANONICAL_REAL failed the hook parse gate (see above)." >&2
-  fi
+# A canonical install that failed the hook parse gate (before # 8) got no hook
+# registered or re-pointed and ran no migration. Everything else completed;
+# say so last, and fail. (bin/gstack-hook-check stood down for it above, so
+# at most one of these two blocks fires.)
+if [ "${_CANONICAL_HOOKS_REFUSED:-0}" -eq 1 ]; then
+  echo "" >&2
+  echo "setup finished WITHOUT registering hooks or running migrations: $_CANONICAL_REAL failed the hook parse gate (see above)." >&2
   exit 1
 fi

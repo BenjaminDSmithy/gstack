@@ -188,6 +188,11 @@ describe('setup: registers the hooks that parse, refuses the rest, exits non-zer
       `SOURCE_GSTACK_DIR='${ROOT}'`,
       `SETTINGS_HOOK='${ROOT}/bin/gstack-settings-hook'`,
       `GSTACK_CONFIG='${ROOT}/bin/gstack-config'`,
+      // Fork: the slice also carries the fork's whole-tree gate on a canonical
+      // install that is not this checkout, and this fixture is one. Stub its
+      // checker so these cases test bin/gstack-hook-check alone; the fork gate
+      // has its own cases in test/hook-syntax.test.ts.
+      '_HOOK_SYNTAX_BASH=true',
       'TEAM_MODE=1 NO_TEAM_MODE=0 IS_WINDOWS=0 QUIET=1 PLAN_TUNE_HOOKS_MODE="" TIMELINE_STOP_HOOK_MODE=""',
       HOOK_SECTIONS,
       'echo SETUP_HOOKS_DONE',
