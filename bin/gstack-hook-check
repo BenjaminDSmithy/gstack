@@ -16,10 +16,10 @@
 # --setup, when another tree's setup registers <root>'s hooks), plus every
 # gstack path a skill's frontmatter hook command runs (<root>/SKILL.md and
 # <root>/*/SKILL.md: /autoplan's phase-publication hook, and the /careful and
-# /freeze checks that /guard and /investigate run too). Claude Code registers
-# those while the skill is active, so a broken one blocks tool calls exactly
-# like a broken setup hook. test/setup-hook-syntax-gate.test.ts keeps the
-# lists equal.
+# /freeze checks that /guard and /investigate run too, and /plan-ceo-review's
+# hand-off). Claude Code registers those while the skill is active, so a broken
+# one fails exactly like a broken setup hook; a broken PreToolUse one blocks
+# the tool call. test/setup-hook-syntax-gate.test.ts keeps the lists equal.
 #
 # Each shim is parsed by the interpreter its shebang names (bash -n, sh -n).
 # Each TypeScript entry the shim runs (a `<name>.ts` beside it) is bundled with
@@ -55,7 +55,10 @@ SETUP_FILE="${SETUP_FILE:-$ROOT/setup}"
 
 # frontmatter_hooks — the gstack paths named on `command:` lines inside each
 # skill's YAML frontmatter (the block between the first two `---` lines). One
-# awk over every SKILL.md: a pipeline per file cost ~0.4 s across 56 skills.
+# awk over every SKILL.md: a pipeline per file cost ~0.4 s across the 57 files.
+# CRs are stripped first (a CRLF checkout), and the path regex is a string, not
+# a /.../ literal: BusyBox awk (Alpine) keeps the backslash of an escaped `\/`
+# inside a bracket expression, which ran each path into the `\"` closing it.
 frontmatter_hooks() {
   local skills=() f
   for f in "$ROOT/SKILL.md" "$ROOT"/*/SKILL.md; do
@@ -63,11 +66,12 @@ frontmatter_hooks() {
   done
   [ "${#skills[@]}" -gt 0 ] || return 0
   awk '
-    FNR == 1 { front = ($0 == "---"); next }
-    front && $0 == "---" { front = 0; next }
+    { sub(/\r$/, "") }
+    FNR == 1 { front = ($0 ~ /^---[[:space:]]*$/); next }
+    front && $0 ~ /^---[[:space:]]*$/ { front = 0; next }
     front && /^[[:space:]]*command:/ {
       s = $0
-      while (match(s, /skills\/gstack\/[A-Za-z0-9._\/-]+/)) {
+      while (match(s, "skills/gstack/[A-Za-z0-9._/-]+")) {
         print substr(s, RSTART + 14, RLENGTH - 14)
         s = substr(s, RSTART + RLENGTH)
       }

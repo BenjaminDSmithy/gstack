@@ -48,7 +48,8 @@ afterEach(() => { for (const b of bases.splice(0)) fs.rmSync(b, { recursive: tru
 const HOOKS = listHooks(ROOT);
 
 // Skill frontmatter hooks: Claude Code registers a skill's `hooks:` while the
-// skill is active, so they block tool calls exactly like setup's. Read here
+// skill is active, so a broken one fails exactly like a broken setup hook (a
+// PreToolUse one blocks the tool call). Read here
 // independently of the checker: the YAML frontmatter of the root SKILL.md and
 // each <skill>/SKILL.md, every `command:` line, every installed gstack path.
 const SKILL_FILES = ['SKILL.md', ...fs.readdirSync(ROOT).map(d => path.join(d, 'SKILL.md'))]
@@ -110,6 +111,33 @@ describe('gstack-hook-check: the hook list is the registration code', () => {
       expect(frontmatter).toContain(hook);
     }
     expect([...HOOKS].sort()).toEqual(expected);
+  });
+
+  test('every listed hook is a file in this tree, spelled exactly (no trailing backslash or CR)', () => {
+    // BusyBox awk once ran each frontmatter path into the `\"` that closes it,
+    // so all four were reported `missing` and went unchecked.
+    for (const hook of HOOKS) {
+      expect(hook).toMatch(/^[A-Za-z0-9._/-]+$/);
+      expect(fs.statSync(path.join(ROOT, hook)).isFile()).toBe(true);
+    }
+  });
+
+  test('every skill whose frontmatter has hooks contributes at least one checked path', () => {
+    // Guards the derivation: a hook command spelled some other way (a YAML
+    // block scalar, a relative path) would otherwise drop out of the check.
+    const withHooks = SKILL_FILES.filter(rel => /^hooks:/m.test(frontmatterOf(rel) ?? ''));
+    expect(withHooks.length).toBeGreaterThanOrEqual(6);
+    expect(withHooks.filter(rel => !FRONTMATTER_HOOKS.has(rel))).toEqual([]);
+  });
+
+  test('SKILL.md files checked out with CRLF line endings still have their hooks listed', () => {
+    const root = tmpBase();
+    fixtureTree(root);
+    for (const rel of FRONTMATTER_HOOKS.keys()) {
+      const skill = path.join(root, rel);
+      fs.writeFileSync(skill, fs.readFileSync(skill, 'utf8').replace(/\n/g, '\r\n'));
+    }
+    expect([...listHooks(root)].sort()).toEqual([...HOOKS].sort());
   });
 
   test('every shipped hook in this checkout passes', () => {
