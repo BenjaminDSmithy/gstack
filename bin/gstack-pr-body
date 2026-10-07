@@ -1,0 +1,4 @@
+#!/usr/bin/env bun
+import { bodyMain } from '../lib/pr-body';
+
+process.exit(await bodyMain(process.argv.slice(2)));
