@@ -1,0 +1,4 @@
+#!/usr/bin/env bun
+import { validateMain } from '../lib/pr-validate';
+
+process.exit(await validateMain(process.argv.slice(2)));
