@@ -1,10 +1,13 @@
 /**
  * Claude Code runs gstack's hook shims through /bin/sh. A shim that does not
  * parse exits 2, which for a PreToolUse hook blocks the tool call in every
- * session. bin/gstack-hook-check parses every hook setup registers (the shim
- * with the interpreter its shebang names, and each TypeScript entry it runs
- * bundled with its local imports), and setup registers the hooks that parse,
- * refuses the rest with file and line, and exits non-zero.
+ * session. bin/gstack-hook-check checks every hook setup registers and every
+ * hook a skill's frontmatter registers: the shim with the interpreter its
+ * shebang names, the shell helpers it sources (transitively), and each
+ * TypeScript entry it runs bundled with its local imports, and it refuses a
+ * merge conflict marker in any of those files even when the file parses.
+ * setup registers the hooks that pass, refuses the rest with file and line,
+ * and exits non-zero.
  *
  * The setup tests run the real hook sections of setup (canonical root, gate,
  * heal, SessionStart, plan-tune and Stop registration, and the final refusal)

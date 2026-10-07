@@ -573,11 +573,14 @@ that does not parse exits 2, which blocks the tool call it guards in every
 session. Setup parse-checks every hook it registers, and every hook a skill
 registers while it runs (`/autoplan`, `/careful`, `/freeze` and
 `/plan-ceo-review`; `/guard` reuses the `/careful` and `/freeze` checks, and
-`/investigate` the `/freeze` one): the shim, the shell helpers it sources (such
-as `careful/bin/hook-extract.sh`), and the TypeScript it runs with its local
-imports. A merge conflict marker left in any of those files is refused too, as
+`/investigate` the `/freeze` one): the shim, the shell helpers it sources and
+what those source (such as `careful/bin/hook-extract.sh` and
+`bin/gstack-state-root.sh`), and the TypeScript it runs with its local imports.
+A merge conflict marker left in any of those files is refused too, as
 `unresolved merge conflict marker`, even when the file still parses: markers
-inside a heredoc or a string do. It registers the hooks that parse, skips the
+inside a heredoc or a string do. (Markers in an imported module are found when
+your bun's `build` supports `--metafile`; otherwise only the entry file is
+scanned for them.) It registers the hooks that parse, skips the
 ones listed, finishes the rest of the install, and exits non-zero. Claude Code
 runs hooks straight from `~/.claude/skills/gstack`, so a skipped hook that an
 earlier setup registered, or that a skill runs, keeps running the broken file
