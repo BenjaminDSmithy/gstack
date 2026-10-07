@@ -207,6 +207,8 @@ describe.skipIf(process.platform === 'win32')('host conformance kit', () => {
     expect(status.stdout).toMatch(/codex global: router is a symlink, which Codex skips\. Fix: cd \S+ && \.\/setup --host codex; section links: [1-9]\d* of \d+ broken \(first: [^)]*\)\. Fix: cd /);
   }, 60_000);
 
+  // Fork: the hook parse gate sweeps the tree on every ./setup run, so these
+  // setup-heavy cases get twice upstream's 90 s; the bound only catches a hang.
   test('upgrade from the previous release layout refreshes every installed host (#1925)', () => {
     const f = makeFixture();
     const src = makeSource(f, join(f.home, '.claude/skills/gstack'), '1.91.12.0');
@@ -238,7 +240,7 @@ describe.skipIf(process.platform === 'win32')('host conformance kit', () => {
     expect(saved![2].startsWith(join(f.home, '.gstack/backups/skill-copies/'))).toBe(true);
     expect(readFileSync(saved![2], 'utf8')).toEndWith('\nmy local note\n');
     expect(upgrade.stdout).toContain(`refreshed SKILL.md copies in ${join(f.home, '.codex/skills/gstack')}: SKILL.md gstack-upgrade/SKILL.md office-hours/SKILL.md`);
-  }, 90_000);
+  }, 180_000);
 
   test('a Codex namespace captured by a vendored project copy is reported, never repointed (#2879)', () => {
     const f = makeFixture();
@@ -258,7 +260,7 @@ describe.skipIf(process.platform === 'win32')('host conformance kit', () => {
     expect(upgrade.stdout).toMatch(/codex\s+experimental\s+global\s+skipped/);
     expect(upgrade.stdout).toContain('choose: refresh it there');
     expect(tree(join(f.home, '.codex'))).toEqual(codexBefore);
-  }, 90_000);
+  }, 180_000);
 
   test('a host that fails mid-upgrade keeps its last install and gets a retry command', () => {
     const f = makeFixture();
@@ -281,7 +283,7 @@ describe.skipIf(process.platform === 'win32')('host conformance kit', () => {
     expect(upgrade.stdout).toContain(`Retry: cd ${realpathSync(src)} && ./setup --host codex`);
     expect(tree(join(f.home, '.codex'))).toEqual(codexBefore);
     expect(registryRows(f).find(r => r[0] === 'codex')![6]).toBe('1.91.12.0');
-  }, 90_000);
+  }, 180_000);
 
   test('first run from the published instructions ends in a skill that starts', () => {
     const f = makeFixture();
@@ -302,7 +304,7 @@ describe.skipIf(process.platform === 'win32')('host conformance kit', () => {
     // The default root serves the committed render.
     expect(registryRows(f).map(row => row[8])).toEqual(['committed']);
     expect(existsSync(join(f.home, '.gstack/render/installs'))).toBe(false);
-  }, 90_000);
+  }, 180_000);
 
   // #1882 / #2763: an install outside ~/.claude/skills/gstack serves skills
   // rendered for its own root, with the one literal start line worktree-
