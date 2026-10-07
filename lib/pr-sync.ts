@@ -31,6 +31,7 @@ import {
   readStateFor, writeState, withPrLock, receiptedSend, requireApproval,
   type GhResult, type GhRunner, type GitRunner, type PrInfo, type PrState,
 } from './pr-context';
+import { pollForWrite } from './pr-watch';
 
 export const SYNC_EXIT = {
   SYNCED: 0, ERROR: 1, USAGE: 2, NOTHING: 10, CODE_CONFLICT: 20, DIFF_CHANGED: 21, PRECONDITION: 30,
@@ -213,17 +214,20 @@ export const defaultTool: ToolRunner = (cmd, args, opts) => {
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 };
 
-export interface PreWriteGateCtx { gh: GhRunner; repo: string; number: number; expectHead: string; state: PrState | null }
+export interface PreWriteGateCtx { gh: GhRunner; git: GitRunner; env: NodeJS.ProcessEnv; cwd: string; repo: string; number: number; expectHead: string; state: PrState | null }
 export type PreWriteGate = (ctx: PreWriteGateCtx) => { ok: boolean; reason: string };
 
-/** Default gate: the PR is still OPEN at the head we staged against, and no P0/P1 signal waits for the owner. */
-export const defaultPreWriteGate: PreWriteGate = ({ gh, repo, number, expectHead, state }) => {
+/**
+ * Default gate, run right before the push: the PR is still OPEN at the head
+ * we staged against, and a fresh gstack-pr-watch poll answered on every
+ * endpoint with no unacknowledged P0/P1 (a maintainer may have superseded
+ * the PR since the sync was staged).
+ */
+export const defaultPreWriteGate: PreWriteGate = ({ gh, git, env, cwd, repo, number, expectHead }) => {
   const pr = readPr(gh, repo, number);
   if (pr.state !== 'OPEN') return { ok: false, reason: `PR #${number} is ${pr.state}` };
   if (pr.headOid !== expectHead) return { ok: false, reason: `PR head moved to ${pr.headOid.slice(0, 12)} (staged against ${expectHead.slice(0, 12)})` };
-  const unacked = (state?.signals.latched ?? []).filter(s => !(state?.signals.acked ?? []).includes(s.id));
-  if (unacked.length) return { ok: false, reason: `unacknowledged ${unacked.map(s => `${s.level} ${s.kind}`).join(', ')}` };
-  return { ok: true, reason: 'ok' };
+  return pollForWrite({ gh, git, env, now: () => new Date(), out: () => {} }, repo, number, cwd);
 };
 
 export interface SyncDeps {
@@ -779,9 +783,14 @@ function commitMessage(c: Ctx, p: Pinned, x: { upToDate: boolean; conflicts: str
 function cmdPush(c: Ctx): number {
   const { d } = c;
   requireApproval(c.f.argv, { valueFlags: VALUE_FLAGS });
+  const pending = readStagedSync(c.stateDir, c.pr);
+  if (!pending) throw new PrContextError('no sync is staged: run `gstack-pr-sync merge` first', SYNC_EXIT.PRECONDITION);
+  // The gate polls gstack-pr-watch, which takes the PR lock itself: run it just before taking the lock.
+  const gate = d.preWriteGate({ gh: d.gh, git: d.git, env: d.env, cwd: c.cwd, repo: c.repo, number: c.pr.number, expectHead: pending.h0, state: readStateFor(c.stateDir, c.pr) });
+  if (!gate.ok) throw new PrContextError(`pre-write gate: ${gate.reason}`, SYNC_EXIT.PRECONDITION);
   return withPrLock(c.stateDir, () => {
     const staged = readStagedSync(c.stateDir, c.pr);
-    if (!staged) throw new PrContextError('no sync is staged: run `gstack-pr-sync merge` first', SYNC_EXIT.PRECONDITION);
+    if (!staged || staged.sha !== pending.sha) throw new PrContextError('the staged sync changed while the gate ran; re-run push', SYNC_EXIT.PRECONDITION);
     const state = readStateFor(c.stateDir, c.pr);
     if (state?.bodyStaleSince) throw new PrContextError(`the PR body is still stale since the push of ${state.bodyStaleSince.slice(0, 12)}: publish the body first`, SYNC_EXIT.BODY_STALE);
     if (!state?.validation || state.validation.sha !== staged.sha) throw new PrContextError(`no validation recorded for ${staged.sha.slice(0, 12)}: run gstack-pr-validate in ${staged.scratch}`, SYNC_EXIT.VALIDATION);
@@ -791,8 +800,6 @@ function cmdPush(c: Ctx): number {
     if (head !== staged.sha) throw new PrContextError(`the scratch worktree moved to ${head.slice(0, 12)} after the sync was staged`, SYNC_EXIT.PRECONDITION);
     const parent = gitOk(d, staged.scratch, ['rev-parse', `${staged.sha}^1`], 'git rev-parse').trim();
     if (parent !== staged.h0) throw new PrContextError('the staged commit is not one commit on top of the PR head', SYNC_EXIT.PRECONDITION);
-    const gate = d.preWriteGate({ gh: d.gh, repo: c.repo, number: c.pr.number, expectHead: staged.h0, state });
-    if (!gate.ok) throw new PrContextError(`pre-write gate: ${gate.reason}`, SYNC_EXIT.PRECONDITION);
     const now = pinBranch(d.git, c.cwd, c.headRemote, c.pr.headRef).sha;
     if (now !== staged.h0) throw new PrContextError(`${c.headRemote}/${c.pr.headRef} moved to ${now.slice(0, 12)}; abort and re-sync`, SYNC_EXIT.REMOTE_MOVED);
     const r = receiptedSend({ host: 'github.com', payloadClass: 'pr-sync-push', consent: 'user ran /pr-prep', env: d.env }, () =>

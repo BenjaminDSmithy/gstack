@@ -37,6 +37,7 @@ import {
 } from './pr-context';
 import { parseChecks, bucketClass } from './ci-gate';
 import { scan, type Finding } from './redact-engine';
+import { pollForWrite } from './pr-watch';
 
 export const BODY_EXIT = { OK: 0, ERROR: 1, USAGE: 2, REFUSED: 20, REDACTION: 22, PRECONDITION: 30, LIVENESS_PENDING: 40 } as const;
 
@@ -211,7 +212,7 @@ export type HttpStatus = (url: string) => Promise<number | null>;
 export interface BodyDeps {
   gh: GhRunner; git: GitRunner; env: NodeJS.ProcessEnv; now: () => Date;
   out: (line: string) => void; http: HttpStatus;
-  preWriteGate: (ctx: { gh: GhRunner; repo: string; number: number; state: PrState | null }) => { ok: boolean; reason: string };
+  preWriteGate: (ctx: { gh: GhRunner; git: GitRunner; env: NodeJS.ProcessEnv; cwd: string; repo: string; number: number; state: PrState | null }) => { ok: boolean; reason: string };
 }
 
 /** An asset read (GET) is unreceipted, the same as gh's GET reads. */
@@ -224,12 +225,11 @@ const defaultHttp: HttpStatus = async url => {
   }
 };
 
-export const defaultBodyGate: BodyDeps['preWriteGate'] = ({ gh, repo, number, state }) => {
+/** Right before the edit: the PR is OPEN and a fresh gstack-pr-watch poll found nothing waiting for the owner. */
+export const defaultBodyGate: BodyDeps['preWriteGate'] = ({ gh, git, env, cwd, repo, number }) => {
   const pr = readPr(gh, repo, number);
   if (pr.state !== 'OPEN') return { ok: false, reason: `PR #${number} is ${pr.state}` };
-  const unacked = (state?.signals.latched ?? []).filter(s => !(state?.signals.acked ?? []).includes(s.id));
-  if (unacked.length) return { ok: false, reason: `unacknowledged ${unacked.map(s => `${s.level} ${s.kind}`).join(', ')}` };
-  return { ok: true, reason: 'ok' };
+  return pollForWrite({ gh, git, env, now: () => new Date(), out: () => {} }, repo, number, cwd);
 };
 
 const realDeps = (): BodyDeps => ({
@@ -416,6 +416,9 @@ function cmdPublish(c: Ctx): number {
   requireApproval(c.f.argv, { valueFlags: VALUE_FLAGS });
   if (!c.f.body || !fs.existsSync(c.f.body)) throw new PrContextError('--body <rendered file> is required', 2);
   assertWritableIdentity(c.pr, viewerLogin(d.gh));
+  // The gate polls gstack-pr-watch, which takes the PR lock itself: run it just before taking the lock.
+  const gate = d.preWriteGate({ gh: d.gh, git: d.git, env: d.env, cwd: c.f.cwd, repo: c.repo, number: c.pr.number, state: readStateFor(c.stateDir, c.pr) });
+  if (!gate.ok) throw new PrContextError(`pre-write gate: ${gate.reason}`, BODY_EXIT.PRECONDITION);
   return withPrLock(c.stateDir, () => {
     const raw = fs.readFileSync(c.f.body!, 'utf8');
     const body = normalizeBody(raw);
@@ -455,8 +458,6 @@ function cmdPublish(c: Ctx): number {
       return BODY_EXIT.REDACTION;
     }
     const state = readStateFor(c.stateDir, c.pr);
-    const gate = d.preWriteGate({ gh: d.gh, repo: c.repo, number: c.pr.number, state });
-    if (!gate.ok) throw new PrContextError(`pre-write gate: ${gate.reason}`, BODY_EXIT.PRECONDITION);
     const sendFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-pr-body-')), 'body.md');
     fs.writeFileSync(sendFile, body, { mode: 0o600 });
     try {
