@@ -73,7 +73,7 @@ describe("#2679: skill-content mktemp guards", () => {
     expect(rendered).toMatch(/REDACT_FILE=\$\(mktemp "\$\{_GT:\?\}\/spec\.XXXXXX"\)\s*\|\|\s*\{[^}]*exit 1/);
   });
 
-  test("redact-doc scan file honours TMPDIR (no bare mktemp)", () => {
+  test("redact-doc scan file has an explicit template (no bare mktemp)", () => {
     // Bare `mktemp` on macOS acts as `-t tmp`, which prefers the per-user
     // confstr temp dir over TMPDIR, so a paused MEDIUM body landed outside
     // the caller's temp root. GNU mktemp honours TMPDIR either way, so this
