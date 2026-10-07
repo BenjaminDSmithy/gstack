@@ -68,6 +68,10 @@ const POLARITY: Record<string, 'fail-closed' | 'fail-open'> = {
   'community-dashboard': 'fail-open',
   'git-class user ops (artifacts-init, brain-restore, session-update)': 'fail-open',
   'context-bill --exact': 'fail-open',
+  // /pr-prep lifecycle writes (git push to the user's own PR branch, gh pr
+  // edit/create on their own PR), each run on the owner's same-turn yes:
+  // user-directed dev-workflow ops like the git-class ones above.
+  'pr-prep': 'fail-open',
 };
 
 /** TS sinks: must import the canonical helper and call writeReceipt(). */
@@ -95,6 +99,12 @@ const MODULE_SINKS = [
   // vendor CLI. hosts/ has no curl/fetch for the scanner to see, so the
   // receipt wiring is pinned here explicitly.
   'hosts/claude/hooks/memorable-user-prompt-hook.ts',
+  // /pr-prep lifecycle core: receiptedSend() is the one network-write path for
+  // every bin/gstack-pr-* helper. Those writes run through gh and git argv
+  // the scanner cannot see, so the wiring is pinned here; defaultGh and
+  // defaultGit refuse a write outside receiptedSend() (test/pr-context.test.ts),
+  // and the PR-PREP SPAWN tripwire below keeps the helpers on those runners.
+  'lib/pr-context.ts',
 ];
 
 /** Shell sinks: must source the shared lib; every network op receipted. */
@@ -354,6 +364,7 @@ describe('egress receipt wiring tripwire', () => {
       'context-bill --exact',
       'design-openai',
       'git-class user ops (artifacts-init, brain-restore, session-update)',
+      'pr-prep',
       'security-dashboard',
       'update-check',
     ]);
@@ -391,6 +402,13 @@ describe('egress receipt wiring tripwire', () => {
     const rf = read('design/src/receipted-fetch.ts');
     expect(rf).toContain('fail-open');
     expect(rf.indexOf('writeReceipt(')).toBeLessThan(rf.indexOf('fetchImpl(url, init)'));
+    // pr-prep (open): the receipt precedes the send and a receipt failure
+    // warns and sends anyway. Behavioural proof: test/pr-context.test.ts.
+    const prc = read('lib/pr-context.ts');
+    expect(prc).toMatch(/sink:\s*['"]pr-prep['"]/);
+    expect(prc).toContain('fail-open');
+    expect(prc.indexOf('writeReceipt(')).toBeGreaterThan(0);
+    expect(prc.indexOf('writeReceipt(')).toBeLessThan(prc.indexOf('// PR-PREP SEND'));
   });
 
   test('NEW-SINK SCANNER: every outbound network op in the tree is wired or reasoned-exempt', () => {
@@ -413,6 +431,73 @@ describe('egress receipt wiring tripwire', () => {
         'or add a REASONED exemption with the honest why:\n' +
         offenders.join('\n'),
     ).toEqual([]);
+  });
+
+  test('PR-PREP SPAWN tripwire: the /pr-prep helpers reach gh and git only through the guarded runners', () => {
+    // lib/pr-context.ts's defaultGh/defaultGit refuse a write argv outside
+    // receiptedSend(). A helper that spawned gh or git itself would go
+    // around that guard, and its argv is often not a literal the NEW-SINK
+    // SCANNER can read, so any direct spawn of either tool fails here. The
+    // spawn patterns run over the whole file (comment lines blanked), so a
+    // call split across lines is caught. In TS, a bare 'gh'/'git' value is
+    // a spawn target held in a variable, and lib/ci-gate's spawnGh is a gh
+    // runner without the write guard: both fail too.
+    const DIRECT_SPAWN = [
+      /\b(?:spawn|spawnSync|execFile|execFileSync)\s*\(\s*['"`](?:gh|git)['"`]/g,
+      /\b(?:exec|execSync)\s*\(\s*['"`](?:gh|git)\s/g,
+      /\bBun\.spawn(?:Sync)?\s*\(\s*(?:\{[^}]*?\bcmd\s*:\s*)?\[\s*['"`](?:gh|git)['"`]/g,
+      /\$`\s*(?:gh|git)\s/g,
+    ];
+    const TS_ONLY = [
+      /(?:=|\(|\[|,|:)\s*(['"`])(?:gh|git)\1/g,
+      /\bspawnGh\b/g,
+    ];
+    const SHELL_CALL = /(?:^|[;&|(`]|\$\(|\s)(?:gh|git)\s+[a-z-]/;
+    const offending = (src: string, shell: boolean): string[] => {
+      const lines = src.split('\n').map(line => (/^\s*(\/\/|\*|\/\*|#)/.test(line) ? '' : line));
+      const text = lines.join('\n');
+      const hits = new Set<number>();
+      for (const re of shell ? DIRECT_SPAWN : [...DIRECT_SPAWN, ...TS_ONLY]) {
+        for (const m of text.matchAll(re)) hits.add(text.slice(0, m.index).split('\n').length - 1);
+      }
+      if (shell) lines.forEach((line, i) => { if (SHELL_CALL.test(line)) hits.add(i); });
+      return [...hits].sort((a, b) => a - b).map(i => `${i + 1}: ${lines[i].trim().slice(0, 100)}`);
+    };
+    // The rule must see the bypass shapes it exists for, and pass the runners.
+    for (const bypass of [
+      `const r = spawnSync('gh', ['api', '-X', 'PATCH', u], { timeout: 1 });`,
+      `Bun.spawnSync(['git', 'push', 'origin', ref]);`,
+      `execSync('gh pr edit 1 --body-file b.md', { timeout: 1 });`,
+      `const r = spawnSync(\n    'git',\n    ['push', 'origin', ref],\n    { encoding: 'utf8', timeout: 60_000 },\n  );`,
+      `Bun.spawnSync({ cwd, cmd: ['git', 'push', 'origin', ref] });`,
+      `const GH = 'gh';\nconst r = spawnSync(GH, ['pr', 'comment', n, '--body', 'x'], { timeout: 60_000 });`,
+      `import { spawnGh } from './ci-gate';\nspawnGh(['pr', 'edit', n, '--body-file', f]);`,
+    ]) {
+      expect(offending(bypass, false).length, bypass).toBeGreaterThan(0);
+    }
+    expect(offending(`git push origin "HEAD:$ref"`, true)).toHaveLength(1);
+    for (const clean of [
+      `deps.gh(['pr', 'edit', n]); defaultGit(['push'], { cwd });`,
+      `const r = spawnSync(process.execPath, ['test', file], { timeout: 60_000 });`,
+      `const usage = "needs 'gh' on PATH; see git help";\nreceiptedSend({ host: 'github.com', payloadClass: 'git-push', consent }, send);`,
+      `// spawnSync('git', ['push'], { timeout: 1 }) would bypass the guard`,
+    ]) {
+      expect(offending(clean, false), clean).toEqual([]);
+    }
+    const files: string[] = [];
+    for (const entry of fs.readdirSync(path.join(ROOT, 'lib'))) {
+      if (/^pr-.*\.ts$/.test(entry) && entry !== 'pr-context.ts') files.push(`lib/${entry}`);
+    }
+    for (const entry of fs.readdirSync(path.join(ROOT, 'bin'))) {
+      if (entry.startsWith('gstack-pr-') && fs.lstatSync(path.join(ROOT, 'bin', entry)).isFile()) files.push(`bin/${entry}`);
+    }
+    const offenders: string[] = [];
+    for (const rel of files) {
+      const src = read(rel);
+      const shell = !rel.endsWith('.ts') && !/^#!.*\bbun\b/.test(src.split('\n', 1)[0]);
+      offenders.push(...offending(src, shell).map(line => `${rel}: ${line}`));
+    }
+    expect(offenders, 'route gh and git through defaultGh/defaultGit (lib/pr-context.ts), writes inside receiptedSend():\n' + offenders.join('\n')).toEqual([]);
   });
 
   test('shebang tripwire: no bin/gstack-* file carries a node shebang (amendment 2A)', () => {
