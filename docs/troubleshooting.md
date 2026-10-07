@@ -570,11 +570,14 @@ Bun first.
 
 **Meaning.** Claude Code runs gstack's hook shims through `/bin/sh`, and a hook
 that does not parse exits 2, which blocks the tool call it guards in every
-session. Setup parse-checks every hook it registers (the shim, and the
-TypeScript it runs with its local imports). It registers the hooks that parse,
-skips the ones listed, finishes the rest of the install, and exits non-zero.
-Claude Code runs hooks straight from `~/.claude/skills/gstack`, so a skipped
-hook that an earlier setup registered keeps running the broken file until it
+session. Setup parse-checks every hook it registers, and every hook a skill
+registers while it runs (`/autoplan`, `/careful`, `/freeze` and
+`/plan-ceo-review`; `/guard` and `/investigate` reuse the `/careful` and
+`/freeze` checks): the shim, and the TypeScript it runs with its local imports.
+It registers the hooks that parse, skips the ones listed, finishes the rest
+of the install, and exits non-zero. Claude Code runs hooks
+straight from `~/.claude/skills/gstack`, so a skipped hook that an earlier
+setup registered, or that a skill runs, keeps running the broken file until it
 is fixed. This is a gstack bug, or a half-applied edit or merge in your
 checkout: report the printed `<file>:<line>`.
 

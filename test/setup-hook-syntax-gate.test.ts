@@ -47,7 +47,28 @@ afterEach(() => { for (const b of bases.splice(0)) fs.rmSync(b, { recursive: tru
 
 const HOOKS = listHooks(ROOT);
 
-/** A gstack tree with the real hook shims and trivial TypeScript entries. */
+// Skill frontmatter hooks: Claude Code registers a skill's `hooks:` while the
+// skill is active, so they block tool calls exactly like setup's. Read here
+// independently of the checker: the YAML frontmatter of the root SKILL.md and
+// each <skill>/SKILL.md, every `command:` line, every installed gstack path.
+const SKILL_FILES = ['SKILL.md', ...fs.readdirSync(ROOT).map(d => path.join(d, 'SKILL.md'))]
+  .filter(rel => fs.existsSync(path.join(ROOT, rel)));
+function frontmatterOf(rel: string): string | null {
+  const text = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+  if (!text.startsWith('---\n')) return null;
+  const end = text.indexOf('\n---', 4);
+  return end < 0 ? null : text.slice(4, end);
+}
+const FRONTMATTER_HOOKS = new Map<string, string[]>();
+for (const rel of SKILL_FILES) {
+  const front = frontmatterOf(rel);
+  if (!front) continue;
+  const hooks = front.split('\n').filter(l => /^\s*command:/.test(l))
+    .flatMap(l => [...l.matchAll(/\$HOME\/\.claude\/skills\/gstack\/([A-Za-z0-9._/-]+)/g)].map(m => m[1]!));
+  if (hooks.length) FRONTMATTER_HOOKS.set(rel, [...new Set(hooks)]);
+}
+
+/** A gstack tree with the real hook shims, trivial TypeScript entries, and the frontmatter of each skill that registers a hook. */
 function fixtureTree(root: string) {
   for (const hook of HOOKS) {
     fs.mkdirSync(path.dirname(path.join(root, hook)), { recursive: true });
@@ -56,6 +77,10 @@ function fixtureTree(root: string) {
     if (fs.existsSync(path.join(ROOT, `${hook}.ts`))) fs.writeFileSync(path.join(root, `${hook}.ts`), 'export const ok = 1;\n');
   }
   fs.copyFileSync(path.join(ROOT, 'setup'), path.join(root, 'setup'));
+  for (const rel of FRONTMATTER_HOOKS.keys()) {
+    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    fs.writeFileSync(path.join(root, rel), `---\n${frontmatterOf(rel)}\n---\n`);
+  }
 }
 
 function tmpBase(): string {
@@ -70,13 +95,16 @@ function check(root: string) {
 }
 
 describe('gstack-hook-check: the hook list is the registration code', () => {
-  test('equals every hook setup resolves for registration plus the frontmatter-registered autoplan hook', () => {
+  test('equals every hook setup resolves for registration plus every skill-frontmatter hook', () => {
     const registered = [...SETUP.matchAll(/_hook_command_path (\S+)/g)].map(m => m[1]!.replace(/\W+$/, ''));
-    const frontmatter = [...fs.readFileSync(path.join(ROOT, 'autoplan', 'SKILL.md'), 'utf8')
-      .matchAll(/skills\/gstack\/(autoplan\/bin\/[a-z-]+-hook)\b/g)].map(m => m[1]!);
+    const frontmatter = [...FRONTMATTER_HOOKS.values()].flat();
     const expected = [...new Set([...registered, ...frontmatter])].sort();
     expect(registered.length).toBeGreaterThanOrEqual(5);
-    expect(frontmatter.length).toBeGreaterThan(0);
+    // /autoplan's guard, the /careful and /freeze checks (also run by /guard
+    // and /investigate), and /plan-ceo-review's mode hand-off.
+    for (const hook of ['autoplan/bin/phase-publication-hook', 'careful/bin/check-careful.sh', 'freeze/bin/check-freeze.sh', 'plan-ceo-review/bin/mode-handoff-hook']) {
+      expect(frontmatter).toContain(hook);
+    }
     expect([...HOOKS].sort()).toEqual(expected);
   });
 
@@ -103,6 +131,17 @@ describe('gstack-hook-check: what fails', () => {
     const r = check(root);
     expect(r.code).toBe(1);
     expect(r.out).toMatch(new RegExp(`^fail hosts/claude/hooks/question-preference-hook ${shim}:${lines}: syntax error`, 'm'));
+  });
+
+  test('a broken skill-frontmatter hook fails like a setup hook (/freeze, which /guard and /investigate also run)', () => {
+    const root = tmpBase();
+    fixtureTree(root);
+    const shim = path.join(root, 'freeze/bin/check-freeze.sh');
+    const lines = fs.readFileSync(shim, 'utf8').split('\n').length;
+    fs.appendFileSync(shim, 'if then\n');
+    const r = check(root);
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(new RegExp(`^fail freeze/bin/check-freeze\\.sh ${shim}:${lines}: syntax error`, 'm'));
   });
 
   test('a TypeScript entry with a syntax error fails with its file and line', () => {
