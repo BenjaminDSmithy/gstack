@@ -27,6 +27,8 @@ test.skipIf(process.platform === 'win32')('fixture writes reject physical escape
   expect(readFileSync(join(actual, 'proof'), 'utf8')).toBe('safe');
 });
 
+// Fork: every ./setup run sweeps the tree with the hook parse gate first, so
+// each case that runs setup gets twice upstream's 90 s; the bound only catches a hang.
 describe.skipIf(process.platform === 'win32')('setup Codex destination follows recognized source scope', () => {
   for (const [layout, host] of [['.claude', 'codex'], ['.agents', 'codex'], ['.claude', 'auto']]) {
     test(`${layout}: ${host} preserves the global lane and unrelated project`, () => {
@@ -44,7 +46,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
       const resolved = runBashScript(command, { cwd: f.other, env: f.env, timeout: 10_000 });
       expect(resolved.status, resolved.stderr).toBe(0);
       expect(resolved.stdout.trim()).toBe(join(f.previous, 'bin/gstack-autoplan-snapshot.ts'));
-    }, 90_000);
+    }, 180_000);
   }
 
   test('canonical local gstack runtime remains in place across Windows-copy refresh', () => {
@@ -61,7 +63,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
       for (const [rel, before] of Object.entries(sourceBefore)) expect(tree(join(f.source, rel))).toEqual(before);
       expect(realpathSync(join(f.source, '.agents/skills/gstack/bin'))).toBe(join(f.source, '.agents/skills/gstack/bin'));
     }
-  }, 90_000);
+  }, 180_000);
 
   for (const layout of ['machine', 'ordinary']) test(`${layout}: ordinary machine sources still register globally`, () => {
     const f = fixture(layout);
@@ -69,7 +71,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     expect(realpathSync(join(f.global, 'gstack/bin'))).toBe(join(f.source, 'bin'));
     expect(realpathSync(join(f.global, 'gstack-review/SKILL.md'))).toBe(join(f.source, '.agents/skills/gstack-review/SKILL.md'));
     expect(readFileSync(join(f.global, 'custom/SKILL.md'), 'utf8')).toBe('User-owned skill.\n');
-  }, 90_000);
+  }, 180_000);
 
   for (const aliasedParent of [false, true]) for (const windows of [false, true]) test(`a direct global Codex checkout migrates and supports repeat setup, aliased parent=${aliasedParent}, Windows=${windows}`, () => {
     const f = fixture('ordinary');
@@ -105,7 +107,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
       }
       expect(readFileSync(join(f.global, 'custom/SKILL.md'), 'utf8')).toBe('User-owned skill.\n');
     }
-  }, 90_000);
+  }, 180_000);
 
   test('global repository-link invocation converts to a minimal runtime without changing source or unrelated global entries', () => {
     const f = fixture('ordinary');
@@ -129,7 +131,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     install(f);
     expect(tree(f.source)).toEqual(sourceBefore);
     expect(tree(f.global)).toEqual(globalBefore);
-  }, 90_000);
+  }, 180_000);
 
   test('ordinary project ancestors with Git and application setup metadata remain supported', () => {
     const f = fixture('.claude');
@@ -144,21 +146,21 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     expect(tree(join(f.project, '.git'))).toEqual(gitBefore);
     expect(readFileSync(join(f.project, 'setup'), 'utf8')).toBe('Application setup.\n');
     expect(readFileSync(join(f.project, 'VERSION'), 'utf8')).toBe('Application version.\n');
-  }, 90_000);
+  }, 180_000);
 
   test('explicit global override identifies its project source even in quiet mode', () => {
     const f = fixture('.claude');
     const result = install(f, '--host codex --global -q');
     expect(result.stderr).toContain(`Global Codex registration requested from project source: ${f.source}`);
     expect(realpathSync(join(f.global, 'gstack/bin'))).toBe(join(f.source, 'bin'));
-  }, 90_000);
+  }, 180_000);
 
   test('Claude-only vendored setup cannot prune global Codex entries either', () => {
     const f = fixture('.claude');
     const before = tree(f.global);
     install(f, '--host claude');
     expect(tree(f.global)).toEqual(before);
-  }, 90_000);
+  }, 180_000);
 
   test('vendored setup preserves a user-owned local runtime root', () => {
     const f = fixture('.claude');
@@ -169,7 +171,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     const result = install(f);
     expect(tree(runtime)).toEqual(before);
     expect(result.stderr).toContain(`left in place (existing dir not gstack-managed — no generated banner): ${runtime}`);
-  }, 90_000);
+  }, 180_000);
 
   test('vendored setup cannot migrate a copied global Claude wrapper', () => {
     const f = fixture('.claude');
@@ -183,7 +185,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     const before = tree(f.global);
     install(f);
     expect(tree(f.global)).toEqual(before);
-  }, 90_000);
+  }, 180_000);
 
   test('a recognized local symlink keeps its destination local and its source physical', () => {
     const f = fixture('ordinary');
@@ -197,7 +199,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     expect(tree(f.global)).toEqual(before);
     expect(realpathSync(join(f.project, '.agents/skills/gstack-review/SKILL.md'))).toBe(join(source, '.agents/skills/gstack-review/SKILL.md'));
     expect(realpathSync(join(link, 'bin'))).toBe(join(source, 'bin'));
-  }, 90_000);
+  }, 180_000);
 
   test('a parent-directory alias cannot turn the running source into a disposable runtime', () => {
     const f = fixture('.claude');
@@ -212,6 +214,6 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     expect(readFileSync(join(f.source, 'uncommitted-work'), 'utf8')).toBe('Keep the running source.\n');
     expect(result.status, result.stdout + result.stderr).toBe(0);
     expect(realpathSync(join(f.project, '.agents/skills/gstack/bin'))).toBe(join(f.source, 'bin'));
-  }, 90_000);
+  }, 180_000);
 
 });
