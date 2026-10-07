@@ -1,0 +1,4 @@
+#!/usr/bin/env bun
+import { triageMain } from '../lib/pr-ci-triage';
+
+process.exit(await triageMain(process.argv.slice(2)));

@@ -1,0 +1,9 @@
+{
+  "outcome": {
+    "status": "failed",
+    "exitCode": 3,
+    "elapsedMs": 29153,
+    "failingFiles": [],
+    "sawTerminalSummary": null
+  }
+}
