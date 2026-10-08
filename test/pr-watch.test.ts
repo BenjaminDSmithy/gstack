@@ -40,6 +40,7 @@ describe('classification', () => {
     expect(p0).toContain('superseded-comment');
     expect(p0).toContain('maintainer-cross-reference');
     expect(p0).toContain('closed-unmerged');
+    expect(s.find(x => x.kind === 'closed-unmerged')).toMatchObject({ id: 'closed-unmerged:2026-10-06T23:44:13Z', at: '2026-10-06T23:44:13Z' });
     expect(s.find(x => x.id === 'xref:3057')).toBeTruthy();
     expect(s.find(x => x.id === 'xref:3066')).toBeUndefined();
     expect(s.filter(x => x.kind === 'infra-comment').length).toBeGreaterThan(0);
@@ -393,6 +394,24 @@ describe('poll, ack and the write gate', () => {
     expect(await watchMain(['ack', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone, 'closed-unmerged@P0'], { gh: closed, env, out: () => {} })).toBe(0);
     expect(pollForWrite(gateDeps(closed, env), 'acme/gw', 7, t.clone)).toEqual({ ok: false, reason: 'PR #7 is closed' });
     expect(pollForWrite(gateDeps(fakeGh(t, { pull: { state: 'closed', merged: true } }), env), 'acme/gw', 7, t.clone)).toEqual({ ok: false, reason: 'PR #7 is merged' });
+  });
+
+  test('each unmerged close latches on its own: after an acked close, a reopen and a second close is a new P0', async () => {
+    const t = topology('reclose', null);
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') };
+    const data: FakeData = { pull: { state: 'closed', merged: false, closed_at: '2026-10-01T00:00:00Z' } };
+    const gh = fakeGh(t, data);
+    const argv = (sub: string, ...rest: string[]) => [sub, '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone, ...rest];
+    const out: string[] = [];
+    expect(await watchMain(argv('poll'), { gh, env, out: l => out.push(l) })).toBe(10);
+    expect(out.join('\n')).toContain('SIGNAL\tP0\tclosed-unmerged:2026-10-01T00:00:00Z\tclosed-unmerged');
+    expect(await watchMain(argv('ack', 'closed-unmerged:2026-10-01T00:00:00Z@P0'), { gh, env, out: () => {} })).toBe(0);
+    data.pull = { state: 'open', merged: false, closed_at: null };
+    expect(await watchMain(argv('poll'), { gh, env, out: () => {} })).toBe(0);
+    data.pull = { state: 'closed', merged: false, closed_at: '2026-10-03T00:00:00Z' };
+    out.length = 0;
+    expect(await watchMain(argv('poll'), { gh, env, out: l => out.push(l) }), out.join('\n')).toBe(10);
+    expect(out[0]).toContain('new=1 unacknowledged=1');
   });
 
   test('a latched P1 keeps the write gate shut after its condition clears, until it is acknowledged', async () => {
