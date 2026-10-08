@@ -27,7 +27,7 @@ const BOX1_DONE = BOX1_OPEN.replace('- [ ]', '- [x]');
 const CHECKLIST = (box1: string) => `## Checklist\n\n${box1}\n- [x] This is not a generated-file-only diff (I edited the source/template and regenerated)\n`;
 const LIVENESS = (inner: string) => `## Liveness proof (required for external contributors)\n\n${inner}\n\n`;
 
-const TEMPLATE = `## Why (in your own words)\n\nBecause.\n\n## Live evidence\n\n{{FACTS}}\n\n## Scope\n\n- **Changed:** lib/x.ts\n\n${LIVENESS('Screenshot to follow from @me.')}${CHECKLIST(BOX1_OPEN)}`;
+const TEMPLATE = `## Why (in your own words)\n\nBecause.\n\n## Live evidence\n\n<!-- pr-prep:facts -->\n\n## Scope\n\n- **Changed:** lib/x.ts\n\n${LIVENESS('Screenshot to follow from @me.')}${CHECKLIST(BOX1_OPEN)}`;
 
 const FACTS: Facts = {
   at: '2026-10-08T01:00:00Z', head: 'c'.repeat(40), codeSha: 'b'.repeat(40), emptyCi: ['c'.repeat(40)],
@@ -56,7 +56,7 @@ describe('pure helpers', () => {
     expect(renderFactsBlock({ ...FACTS, validation: { sha: 'a'.repeat(40), worst: 0, summary: 'x' } })).toContain('Validation: not run at this head.');
   });
 
-  test('spliceFacts fills {{FACTS}} or replaces the previous block, and refuses a template with neither', () => {
+  test('spliceFacts fills <!-- pr-prep:facts --> or replaces the previous block, and refuses a template with neither', () => {
     const once = spliceFacts(TEMPLATE, renderFactsBlock(FACTS));
     const again = spliceFacts(once, renderFactsBlock({ ...FACTS, commits: 9 }));
     expect(again).toContain('Commits: 9');
