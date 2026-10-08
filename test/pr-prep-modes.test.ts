@@ -105,6 +105,13 @@ describe('mode sections', () => {
     expectMentions(open, [['exit 3', 'never']], 'open section');
   });
 
+  test('open checks the fork branch holds the audited commit before it creates, and never pushes it', () => {
+    const open = section('open');
+    expectTokens(open, ['git ls-remote', 'PR_PREP_OPEN_HEAD'], 'open section');
+    expectOrdered(open, ['PR_PREP_OPEN_HEAD', 'gh pr create --draft'], 'open section');
+    expectMentions(open, [['owner', 'push', 'never']], 'open section');
+  });
+
   test('the screenshot and ready-for-review stay with the owner', () => {
     for (const mode of ['open', 'liveness']) expectMentions(section(mode), [['never', 'gh pr ready']], `${mode} section`);
     expectMentions(section('liveness'), [['never', 'attach']], 'liveness section');

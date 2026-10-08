@@ -48,6 +48,21 @@ files, never into a shell command:
 
 {{FREE_TEXT_FILE:TITLE_FILE=pr-title:BODY_FILE=pr-body}}
 
+`gh pr create --head` opens whatever the fork's branch holds, so first
+check it is exactly the commit the audit and the size check measured
+(substitute your login and the branch):
+
+```bash
+HEAD_SHA=$(git rev-parse HEAD)
+FORK_SHA=$(git remote | while IFS= read -r r; do case "$(git remote get-url "$r" 2>/dev/null)" in (*[/:]<github-username>/*) git ls-remote "$r" refs/heads/<branch-name> | cut -f1; break ;; esac; done)
+if [ -n "$FORK_SHA" ] && [ "$FORK_SHA" = "$HEAD_SHA" ]; then echo "PR_PREP_OPEN_HEAD: $HEAD_SHA"; else echo "PR_PREP_OPEN_HEAD: MISMATCH local $HEAD_SHA, fork ${FORK_SHA:-absent}"; fi
+```
+
+On `MISMATCH` do not open: the branch was never pushed, or local history
+changed after the push, so the PR would show commits nobody audited. The
+owner pushes the branch; the agent never pushes it. If HEAD changed, run
+steps 1 and 2 again.
+
 Scan the exact bytes that will be sent (substitute the printed names):
 
 ```bash
@@ -64,8 +79,9 @@ send; fix the file and scan again. Never edit a file after its scan.
 
 Then, in the turn the owner gives the open instruction, ask with
 AskUserQuestion, with `<gstack-qid:pr-prep-open-pr>` in the question,
-naming the upstream repo, `<github-username>:<branch-name>`, the base and
-the title. On yes, send the scanned files:
+naming the upstream repo, `<github-username>:<branch-name>` at the
+`PR_PREP_OPEN_HEAD` SHA, the base and the title. On yes, send the scanned
+files:
 
 ```bash
 TITLE_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<title-file-name>"

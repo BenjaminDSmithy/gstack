@@ -103,6 +103,59 @@ function run(shell: string, block: string, opts: { stub: string; cwd?: string; e
   return { code: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}${r.error ? `\n[spawn error] ${r.error}` : ''}` };
 }
 
+// The runner's bash, zsh, and macOS's /bin/bash 3.2 when it is another binary.
+const ALL_SHELLS = [...SHELLS, ...(fs.existsSync('/bin/bash') ? ['/bin/bash'] : [])]
+  .map((s) => ({ s, real: fs.realpathSync(s.startsWith('/') ? s : Bun.which(s)!) }))
+  .filter((x, i, all) => all.findIndex((y) => y.real === x.real) === i)
+  .map((x) => x.s);
+
+function git(cwd: string, ...a: string[]): string {
+  const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', '-c', 'init.defaultBranch=main', ...a], {
+    cwd, encoding: 'utf-8', timeout: 30_000,
+  });
+  if (r.status !== 0) throw new Error(`git ${a.join(' ')}: ${r.stderr}`);
+  return r.stdout.trim();
+}
+
+/**
+ * A fork topology: bare upstream at .../garrytan/gstack.git, a bare fork at
+ * .../me/gstack.git whose main is unrelated, and a clone (remotes `upstream`
+ * and `origin`) on feat/x, one commit past upstream's first main. Upstream
+ * main then moves, so only a real fetch finds its SHA.
+ */
+function forkTopology(prefix: string) {
+  const root = fs.mkdtempSync(path.join(tmp, `${prefix}-`));
+  const up = path.join(root, 'up', 'garrytan', 'gstack.git');
+  const fork = path.join(root, 'fork', 'me', 'gstack.git');
+  for (const bare of [up, fork]) {
+    fs.mkdirSync(bare, { recursive: true });
+    git(bare, 'init', '-q', '--bare', '-b', 'main');
+  }
+  const seed = (dir: string, remote: string, file: string) => {
+    fs.mkdirSync(dir);
+    git(dir, 'init', '-q', '-b', 'main');
+    fs.writeFileSync(path.join(dir, file), file);
+    git(dir, 'add', file);
+    git(dir, 'commit', '-q', '-m', `seed ${file}`);
+    git(dir, 'push', '-q', remote, 'main');
+  };
+  seed(path.join(root, 'fork-seed'), fork, 'fork.txt');
+  const upSeed = path.join(root, 'up-seed');
+  seed(upSeed, up, 'base.txt');
+  const clone = path.join(root, 'clone');
+  git(root, 'clone', '-q', '-o', 'upstream', up, clone);
+  git(clone, 'remote', 'add', 'origin', fork);
+  git(clone, 'checkout', '-q', '-b', 'feat/x');
+  fs.writeFileSync(path.join(clone, 'feat.txt'), 'feat');
+  git(clone, 'add', 'feat.txt');
+  git(clone, 'commit', '-q', '-m', 'feat: add feat');
+  fs.writeFileSync(path.join(upSeed, 'later.txt'), 'later');
+  git(upSeed, 'add', 'later.txt');
+  git(upSeed, 'commit', '-q', '-m', 'later');
+  git(upSeed, 'push', '-q', up, 'main');
+  return { clone, fork, upMain: git(up, 'rev-parse', 'main') };
+}
+
 // zsh reads `$BASE:r` as its `:r` (drop the extension) modifier, and macOS
 // /bin/bash 3.2 ends a `$(...)` at a case pattern's bare `)`. Either one made
 // every audit print `PR_PREP_BASE: fetch failed` (UNVERIFIED, no base SHA for
@@ -116,63 +169,56 @@ describe('pr-prep Step 1: the upstream base pin', () => {
     expect(hits).toEqual([]);
   });
 
-  // The runner's bash, zsh, and macOS's /bin/bash 3.2 when it is another binary.
-  const shells = [...SHELLS, ...(fs.existsSync('/bin/bash') ? ['/bin/bash'] : [])]
-    .map((s) => ({ s, real: fs.realpathSync(s.startsWith('/') ? s : Bun.which(s)!) }))
-    .filter((x, i, all) => all.findIndex((y) => y.real === x.real) === i)
-    .map((x) => x.s);
-
-  let clone: string;
-  let upMain: string;
+  let topo: ReturnType<typeof forkTopology>;
   beforeAll(() => {
-    const git = (cwd: string, ...a: string[]) => {
-      const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', '-c', 'init.defaultBranch=main', ...a], {
-        cwd, encoding: 'utf-8', timeout: 30_000,
-      });
-      if (r.status !== 0) throw new Error(`git ${a.join(' ')}: ${r.stderr}`);
-      return r.stdout.trim();
-    };
-    const root = fs.mkdtempSync(path.join(tmp, 'step1-'));
-    const up = path.join(root, 'up', 'garrytan', 'gstack.git');
-    const fork = path.join(root, 'fork', 'me', 'gstack.git');
-    for (const bare of [up, fork]) {
-      fs.mkdirSync(bare, { recursive: true });
-      git(bare, 'init', '-q', '--bare', '-b', 'main');
-    }
-    // A fork whose main is unrelated and stale: Step 1 must pin upstream, never origin.
-    const seed = (dir: string, remote: string, file: string) => {
-      fs.mkdirSync(dir);
-      git(dir, 'init', '-q', '-b', 'main');
-      fs.writeFileSync(path.join(dir, file), file);
-      git(dir, 'add', file);
-      git(dir, 'commit', '-q', '-m', `seed ${file}`);
-      git(dir, 'push', '-q', remote, 'main');
-    };
-    seed(path.join(root, 'fork-seed'), fork, 'fork.txt');
-    const upSeed = path.join(root, 'up-seed');
-    seed(upSeed, up, 'base.txt');
-    clone = path.join(root, 'clone');
-    git(root, 'clone', '-q', '-o', 'upstream', up, clone);
-    git(clone, 'remote', 'add', 'origin', fork);
-    git(clone, 'checkout', '-q', '-b', 'feat/x');
-    fs.writeFileSync(path.join(clone, 'feat.txt'), 'feat');
-    git(clone, 'add', 'feat.txt');
-    git(clone, 'commit', '-q', '-m', 'feat: add feat');
-    // Upstream moves after the clone, so only a real fetch finds this SHA.
-    fs.writeFileSync(path.join(upSeed, 'later.txt'), 'later');
-    git(upSeed, 'add', 'later.txt');
-    git(upSeed, 'commit', '-q', '-m', 'later');
-    git(upSeed, 'push', '-q', up, 'main');
-    upMain = git(up, 'rev-parse', 'main');
+    topo = forkTopology('step1');
   });
 
-  for (const shell of shells) {
+  for (const shell of ALL_SHELLS) {
     test(`under ${shell}: pins upstream's main by SHA through the remote that names the repo`, () => {
       const stub = stubDir('gh', 'case "$1 $2" in "repo view") echo garrytan/gstack ;; *) exit 1 ;; esac');
-      const r = run(shell, STEP1_BLOCK, { stub, cwd: clone });
+      const r = run(shell, STEP1_BLOCK, { stub, cwd: topo.clone });
       expect(r.out).not.toContain('UNVERIFIED');
-      expect(r.out).toContain(`PR_PREP_BASE: garrytan/gstack@main ${upMain} via upstream`);
+      expect(r.out).toContain(`PR_PREP_BASE: garrytan/gstack@main ${topo.upMain} via upstream`);
       expect(r.code).toBe(0);
+    });
+  }
+});
+
+// `gh pr create --head <login>:<branch>` opens whatever the fork's branch
+// holds. A branch never pushed, or rewritten locally after its last push,
+// opened commits the audit, the size check and the owner never saw.
+describe('pr-prep open: the fork branch holds the audited commit', () => {
+  const OPEN_MD = fs.readFileSync(path.join(ROOT, 'pr-prep', 'sections', 'open.md'), 'utf-8');
+  const block = () => {
+    const b = bashBlocks(OPEN_MD).find((x) => x.includes('PR_PREP_OPEN_HEAD'));
+    if (!b) throw new Error('no PR_PREP_OPEN_HEAD block in pr-prep/sections/open.md');
+    return b.replaceAll('<github-username>', 'me').replaceAll('<branch-name>', 'feat/x');
+  };
+  const stub = () => stubDir('gh', 'exit 1');
+
+  let topo: ReturnType<typeof forkTopology>;
+  beforeAll(() => {
+    topo = forkTopology('open-head');
+  });
+
+  for (const shell of ALL_SHELLS) {
+    test(`under ${shell}: only a fork branch at local HEAD passes`, () => {
+      const head = git(topo.clone, 'rev-parse', 'HEAD');
+      // Never pushed (each shell starts from a fork without the branch).
+      spawnSync('git', ['push', '-q', '--delete', 'origin', 'feat/x'], { cwd: topo.clone, timeout: 30_000 });
+      let r = run(shell, block(), { stub: stub(), cwd: topo.clone });
+      expect(r.out).toContain(`PR_PREP_OPEN_HEAD: MISMATCH local ${head}, fork absent`);
+      git(topo.clone, 'push', '-q', 'origin', 'feat/x');
+      r = run(shell, block(), { stub: stub(), cwd: topo.clone });
+      expect(r.out).toContain(`PR_PREP_OPEN_HEAD: ${head}`);
+      expect(r.out).not.toContain('MISMATCH');
+      // A local rewrite after the push: the fork still holds the old commit.
+      git(topo.clone, 'commit', '-q', '--amend', '-m', 'feat: add feat, reworded');
+      const rewritten = git(topo.clone, 'rev-parse', 'HEAD');
+      r = run(shell, block(), { stub: stub(), cwd: topo.clone });
+      expect(r.out).toContain(`PR_PREP_OPEN_HEAD: MISMATCH local ${rewritten}, fork ${head}`);
+      git(topo.clone, 'reset', '-q', '--hard', head);
     });
   }
 });
