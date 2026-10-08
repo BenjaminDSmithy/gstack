@@ -7,9 +7,10 @@ conflict) signal waits for you. It exists because on #3032 a maintainer
 bot's "the fix wave rewrote this" comment arrived during a usage-limit gap
 and sat unanswered for 3 h 17 min before the PR was closed.
 
-A watch that fails twice in a row (it could not verify the PR, or the PR's
-worktree is gone) also notifies, then about once a day while it keeps
-failing, so a dead watch never looks like a quiet one.
+A watch that fails twice in a row (it could not verify the PR, the PR's
+worktree is gone, or its `watch.json` cannot be read) also notifies, then
+about once a day while it keeps failing, so a dead watch never looks like
+a quiet one. So does a run without `jq`, which polls nothing.
 
 What it touches: GitHub is only read (REST GETs, `gh pr list`). In the
 PR's worktree, git fetches the base branch, and the PR head only when the
