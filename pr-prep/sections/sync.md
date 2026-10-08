@@ -34,6 +34,8 @@ Every step is a helper; the judgement left to you is in the STOP lines.
 - Exit 10: up to date (`merge` still re-checks the version queue).
 - Exit 20: a code or template conflict, so STOP and show the owner the
   paths; a hand resolution is the owner's call.
+- Any other exit (30 a precondition, 40 the head moved, 50 unpushed local
+  commits): STOP and report its RESULT line.
 
 ```bash
 ~/.claude/skills/gstack/bin/gstack-pr-sync merge --pr <number> --repo <upstream owner/name>
@@ -43,9 +45,23 @@ This merges upstream's base (never a rebase), takes upstream's release
 files, puts our CHANGELOG entry on top of upstream's byte-identical entries,
 re-versions through the merged tree's own `bin/gstack-next-version`, proves
 the PR's code diff is unchanged, and commits in a scratch worktree
-(`RESULT STAGED ... scratch=<dir>`). Exit 21 (`proof=CHANGED`): show the
-owner the changed files before going on. Exit 60: the version queue could
-not be read; never pick a version by hand.
+(`RESULT STAGED ... scratch=<dir>`).
+
+- Exit 21 (`RESULT DIFF_CHANGED ... proof=CHANGED`, a `CHANGED` line per
+  file): the sync is staged, but it changes the PR's own code diff. Show
+  the owner those files; step 4's question names them.
+- Exit 50: a sync is already staged, or an interrupted merge left its
+  scratch worktree: run `gstack-pr-sync abort` (below), then merge again.
+  If it says the local branch has unpushed commits, they are the owner's.
+- Exit 60: the version queue could not be read; never pick a version by
+  hand.
+
+A staged sync that will not be pushed (a RED you cannot fix, or the owner
+says no in step 4) is removed with:
+
+```bash
+~/.claude/skills/gstack/bin/gstack-pr-sync abort --pr <number> --repo <upstream owner/name>
+```
 
 ### 3. Validate the exact commit
 
@@ -53,15 +69,25 @@ not be read; never pick a version by hand.
 ~/.claude/skills/gstack/bin/gstack-pr-validate run --pr <number> --repo <upstream owner/name>
 ```
 
-It validates the staged scratch worktree after CI's own preconditions. RED:
-read the summary it names. A failure is this sync's unless the same file
-also fails on the base (run it there too) before you call it pre-existing.
+It validates the staged scratch worktree after CI's own preconditions.
+
+- RED: read the summary it names. A failure is this sync's unless the same
+  file also fails on the base (run it there too) before you call it
+  pre-existing.
+- RED with a `selection FULL (...)` line: the PR changes a FULL trigger
+  (package.json beyond its version, bun.lock, tsconfig, the free-suite
+  runner), which only CI's full free suite judges. Ask the owner whether to
+  waive the full suite here, and run validate again with
+  `--accept-full-risk` only on that yes; its summary then says `FULL
+  waived`.
 
 ### 4. Push, with the owner's yes
 
 AskUserQuestion, with `<gstack-qid:pr-prep-sync-push>` in the question: PR
 number, `<head remote> <head ref>`, old head -> staged SHA, the version
-change, the validation summary, and any `mergeable-*` signal from step 1.
+change, the validation summary (with any `FULL waived`), the code-diff
+proof (with the `CHANGED` files when it is CHANGED), and any `mergeable-*`
+signal from step 1.
 
 On yes, if step 1 showed a `mergeable-*` signal, record that the owner has
 now read it, with the `<id>@P1` tokens from the poll's NEXT line:
@@ -76,6 +102,12 @@ Then push:
 ~/.claude/skills/gstack/bin/gstack-pr-sync push --pr <number> --repo <upstream owner/name> --yes
 ```
 
+Add `--accept-diff-change` only when that yes answered a question naming
+the CHANGED files, and `--accept-full-risk` only when it named the waived
+full suite; push refuses either case without its flag (exit 21, 31).
+
 The push re-polls the watch, requires the green validation of that SHA,
-refuses if the remote head moved, and pushes fast-forward only. Then the PR
-body is stale: run the body mode now.
+refuses if the remote head moved, and pushes fast-forward only. Exit 32:
+publish the body first (the body mode). Exit 40: the PR head moved; abort
+and sync again. Exit 41: a hook or the remote refused the push; stop and
+report it. After the push the PR body is stale: run the body mode now.

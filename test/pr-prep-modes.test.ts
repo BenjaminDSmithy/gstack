@@ -108,6 +108,17 @@ describe('mode sections', () => {
     expectMentions(section('sync'), [['never', 'rebase'], ['code', 'conflict', 'STOP']], 'sync section');
   });
 
+  test("a CHANGED proof or a waived full suite is pushed only on the owner's yes to it, and an unpushed sync is aborted", () => {
+    // push refuses 21 (proof CHANGED) and 31 (FULL waived) and names the flag
+    // that accepts each: without the owner's yes tied to it, the agent adds
+    // the flag on its own review and publishes a diff the owner never saw.
+    const sync = section('sync');
+    expectTokens(sync, ['gstack-pr-sync abort'], 'sync section');
+    expectMentions(sync, [['--accept-diff-change', 'only', 'yes'], ['--accept-full-risk', 'only', 'yes']], 'sync section');
+    const safety = between(SKILL, '## Write safety (every mode)', '\n---\n');
+    expectMentions(safety, [['refusal', '21', '31', 'route around'], ['flag', 'only', 'owner', 'yes', 'accepts']], 'Write safety');
+  });
+
   test("sync goes on past its own conflict signal, acked on the owner's yes before the push", () => {
     // poll latches mergeable-dirty/behind as P1 (exit 11) for exactly the PR
     // this mode exists to fix, and the push's pre-write gate refuses while it
