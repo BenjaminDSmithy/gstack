@@ -22,6 +22,8 @@
  *   short (a stray process.exit): it is a failure, never a pass.
  * - Claude Code's env changes bun's output (agent mode) and real-path TMPDIR
  *   matters on macOS: both are fixed here, not by the caller.
+ * - CI's free lane builds the gate binaries and arms GSTACK_EXPECT_BINARIES
+ *   so the make-pdf gates cannot go green by self-skipping: so does this.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -40,9 +42,11 @@ export const VALIDATE_EXIT = { GREEN: 0, RED: 1, USAGE: 2, PRECONDITION: 30 } as
 
 export const VALIDATE_USAGE = `gstack-pr-validate <run|select|declare> --pr <number|url> [options] [paths]
 
-Runs the free tests a PR touches after CI's local preconditions
-(bun install --frozen-lockfile, gen:skill-docs --host all + the
-freshness check, the browse node-server build), one bun process per file,
+Runs the free tests a PR touches after CI's local preconditions in CI's
+order (bun install --frozen-lockfile, gen:skill-docs --host all + the
+freshness check, vendor:xterm, the browse node-server build, build:gates,
+build:cso; GSTACK_EXPECT_BINARIES=1 for the tests when build:gates ran),
+one bun process per file,
 with Claude Code's env stripped, provider tokens unset and a real-path
 TMPDIR. Records the verdict for the exact commit in the PR state.
 
@@ -536,10 +540,22 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
     const diff = gitOk(d, c.tree, ['status', '--porcelain', '--untracked-files=all'], 'git status').split('\n').filter(Boolean);
     line(`precondition gen-skill-docs-all rc=${g.status} drift=${diff.length}${diff.length ? ` (${diff.slice(0, 5).map(l => l.slice(3)).join(', ')})` : ''}`, g.status !== 0 || diff.length > 0);
   }
+  const script = (name: string, timeoutMs: number): boolean => {
+    if (!pkg.scripts?.[name]) return false;
+    const r = tool('bun', ['run', name], timeoutMs);
+    line(`precondition ${name} rc=${r.status}`, r.status !== 0);
+    return true;
+  };
+  script('vendor:xterm', 120_000);
   if (fs.existsSync(path.join(c.tree, 'browse/scripts/build-node-server.sh'))) {
     const r = tool('bash', ['browse/scripts/build-node-server.sh'], 600_000);
     line(`precondition build-node-server rc=${r.status}`, r.status !== 0);
   }
+  // The make-pdf gates self-skip without these binaries; CI builds them and
+  // arms GSTACK_EXPECT_BINARIES on the test step so a missing build fails.
+  const gates = script('build:gates', 900_000);
+  script('build:cso', 600_000);
+  const testEnv: NodeJS.ProcessEnv = gates ? { ...env, GSTACK_EXPECT_BINARIES: '1' } : env;
 
   for (const f of sel.missingDeclared) line(`declared ${f} RED: not a free test file in this tree`, true);
   if (sel.full.length) line(`selection FULL (${sel.full.join(', ')}): the full free suite is the real gate${c.f.acceptFull ? '; accepted by --accept-full-risk' : ''}`, !c.f.acceptFull);
@@ -551,12 +567,12 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   const verdict = (v: FileVerdict) => (v.ok ? 'ok' : v.unverified ? `UNVERIFIED: ${v.why}` : `RED: ${v.why}`);
   for (const s of sel.files) {
     const abs = path.join(c.tree, s.file);
-    const v = judgeBunRun(s.file, tool('bun', ['test', abs, '--timeout=30000', '--max-concurrency=1'], 900_000));
+    const v = judgeBunRun(s.file, d.tool('bun', ['test', abs, '--timeout=30000', '--max-concurrency=1'], { cwd: c.tree, env: testEnv, timeoutMs: 900_000 }));
     if (v.ok) green++;
     if (v.unverified) unverified.push(s.file);
     line(`${s.file} rc=${v.rc} ${v.pass} pass ${v.fail} fail ${v.skip} skip ran=${v.ran ? 1 : 0} ${verdict(v)} [${s.rules.join(',')}]`, !v.ok && !v.unverified);
     if (macos.has(s.file)) {
-      const sys = judgeBunRun(s.file, d.tool('bun', ['test', abs, '--timeout=30000', '--max-concurrency=1'], { cwd: c.tree, env: { ...env, TMPDIR: sysTmp.endsWith('/') ? sysTmp : `${sysTmp}/` }, timeoutMs: 900_000 }));
+      const sys = judgeBunRun(s.file, d.tool('bun', ['test', abs, '--timeout=30000', '--max-concurrency=1'], { cwd: c.tree, env: { ...testEnv, TMPDIR: sysTmp.endsWith('/') ? sysTmp : `${sysTmp}/` }, timeoutMs: 900_000 }));
       line(`${s.file} (default temp root) rc=${sys.rc} ran=${sys.ran ? 1 : 0} ${verdict(sys)}`, !sys.ok && !sys.unverified);
     }
   }

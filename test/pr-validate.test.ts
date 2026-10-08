@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { validationEnv, selectTests, judgeBunRun, bunPinFrom, macosNamedFrom, validateMain, defaultTool, bunfigPreload, type ValidateDeps } from '../lib/pr-validate';
+import { validationEnv, selectTests, judgeBunRun, bunPinFrom, macosNamedFrom, validateMain, defaultTool, bunfigPreload, type ValidateDeps, type ToolRunner } from '../lib/pr-validate';
 import { prStateDir, topicFor, readStateFor, type GhRunner } from '../lib/pr-context';
 
 setDefaultTimeout(180_000);
@@ -280,6 +280,47 @@ describe('run, select and declare against a fixture PR tree', () => {
     });
     expect(await mixed.call(['run'])).toBe(0);
     expect(readStateFor(mixed.dir, pr)!.validation!.summary).toBe('1/2 selected files green; 1 unverified (every test skipped: test/s.test.ts)');
+  });
+
+  // A fake ToolRunner that records each command (tree paths made relative) and the env it got.
+  function recorder(tree: () => string, opts: { bunVersion?: string; onCall?: (line: string) => void } = {}) {
+    const calls: { line: string; env: NodeJS.ProcessEnv }[] = [];
+    const tool: ToolRunner = (cmd, args, o) => {
+      const line = [cmd, ...args.map(a => (a.startsWith(`${tree()}/`) ? path.relative(tree(), a) : a))].join(' ');
+      calls.push({ line, env: { ...o.env } });
+      opts.onCall?.(line);
+      if (cmd === 'bun' && args[0] === '--version') return { status: 0, stdout: `${opts.bunVersion ?? '1.4.2'}\n`, stderr: '' };
+      if (cmd === 'bun' && args[0] === 'test') return { status: 0, stdout: '', stderr: ' 1 pass\n 0 fail\nRan 1 test across 1 file. [1.00ms]\n' };
+      return { status: 0, stdout: '', stderr: '' };
+    };
+    return { calls, tool };
+  }
+  const CI_TREE = {
+    'bun.lock': '',
+    'package.json': JSON.stringify({ name: 'fx', version: '1.0.0', scripts: { 'gen:skill-docs': 'x', 'vendor:xterm': 'x', 'build:gates': 'x', 'build:cso': 'x', typecheck: 'x' } }),
+    'browse/scripts/build-node-server.sh': '#!/bin/bash\n',
+  };
+
+  test('CI\'s preconditions run in CI\'s order before any test, and the gate binaries are armed for the tests only', async () => {
+    let tree = '';
+    const rec = recorder(() => tree);
+    const f = fixture('ci-order', "test('x', () => expect(y).toBe(2));", { base: CI_TREE, deps: { tool: rec.tool } });
+    tree = f.tree;
+    expect(await f.call(['run'])).toBe(0);
+    expect(rec.calls.map(c => c.line)).toEqual([
+      'bun --version',
+      'bun install --frozen-lockfile',
+      'bun run gen:skill-docs --host all',
+      'bun run vendor:xterm',
+      'bash browse/scripts/build-node-server.sh',
+      'bun run build:gates',
+      'bun run build:cso',
+      'bun test test/x.test.ts --timeout=30000 --max-concurrency=1',
+      'bun run typecheck',
+    ]);
+    const envOf = (l: string) => rec.calls.find(c => c.line.startsWith(l))!.env;
+    expect(envOf('bun test').GSTACK_EXPECT_BINARIES).toBe('1');
+    expect(envOf('bun run build:gates').GSTACK_EXPECT_BINARIES).toBeUndefined();
   });
 
   test('a runner/dependency change keeps the run red unless the owner accepts the full-suite risk', async () => {
