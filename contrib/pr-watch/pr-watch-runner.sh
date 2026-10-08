@@ -28,14 +28,33 @@ failed() {
   if [ "$count" -eq 2 ] || [ $((count % 48)) -eq 0 ]; then notify "$text"; fi
 }
 
+# Without jq every watch.json parses as empty and would be skipped in
+# silence (macOS 14 and older ship no /usr/bin/jq): a failure, not quiet.
+if ! command -v jq > /dev/null 2>&1; then
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) jq is missing: no PR polled" >> "$LOG"
+  failed jq-missing "pr-watch: jq is missing, no PR is being watched"
+  exit 0
+fi
+rm -f "$FAILS/jq-missing"
+
+# A watch.json the runner cannot use is a watch that never runs: count it
+# like a failed poll, keyed on its path under the state root.
+skip() {
+  echo "skip $1: $2" >> "$LOG"
+  failed "$3" "pr-watch: a watch file is unreadable, see pr-watch.log"
+}
+
 for f in "$ROOT"/projects/*/pr-drafts/*/watch.json; do
   [ -f "$f" ] || continue
+  fkey=${f#"$ROOT"/projects/}
+  fkey=file-${fkey//[!A-Za-z0-9._-]/_}
   repo=$(jq -r '.repo // empty' "$f" 2>/dev/null)
   n=$(jq -r '.number // empty' "$f" 2>/dev/null)
   cwd=$(jq -r '.cwd // empty' "$f" 2>/dev/null)
-  case $n in ''|*[!0-9]*) echo "skip $f: bad number" >> "$LOG"; continue ;; esac
-  case $repo in */*) ;; *) echo "skip $f: bad repo" >> "$LOG"; continue ;; esac
-  case $repo in *[!A-Za-z0-9._/-]*) echo "skip $f: bad repo" >> "$LOG"; continue ;; esac
+  case $n in ''|*[!0-9]*) skip "$f" "bad number" "$fkey"; continue ;; esac
+  case $repo in */*) ;; *) skip "$f" "bad repo" "$fkey"; continue ;; esac
+  case $repo in *[!A-Za-z0-9._/-]*) skip "$f" "bad repo" "$fkey"; continue ;; esac
+  rm -f "$FAILS/$fkey"
   key="${repo//\//_}-$n"
   if [ ! -d "$cwd" ]; then
     echo "skip $f: no worktree" >> "$LOG"
