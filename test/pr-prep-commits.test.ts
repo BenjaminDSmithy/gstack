@@ -191,6 +191,23 @@ describe('stampReport', () => {
     }
   });
 
+  test('a hit carried without being re-found keeps the date it was last seen', () => {
+    const first = listAuditCommits(defaultGit, repo, base, null);
+    const hit = { ref: '#3000', title: 'feat: a too', state: 'OPEN', score: 0.4 };
+    let prior = stampReport({ summary: 's', commits: [{ sha: sha.c1, bucket: 'OVERLAP', topScore: 0.4, hits: [hit] }, { sha: sha.c4, bucket: 'CLEAN' }] }, first, new Date('2026-10-01T00:00:00Z')) as Record<string, any>;
+    // #3000 closes unmerged: no delta search (open PRs, merged PRs) finds it again, so its stored state never updates.
+    for (const day of ['2026-10-05', '2026-10-09']) {
+      const l = listAuditCommits(defaultGit, repo, base, prior as PriorReport);
+      expect(l.audit[0].mode).toBe('CARRY');
+      prior = stampReport({ summary: 's', commits: [{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4, bucket: 'CLEAN' }] }, l, new Date(`${day}T00:00:00Z`)) as Record<string, any>;
+      expect(prior.commits[0].hits).toEqual([{ ...hit, seen_at: '2026-10-01T00:00:00.000Z' }]);
+    }
+    // Found again, it is current.
+    const l = listAuditCommits(defaultGit, repo, base, prior as PriorReport);
+    const again = stampReport({ summary: 's', commits: [{ sha: sha.c1, bucket: 'OVERLAP', hits: [hit] }, { sha: sha.c4, bucket: 'CLEAN' }] }, l, now) as Record<string, any>;
+    expect(again.commits[0].hits).toEqual([hit]);
+  });
+
   test('a carried commit lists each upstream hit once and keeps its highest score', () => {
     const first = listAuditCommits(defaultGit, repo, base, null);
     const hit = (score: number) => ({ ref: '#3000', title: 't', state: 'OPEN', score });
