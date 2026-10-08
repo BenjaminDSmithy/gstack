@@ -54,7 +54,9 @@ if [ -z "$ROOT" ] || [ ! -d "$ROOT" ]; then
   exit 2
 fi
 # Absolute, so the bundles below can run from the tree root (see BUILD_DIR).
-case "$ROOT" in /*) ;; *) ROOT="$PWD/$ROOT" ;; esac
+# A Windows root (`D:\a\gstack`, `D:/a/gstack`, `\\host\share`) is already
+# absolute: prefixing $PWD would point every path at nothing.
+case "$ROOT" in /* | [A-Za-z]:[\\/]* | \\\\*) ;; *) ROOT="$PWD/$ROOT" ;; esac
 [ "$ROOT" = / ] || ROOT=${ROOT%/}
 SETUP_FILE="${SETUP_FILE:-$ROOT/setup}"
 
