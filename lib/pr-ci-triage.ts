@@ -48,8 +48,10 @@ A ci: commit message is drafted only for a CRASH whose signature, exit
 code (3 or 9), empty failingFiles and log (no "(fail)" or "✗" line, no
 unhandled error) agree, or a HANG whose shard passed on an earlier run of
 the same tree; in both, the runner must count the missing summary as the
-only unattributed failure. And only when the run is for the PR's current
-head with no newer run.
+only unattributed failure. And only when the run has finished, is for the
+PR's current head (cross-checked against the head remote when this
+checkout has one) and has no newer run; a stale run's artifacts are never
+downloaded.
 
 Exit codes: 0 drafted, 1 error, 2 usage, 10 triaged without a draft
 (REAL, UNKNOWN, a stale run, or evidence missing), 11 nothing failed.`;
@@ -194,6 +196,9 @@ function download(d: TriageDeps, repo: string, run: number, name: string): strin
 
 const RUN_FIELDS = 'databaseId,headSha,headBranch,event,conclusion,createdAt,status';
 
+/** A GitHub enum value (status, conclusion) as printable text: anything else is dropped. */
+const word = (v: string | undefined): string => (v && /^[a-z_]{1,32}$/.test(v) ? v : '');
+
 // ── run ─────────────────────────────────────────────────────────────────────
 
 interface Flags { sub: string; pr: string | null; repo: string | null; cwd: string; run: number | null; limit: number }
@@ -246,8 +251,13 @@ function cmdRun(d: TriageDeps, f: Flags): number {
   if (!f.pr) throw new PrContextError('--pr is required', 2);
   const repo = f.repo ?? upstreamRepoFromGh(d.gh, f.cwd);
   const pr = readPr(d.gh, repo, parsePrRefFor(f.pr, repo));
-  const headRemote = remoteForRepo(d.git, f.cwd, pr.headRepo);
-  if (headRemote) pinBranch(d.git, f.cwd, headRemote, pr.headRef);
+  const stale: string[] = [];
+  // gh's headRefOid is cross-checked against the head remote when one is configured here.
+  const headRemote = pr.headRepo ? remoteForRepo(d.git, f.cwd, pr.headRepo) : null;
+  if (headRemote) {
+    const pin = pinBranch(d.git, f.cwd, headRemote, pr.headRef);
+    if (pin.sha !== pr.headOid) stale.push(`${headRemote}/${pr.headRef} is at ${pin.sha.slice(0, 12)}, but the PR reports ${pr.headOid.slice(0, 12)}: the head moved`);
+  }
   const onHead = ghJson<RunInfo[]>(d, ['run', 'list', '-R', repo, '--workflow', 'windows-free-tests.yml', '--commit', pr.headOid, '--limit', '20', '--json', RUN_FIELDS], 'gh run list');
   const runId = f.run ?? onHead.find(r => r.conclusion === 'failure')?.databaseId ?? null;
   if (runId === null) {
@@ -255,10 +265,19 @@ function cmdRun(d: TriageDeps, f: Flags): number {
     return TRIAGE_EXIT.NOTHING;
   }
   const run = ghJson<RunInfo>(d, ['run', 'view', String(runId), '-R', repo, '--json', `${RUN_FIELDS},jobs`], 'gh run view');
-  const stale: string[] = [];
   if (run.headSha !== pr.headOid) stale.push(`run ${runId} is for ${run.headSha.slice(0, 12)}, not the PR head ${pr.headOid.slice(0, 12)}`);
   const newer = onHead.filter(r => r.databaseId > runId);
-  if (newer.length) stale.push(`a newer run on the head exists (${newer.map(r => `${r.databaseId} ${r.status ?? ''}/${r.conclusion ?? ''}`).join(', ')})`);
+  if (newer.length) stale.push(`a newer run on the head exists (${newer.map(r => `${r.databaseId} ${word(r.status)}/${word(r.conclusion)}`).join(', ')})`);
+  // A shard still running could yet fail for real, and the ci: push would cancel it (cancel-in-progress).
+  const pending = (run.jobs ?? []).filter(j => !j.conclusion).length;
+  if (run.status !== 'completed') stale.push(`run ${runId} is still ${word(run.status) || 'queued'}: wait for every shard to finish`);
+  else if (pending) stale.push(`run ${runId} has ${pending} unfinished job(s): wait for every shard to finish`);
+  if (stale.length) {
+    // Checked before any artifact is downloaded: nothing from a stale run is read or printed.
+    for (const s of stale) d.out(`STALE ${s}`);
+    d.out(`RESULT NO_DRAFT run=${runId} stale: triage the newest finished run on the current head`);
+    return TRIAGE_EXIT.NO_DRAFT;
+  }
   const failed = (run.jobs ?? []).filter(j => j.conclusion === 'failure');
   const shards = failed.map(j => Number(SHARD_JOB_RE.exec(j.name)?.[1])).filter(n => Number.isInteger(n) && n > 0);
   if (!shards.length) {
@@ -285,9 +304,7 @@ function cmdRun(d: TriageDeps, f: Flags): number {
     if (log) d.out(envelope(stripControl(log.split('\n').slice(-12).join('\n')), `ci-run-${runId}-shard-${n}`));
   }
   const ok = triaged.filter(draftable);
-  const all = stale.length === 0 && ok.length === triaged.length;
-  if (!all) {
-    for (const s of stale) d.out(`STALE ${s}`);
+  if (ok.length !== triaged.length) {
     for (const t of triaged.filter(x => !draftable(x))) {
       if (t.klass === 'REAL') d.out(`BLAME shard ${t.shard}: run the failing file(s) on the PR head and on the base with gstack-pr-validate (declare them) before calling them pre-existing; a failure that passes on the base is this PR's`);
       else d.out(`NO_DRAFT shard ${t.shard} ${t.klass}: ${t.klass === 'HANG' ? 'no earlier run of this tree passed the shard' : t.why}`);

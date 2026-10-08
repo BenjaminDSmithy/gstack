@@ -94,15 +94,16 @@ let ROOT = '';
 let repoDir = '';
 let A = '';
 let B = '';
+const gitIn = (cwd: string, ...args: string[]) => {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 30_000, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com' } });
+  if (r.status !== 0) throw new Error(r.stderr);
+  return r.stdout.trim();
+};
 beforeAll(() => {
   ROOT = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pr-ci-triage-')));
   repoDir = path.join(ROOT, 'repo');
   fs.mkdirSync(repoDir);
-  const git = (...args: string[]) => {
-    const r = spawnSync('git', args, { cwd: repoDir, encoding: 'utf8', timeout: 30_000, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com' } });
-    if (r.status !== 0) throw new Error(r.stderr);
-    return r.stdout.trim();
-  };
+  const git = (...args: string[]) => gitIn(repoDir, ...args);
   git('init', '-q', '-b', 'pr/t');
   fs.writeFileSync(path.join(repoDir, 'a.txt'), 'a\n');
   git('add', '-A');
@@ -113,12 +114,22 @@ beforeAll(() => {
 });
 afterAll(() => fs.rmSync(ROOT, { recursive: true, force: true }));
 
-interface FakeRun { id: number; sha: string; shard: number; fixture: string; result?: Record<string, unknown>; conclusion?: string; status?: string; jobs?: { name: string; conclusion: string }[] }
+/** One shard's artifacts: a fixture prefix (`<fixture>-result.json`, `<fixture>-shard.log.txt`), or explicit content. */
+interface ShardFx { fixture?: string; result?: Record<string, unknown>; log?: string | null }
+interface FakeRun {
+  id: number; sha: string; shard?: number; fixture?: string; result?: Record<string, unknown>;
+  shards?: Record<number, ShardFx>; conclusion?: string; status?: string; createdAt?: string;
+  jobs?: { databaseId?: number; name: string; conclusion: string }[];
+}
+const shardsOf = (r: FakeRun): Record<number, ShardFx> => r.shards ?? (r.shard ? { [r.shard]: { fixture: r.fixture, result: r.result } } : {});
 
 function fakeGh(runs: FakeRun[], calls: string[][], headOid = B): GhRunner {
   const view = (r: FakeRun) => ({
-    databaseId: r.id, headSha: r.sha, headBranch: 'pr/t', event: 'pull_request', conclusion: r.conclusion ?? 'failure', status: r.status ?? 'completed', createdAt: '2026-10-06T00:00:00Z',
-    jobs: r.jobs ?? [{ databaseId: 1, name: `windows-free-shard (${r.shard})`, conclusion: 'failure' }, { databaseId: 2, name: 'windows-free-tests', conclusion: 'failure' }],
+    databaseId: r.id, headSha: r.sha, headBranch: 'pr/t', event: 'pull_request', conclusion: r.conclusion ?? 'failure', status: r.status ?? 'completed', createdAt: r.createdAt ?? '2026-10-06T00:00:00Z',
+    jobs: r.jobs ?? [
+      ...Object.keys(shardsOf(r)).map((n, i) => ({ databaseId: 10 + i, name: `windows-free-shard (${n})`, conclusion: 'failure' })),
+      { databaseId: 2, name: 'windows-free-tests', conclusion: 'failure' },
+    ],
   });
   return (args => {
     calls.push(args);
@@ -139,14 +150,17 @@ function fakeGh(runs: FakeRun[], calls: string[][], headOid = B): GhRunner {
       const name = args[args.indexOf('-n') + 1];
       const dir = args[args.indexOf('-D') + 1];
       if (!r) return { status: 1, stdout: '', stderr: 'no run' };
-      if (name === `windows-result-${r.shard}`) {
+      const m = /^windows-(result|free-test-shard-logs)-(\d+)$/.exec(name);
+      const fx = m ? shardsOf(r)[Number(m[2])] : undefined;
+      if (m?.[1] === 'result' && fx && (fx.result || fx.fixture)) {
         fs.mkdirSync(dir, { recursive: true });
-        fs.writeFileSync(path.join(dir, `shard-${r.shard}.json`), r.result ? JSON.stringify({ outcome: r.result }) : read(`${r.fixture}-result.json`));
+        fs.writeFileSync(path.join(dir, `shard-${m[2]}.json`), fx.result ? JSON.stringify({ outcome: fx.result }) : read(`${fx.fixture}-result.json`));
         return ok('');
       }
-      if (name === `windows-free-test-shard-logs-${r.shard}` && fs.existsSync(path.join(FX, `${r.fixture}-shard.log.txt`))) {
+      const log = fx?.log !== undefined ? fx.log : fx?.fixture && fs.existsSync(path.join(FX, `${fx.fixture}-shard.log.txt`)) ? read(`${fx.fixture}-shard.log.txt`) : null;
+      if (m?.[1] === 'free-test-shard-logs' && log !== null) {
         fs.mkdirSync(path.join(dir, 'gstack'), { recursive: true });
-        fs.writeFileSync(path.join(dir, 'gstack', 'shard.log'), read(`${r.fixture}-shard.log.txt`));
+        fs.writeFileSync(path.join(dir, 'gstack', 'shard.log'), log);
         return ok('');
       }
       return { status: 1, stdout: '', stderr: 'no artifact' };
@@ -155,13 +169,15 @@ function fakeGh(runs: FakeRun[], calls: string[][], headOid = B): GhRunner {
   }) as GhRunner;
 }
 
-async function triage(runs: FakeRun[], extra: string[] = [], headOid = B) {
+let homes = 0;
+async function triage(runs: FakeRun[], extra: string[] = [], opts: { headOid?: string; cwd?: string } = {}) {
   const calls: string[][] = [];
   const out: string[] = [];
-  const env = { ...process.env, GSTACK_STATE_ROOT: path.join(ROOT, `home-${runs.map(r => r.id).join('-')}-${extra.join('')}`) };
-  const code = await triageMain(['run', '--pr', '3', '--repo', 'acme/gt', '--cwd', repoDir, ...extra], { gh: fakeGh(runs, calls, headOid), env, out: l => out.push(l) });
+  const env = { ...process.env, GSTACK_STATE_ROOT: path.join(ROOT, `home-${++homes}`) };
+  const code = await triageMain(['run', '--pr', '3', '--repo', 'acme/gt', '--cwd', opts.cwd ?? repoDir, ...extra], { gh: fakeGh(runs, calls, opts.headOid ?? B), env, out: l => out.push(l) });
   return { code, out, calls, env };
 }
+const downloads = (calls: string[][]) => calls.filter(c => c[0] === 'run' && c[1] === 'download').length;
 
 describe('run', () => {
   test('an IOCP crash on the current head drafts the ci: message, and nothing is committed or pushed', async () => {
@@ -185,6 +201,36 @@ describe('run', () => {
     const newer = await triage([{ id: 102, sha: B, shard: 4, fixture: '37346036310' }, { id: 103, sha: B, shard: 4, fixture: '37346036310', conclusion: '', status: 'in_progress' }], ['--run', '102']);
     expect(newer.code).toBe(10);
     expect(newer.out.some(l => l.includes('a newer run on the head exists'))).toBe(true);
+    // a stale run's artifacts are never downloaded, so none of their text is printed
+    expect(downloads(old.calls) + downloads(newer.calls)).toBe(0);
+  });
+
+  test('a run still in progress (one shard failed, others running) gets no draft and no download', async () => {
+    const r = await triage([{
+      id: 700, sha: B, shard: 4, fixture: '37346036310', status: 'in_progress', conclusion: '',
+      jobs: [{ name: 'windows-free-shard (4)', conclusion: 'failure' }, { name: 'windows-free-shard (5)', conclusion: '' }, { name: 'windows-free-tests', conclusion: '' }],
+    }], ['--run', '700']);
+    expect(r.code).toBe(10);
+    expect(r.out.some(l => /^STALE run 700 is still in_progress/.test(l))).toBe(true);
+    expect(r.out.some(l => l.startsWith('RESULT DRAFTED'))).toBe(false);
+    expect(downloads(r.calls)).toBe(0);
+  });
+
+  test('the head remote must hold the head gh reports: a pinned mismatch gets no draft', async () => {
+    const bare = path.join(ROOT, 'me', 'gt.git');
+    fs.mkdirSync(bare, { recursive: true });
+    gitIn(bare, 'init', '-q', '--bare');
+    const clone = path.join(ROOT, 'clone');
+    gitIn(ROOT, 'clone', '-q', repoDir, clone);
+    gitIn(clone, 'remote', 'add', 'fork', bare);
+    gitIn(clone, 'push', '-q', 'fork', `${A}:refs/heads/pr/t`);
+    const run = { id: 900, sha: B, shard: 4, fixture: '37346036310' };
+    const moved = await triage([run], [], { cwd: clone });
+    expect(moved.code).toBe(10);
+    expect(moved.out.some(l => l.startsWith('STALE') && l.includes(A.slice(0, 12)) && l.includes(B.slice(0, 12)))).toBe(true);
+    expect(downloads(moved.calls)).toBe(0);
+    gitIn(clone, 'push', '-q', '-f', 'fork', `${B}:refs/heads/pr/t`);
+    expect((await triage([run], [], { cwd: clone })).code).toBe(0);
   });
 
   test('a hang drafts only when an earlier run of the identical tree passed the shard', async () => {
