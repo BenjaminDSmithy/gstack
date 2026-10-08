@@ -375,14 +375,16 @@ describe('size before the PR is open', () => {
   const size = async (cwd: string) => {
     const out: string[] = [];
     const code = await watchMain(['size', '--repo', 'acme/gw', '--cwd', cwd], { gh: sizeGh(), out: l => out.push(l) });
-    return { code, first: out.find(l => l.startsWith('RESULT ')) ?? '' };
+    return { code, first: out[0] ?? '', lines: out };
   };
 
   test('the count covers the whole repository, whichever directory it runs from', async () => {
     const clone = branch('size-sub', false);
     const root = await size(clone);
     expect(root).toMatchObject({ code: 0 });
+    // RESULT is the first line even when the live baseline is not read (the NOTE follows it).
     expect(root.first).toMatch(/^RESULT RED churn=3000 files=30 commits=1/);
+    expect(root.lines.some(l => l.startsWith('NOTE baseline not read'))).toBe(true);
     expect((await size(path.join(clone, 'sub'))).first).toBe(root.first);
   });
 
