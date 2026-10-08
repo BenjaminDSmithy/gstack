@@ -571,6 +571,52 @@ describe('push', () => {
     expect((await run(t, ['retrigger', '--message', msg, '--yes'])).code).toBe(32);
   });
 
+  test('merge and abort never touch a scratch path gstack-pr-sync did not make', async () => {
+    const t = topology('p8', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    const occupied = path.join(t.wt, 'feat-sync');
+    // 1. An unrelated repository with uncommitted work.
+    fs.mkdirSync(occupied, { recursive: true });
+    git(occupied, 'init', '-q', '-b', 'main');
+    write(occupied, 'notes.txt', 'owner notes\n');
+    git(occupied, 'add', '-A');
+    git(occupied, 'commit', '-q', '-m', 'notes');
+    write(occupied, 'wip.txt', 'uncommitted\n');
+    const m = await run(t, ['merge']);
+    expect(m.code, m.out.join('\n')).toBe(50);
+    expect(m.out[0]).not.toContain('abort');
+    expect(readStagedSync(stateDir(t), pr)).toBeNull();
+    const a = await run(t, ['abort']);
+    expect(a.code, a.out.join('\n')).toBe(50);
+    expect(fs.readFileSync(path.join(occupied, 'wip.txt'), 'utf8')).toBe('uncommitted\n');
+    fs.rmSync(occupied, { recursive: true, force: true });
+    // 2. The owner's own worktrees of this repository there, on a branch and detached.
+    for (const how of [['-b', 'owner-work'], ['--detach']]) {
+      git(t.clone, 'worktree', 'add', '-q', ...how, occupied, 'HEAD');
+      write(occupied, 'src/a.txt', 'owner edit\n');
+      const ab = await run(t, ['abort']);
+      expect(ab.code, ab.out.join('\n')).toBe(50);
+      expect(fs.readFileSync(path.join(occupied, 'src/a.txt'), 'utf8')).toBe('owner edit\n');
+      git(t.clone, 'worktree', 'remove', '--force', occupied);
+    }
+  });
+
+  test('an interrupted merge leaves a scratch that merge names and abort removes', async () => {
+    const t = topology('p9', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    // A merge killed before it recorded the sync leaves the scratch and no sync.json.
+    fs.rmSync(path.join(stateDir(t), 'sync.json'));
+    const m = await run(t, ['merge']);
+    expect(m.code, m.out.join('\n')).toBe(50);
+    expect(m.out[0]).toContain('gstack-pr-sync abort');
+    const a = await run(t, ['abort']);
+    expect(a.code, a.out.join('\n')).toBe(0);
+    expect(fs.existsSync(s.scratch)).toBe(false);
+    expect(git(t.clone, 'worktree', 'list').split('\n')).toHaveLength(1);
+  });
+
   test('a stale body from an earlier push blocks the next one; abort removes a staged sync', async () => {
     const t = topology('p3', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
     queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
