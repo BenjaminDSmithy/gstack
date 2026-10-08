@@ -685,10 +685,6 @@ function cmdMerge(c: Ctx): number {
 function stageSync(c: Ctx, p: Pinned, pre: Pre, scratch: string, upToDate: boolean, dry: { tree: string; conflicts: string[] } | null, generatedConflicts: string[]): MergeResult {
   const { d } = c;
   const s = (args: string[], what: string, opts: { env?: NodeJS.ProcessEnv; input?: string } = {}) => gitOk(d, scratch, args, what, opts);
-  if (fs.existsSync(path.join(scratch, 'bun.lock'))) {
-    const inst = d.tool('bun', ['install', '--frozen-lockfile'], { cwd: scratch, timeoutMs: 300_000 });
-    if (inst.status !== 0) throw new PrContextError(`bun install in the scratch worktree failed: ${(inst.error ?? inst.stderr).trim().split('\n').at(-1)}`, 1);
-  }
   let automerge: string | null = null;
   if (!upToDate && dry) {
     const m = d.git(['merge', '--no-ff', '--no-commit', p.b], { cwd: scratch });
@@ -707,6 +703,13 @@ function stageSync(c: Ctx, p: Pinned, pre: Pre, scratch: string, upToDate: boole
     }
     writeFile(scratch, 'CHANGELOG.md', show(d, scratch, p.b, 'CHANGELOG.md') ?? '');
     s(['add', '--', ...RELEASE_FILES.filter(f => fs.existsSync(path.join(scratch, f)))], 'git add release files');
+  }
+
+  // Dependencies for every tool below, from the merged tree's own lockfile
+  // (upstream may have moved it); the up-to-date path installs too.
+  if (fs.existsSync(path.join(scratch, 'bun.lock'))) {
+    const inst = d.tool('bun', ['install', '--frozen-lockfile'], { cwd: scratch, timeoutMs: 300_000 });
+    if (inst.status !== 0) throw new PrContextError(`bun install in the scratch worktree failed: ${(inst.error ?? inst.stderr).trim().split('\n').at(-1)}`, 1);
   }
 
   // Version: re-check the queue on every sync, including the up-to-date path.
