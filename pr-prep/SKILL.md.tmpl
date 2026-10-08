@@ -170,8 +170,8 @@ fi
 echo "PR_PREP_BASE: $REPO@$BASE $BASE_SHA via $UP_REMOTE"
 ```
 
-Remember the `PR_PREP_BASE` SHA: every later block that needs the base takes
-it as a literal (bash blocks do not share variables).
+Remember the `PR_PREP_BASE` repo (before the `@`) and SHA: every later block
+that needs them takes them as literals (bash blocks do not share variables).
 
 ## Step 2: Walk each commit, extract search signals
 
@@ -180,7 +180,7 @@ VERSION, package.json, CHANGELOG.md, the agents digest) and empty `ci:`
 re-runs, and carries forward verdicts from this branch's last audit:
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-pr-prep-commits list --base <PR_PREP_BASE sha>
+~/.claude/skills/gstack/bin/gstack-pr-prep-commits list --base <PR_PREP_BASE sha> --repo <PR_PREP_BASE repo>
 ```
 
 Each listed commit has a `mode`:
@@ -591,7 +591,7 @@ persistent copy:
 
 ```bash
 _PP_REPORT="${GSTACK_PR_PREP_REPORT:-/tmp/ship-pr-prep-$(git rev-parse --show-toplevel | git hash-object --stdin | cut -c1-8).json}"
-~/.claude/skills/gstack/bin/gstack-pr-prep-commits stamp --base <PR_PREP_BASE sha> --report <raw fetches dir>/agent-report.json --out "$_PP_REPORT" || echo "PR_PREP_REPORT: invalid, not written" >&2
+~/.claude/skills/gstack/bin/gstack-pr-prep-commits stamp --base <PR_PREP_BASE sha> --repo <PR_PREP_BASE repo> --report <raw fetches dir>/agent-report.json --out "$_PP_REPORT" || echo "PR_PREP_REPORT: invalid, not written" >&2
 ```
 
 - `worst` is the highest-severity bucket across every commit, in the
