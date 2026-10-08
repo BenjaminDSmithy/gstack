@@ -670,6 +670,34 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(await f.call(['run'])).toBe(30);
   });
 
+  test('a test declared while a run is in flight leaves that run red: it never ran the declared file', async () => {
+    let declared = '';
+    const f = fixture('decl-race', "test('x', () => expect(y).toBe(2));", {
+      universe: ['test/x.test.ts', 'test/z.test.ts', 'test/w.test.ts'],
+      base: { 'test/w.test.ts': "import { test, expect } from 'bun:test';\ntest('w', () => expect(1).toBe(2));\n" },
+      deps: {
+        tool: (cmd, args, o) => {
+          // The owner declares a failing test while the first selected file runs.
+          if (!declared && cmd === 'bun' && args[0] === 'test') {
+            declared = 'started';
+            void f.call(['declare', 'test/w.test.ts']);
+            declared = f.out.find(l => l.startsWith('RESULT DECLARED')) ?? 'no declare line';
+          }
+          return defaultTool(cmd, args, o);
+        },
+      },
+    });
+    expect(await f.call(['run'])).toBe(1);
+    expect(declared).toBe('RESULT DECLARED 1 path(s): test/w.test.ts');
+    expect(f.out.find(l => /^RESULT (RED|GREEN) /.test(l))).toMatch(/^RESULT RED /);
+    expect(f.out.find(l => l.startsWith('declared during the run'))).toContain('test/w.test.ts');
+    expect(readStateFor(f.dir, pr)!.validation).toMatchObject({ worst: 1 });
+    // A clean re-run runs it, and it fails on its own.
+    f.out.length = 0;
+    expect(await f.call(['run'])).toBe(1);
+    expect(f.out.find(l => l.startsWith('test/w.test.ts'))).toContain('RED');
+  });
+
   test('declare stores the universe form, refuses what would never run, and voids a verdict that did not run it', async () => {
     const universe = ['test/x.test.ts', 'test/z.test.ts', 'test/w.test.ts'];
     const f = fixture('decl-norm', "test('x', () => expect(y).toBe(2));", {
