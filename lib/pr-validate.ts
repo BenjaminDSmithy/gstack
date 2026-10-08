@@ -63,31 +63,32 @@ build:cso; GSTACK_EXPECT_BINARIES=1 for the tests when build:gates ran),
 one bun process per file in a CI shard's sandbox (a private HOME, its
 own TMPDIR, Chromium profile and browse state; a write to the private
 HOME's ~/.gstack, ~/.claude, ~/.codex, ~/.agents or ~/.config/gstack is
-red, as CI's home guard makes it, and never reaches yours),
-with agent markers (CLAUDECODE, AI_AGENT, AGENT, REPL_ID, CLAUDE*)
-stripped, every credential-shaped variable unset, no system git config
-and an empty gh config dir (your gh login and keychain helper stay out
-of reach), CI=true (as GitHub
-Actions sets it: a committed test.only fails) and a real-path
-TMPDIR; git reads CI's global config (identity, init.defaultBranch main,
-safe.directory) instead of yours. Records the verdict for the exact
-commit in the PR state; red if HEAD or a tracked file changed after
-the preconditions, while the tests ran.
+red, as CI's home guard makes it, and never reaches yours). Agent
+markers (CLAUDECODE, AI_AGENT, AGENT, REPL_ID, CLAUDE*) are stripped,
+every credential-shaped variable is unset, git reads no system config
+and gh an empty config dir (your gh login and keychain helper stay out
+of reach), CI=true (as GitHub Actions sets it: a committed test.only
+fails) and TMPDIR is a real path; git reads CI's global config
+(identity, init.defaultBranch main, safe.directory) instead of yours.
+Records the verdict for the exact commit in the PR state; red if HEAD
+or a tracked file changed after the preconditions, while the tests ran.
 
   run       preconditions + selection + per-file runs + mirrors
             (typecheck, typecheck:test, the added-line secret scan,
             shellcheck on changed *.sh files and the files CI's quality
-            gate shellchecks); exit 0 green, 1 red
+            gate shellchecks)
   select    print the selection and the rule that picked each file
   declare   record test paths that must always run for this PR (free
             test files of the tree only; voids a recorded verdict that
-            did not run them)
+            did not run them, and a run in flight when one is declared
+            records RED)
 
 A file passes only with exit 0, no "(fail)" line and bun's own last
 "Ran N tests across 1 file" line on stderr, with no test result after
 it, agreeing with the counts above it (no such line = a truncated run;
-a block a test printed cannot stand in). A file in which no test passed (every
-test skipped) is UNVERIFIED: named in the summary, never counted green.
+a block a test printed cannot stand in). A file in which no test passed
+(every test skipped) is UNVERIFIED: named in the summary, never counted
+green.
 Each changed file (anything but release files, *.md and FULL triggers)
 needs a passing selected test that exercises it: the file itself, a test
 importing it, pointing a relative path at it or naming it, or for a
@@ -97,7 +98,8 @@ coverage. A file with none is red (NO_TESTS), never "0/0 green": declare
 the tests that cover it (a passing declared test covers the change).
 A change to package.json beyond .version, bun.lock, tsconfig,
 bunfig.toml or its preload files, .github/workflows/free-tests.yml, or
-the free-suite runner and the modules it imports needs the full suite: the selection prints FULL and the run stays red unless
+the free-suite runner and the modules it imports needs the full suite:
+the selection prints FULL and the run stays red unless
 --accept-full-risk (CI runs the full suite).
 
 Options:
@@ -108,9 +110,19 @@ Options:
   --accept-full-risk    a FULL trigger does not by itself make the run red;
                         the recorded summary says the full suite was waived
 
-Exit 30: a precondition (the tree lacks gstack's release tooling,
-bin/gstack-next-version and scripts/gen-agents-digest.ts; uncommitted
-changes or untracked files; no remote for the repo).
+Exit codes (the RESULT word tells 1's two cases apart):
+  0   run: GREEN; select, declare, --help: done
+  1   run: RED (the verdict is recorded); or RESULT ERROR: a gh, git or
+      PR-state failure (nothing recorded)
+  2   RESULT USAGE: bad arguments, a missing --pr, a path declare refuses
+  30  RESULT PRECONDITION: the tree lacks gstack's release tooling
+      (bin/gstack-next-version, scripts/gen-agents-digest.ts), has
+      uncommitted changes or untracked files, no remote points at the
+      repo, or the PR state belongs to another PR
+  40  RESULT ERROR: the PR's base branch is gone upstream or moved while
+      it was pinned; run again
+  45  RESULT ERROR: the PR state lock stayed busy (10 s for declare,
+      120 s for run's verdict); run again
 
 First line of stdout: RESULT <WORD> ... (run prints the upstream range
 of a staged sync on stderr before executing it).`;

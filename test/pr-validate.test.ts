@@ -763,6 +763,14 @@ describe('run, select and declare against a fixture PR tree', () => {
     }
   });
 
+  test('--help documents every exit code validate returns', async () => {
+    const out: string[] = [];
+    expect(await validateMain(['--help'], { out: l => out.push(l) })).toBe(0);
+    const help = out.join('\n');
+    const codes = help.slice(help.indexOf('Exit codes'));
+    for (const code of [0, 1, 2, 30, 40, 45]) expect(codes, String(code)).toMatch(new RegExp(`^ +${code} +\\S`, 'm'));
+  });
+
   test('declare stores the universe form, refuses what would never run, and voids a verdict that did not run it', async () => {
     const universe = ['test/x.test.ts', 'test/z.test.ts', 'test/w.test.ts'];
     const f = fixture('decl-norm', "test('x', () => expect(y).toBe(2));", {
