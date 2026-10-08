@@ -737,6 +737,9 @@ function stageSync(c: Ctx, p: Pinned, pre: Pre, scratch: string, upToDate: boole
     if (g.status !== 0) throw new PrContextError(`gen:skill-docs failed in the scratch worktree: ${(g.error ?? g.stderr).trim().split('\n').at(-1)}`, 1);
     // Only what the generator itself rewrote (worktree vs index); the merge's own staged files are not its doing.
     const touched = s(['diff', '--name-only'], 'git diff').split('\n').filter(Boolean);
+    // The agents digest is generator output on every path: with no release of
+    // our own, nothing else would stage the one gen:skill-docs just rebuilt.
+    if (touched.includes(DIGEST)) s(['add', '--', DIGEST], 'git add the agents digest');
     for (const file of touched) {
       if (RELEASE_FILES.includes(file)) continue;
       if (!GENERATED_EXTRA.includes(file) && !fs.existsSync(path.join(scratch, `${file}.tmpl`))) {
@@ -868,6 +871,10 @@ function checkInvariants(c: Ctx, p: Pinned, pre: Pre, scratch: string, version: 
   }
   const unmerged = gitOk(d, scratch, ['diff', '--name-only', '--diff-filter=U'], 'git diff').trim();
   if (unmerged) throw fail(`unmerged paths remain: ${unmerged.replace(/\n/g, ', ')}`);
+  // The dry runs read the worktree; the commit is the index. They must be the same tree.
+  // Porcelain `XY path`: Y is the worktree against the index (`?` = untracked).
+  const loose = gitOk(d, scratch, ['status', '--porcelain'], 'git status').split('\n').filter(l => l.length > 3 && l[1] !== ' ');
+  if (loose.length) throw fail(`the scratch worktree has changes the commit would not carry: ${loose.map(l => l.slice(3)).join(', ')}`);
 }
 
 function commitMessage(c: Ctx, p: Pinned, x: { upToDate: boolean; conflicts: string[]; version: string; kept: boolean; regenerated: number; proof: { verdict: ProofVerdict; changed: string[]; oldId: string; newId: string } }): string {
