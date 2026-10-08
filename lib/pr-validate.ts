@@ -86,8 +86,8 @@ tripwire's pass (egress wiring, sync-spawn timeouts, ...) is not
 coverage. A file with none is red (NO_TESTS), never "0/0 green": declare
 the tests that cover it (a passing declared test covers the change).
 A change to package.json beyond .version, bun.lock, tsconfig,
-bunfig.toml or its preload files, or the free-suite runner needs the
-full suite: the selection prints FULL and the run stays red unless
+bunfig.toml or its preload files, .github/workflows/free-tests.yml, or
+the free-suite runner and the modules it imports needs the full suite: the selection prints FULL and the run stays red unless
 --accept-full-risk (CI runs the full suite).
 
 Options:
@@ -201,9 +201,14 @@ export function testFileEnv(base: NodeJS.ProcessEnv, stateDir: string, file: str
 
 // Changes that reach every free test: dependencies, compiler config, bun's
 // own test config and its preload (bunfig.toml preloads test-setup.ts into
-// every file), and the free runner with its import closure (the paid-set
-// helper decides what counts as a free test).
-const FULL_RE = /^(bun\.lock|bun\.lockb|bunfig\.toml|test-setup\.ts|patches\/.*|tsconfig[^/]*\.json|scripts\/test-free-shards\.ts|scripts\/lib\/(shard-engine|windows-curation|free-[^/]*)\.ts|test\/helpers\/paid-test-set\.ts)$/;
+// every file), the free lane's workflow, and the free runner with its whole
+// import closure: the shard engine, home guard, CI health and Windows
+// curation, lib/state-root.ts, and the paid-set helper with the matchGlob
+// it imports through test/helpers/touchfiles.ts from test-selection.ts
+// (together they decide what counts as a free test). touchfiles-data.ts,
+// pure E2E data in that closure, is left out. test/pr-validate.test.ts
+// walks the runner's imports and pins this list.
+const FULL_RE = /^(bun\.lock|bun\.lockb|bunfig\.toml|test-setup\.ts|patches\/.*|tsconfig[^/]*\.json|\.github\/workflows\/free-tests\.yml|scripts\/test-free-shards\.ts|scripts\/lib\/(shard-engine|windows-curation|free-[^/]*)\.ts|lib\/state-root\.ts|test\/helpers\/(paid-test-set|touchfiles|test-selection)\.ts)$/;
 const SKILL_SURFACE_RE = /(^|\/)SKILL\.md\.tmpl$|^scripts\/resolvers\/|^scripts\/gen-skill-docs\.ts$|^hosts\//;
 // The roots test/egress-receipt-wiring.test.ts's NEW-SINK SCANNER sweeps
 // (its SWEEP list; pinned by test/pr-validate.test.ts). The class:test
