@@ -19,8 +19,8 @@
  * because a commit was skipped; an UNVERIFIED or EXACT_DUP verdict is
  * searched in full again instead, since only a full search can confirm or
  * clear it, and a known EXACT_DUP stays until one runs. A re-run on an
- * open PR scored the PR itself as EXACT_DUP;
- * `self` drops it before scoring.
+ * open PR scored the PR itself as EXACT_DUP; `self` drops it before
+ * scoring.
  */
 
 import fs from 'node:fs';
@@ -227,19 +227,19 @@ export interface AgentReport { summary: string; worst?: string; commits: { sha: 
 const SHA_PREFIX_RE = /^[0-9a-f]{7,64}$/i;
 
 /**
- * Validate the agent's report and stamp what the agent never types: head,
- * base, time, the audited patch-ids. Every row counts: a commit takes the
- * worst of all its rows, a row for a skipped commit still counts toward
+ * Validate the agent's report and stamp what the agent never types: repo,
+ * head, base, time, the audited patch-ids. Every row counts: a commit takes
+ * the worst of all its rows, a row for a skipped commit still counts toward
  * `worst`, and the agent's own `worst` is a floor; the next list re-checks
- * every commit when either of those set `worst` (priorFloor). A row that names no
- * commit between the base and HEAD (a typo, a wrong --base, a sha rewritten
- * since `list`) or names it by fewer than 7 hex characters refuses the whole
- * report (code 2): dropping it could hide an EXACT_DUP (commitsMain then
- * writes a refused report that keeps one). A commit with a
- * verified prior verdict (CARRY, or a RECHECK after a reword) takes the worse
- * of it and the new search; a commit the
- * agent did not report is UNVERIFIED, except that a RECHECK of a known
- * EXACT_DUP keeps it (and its hits) until a full search returns a verdict.
+ * every commit when either of those set `worst` (priorFloor). A row that
+ * names no commit between the base and HEAD (a typo, a wrong --base, a sha
+ * rewritten since `list`) or names it by fewer than 7 hex characters
+ * refuses the whole report (code 2): dropping it could hide an EXACT_DUP,
+ * so commitsMain then writes a refused report that keeps one. A commit with
+ * a verified prior verdict (CARRY, or a RECHECK after a reword) takes the
+ * worse of it and the new search. A commit the agent did not report is
+ * UNVERIFIED, except that a RECHECK of a known EXACT_DUP keeps it (and its
+ * hits) until a full search returns a verdict.
  */
 export function stampReport(agent: unknown, list: CommitList, now: Date, opts: { repo?: string | null } = {}): Record<string, unknown> {
   const a = agent as AgentReport;
@@ -271,9 +271,9 @@ export function stampReport(agent: unknown, list: CommitList, now: Date, opts: {
     const verified = c.prior !== null && !RECHECK_BUCKETS.has(c.prior.bucket);
     const carried = c.prior && (verified || keepsDup) ? c.prior : null;
     if (carried) bucket = worstOf([bucket, carried.bucket]);
-    // The delta search's hits come first, so a re-found item keeps its newest state.
-    // A carried hit was not re-found, so its state is as of the search that
-    // found it: a PR closed unmerged since then matches no delta search.
+    // The new search's hits come first, so a re-found item keeps its newest
+    // state. A carried hit was not re-found, so its state is as of the
+    // search that found it: a PR closed unmerged since matches no delta search.
     const old = (carried && Array.isArray(carried.hits) ? carried.hits : []).map(h => seenAt(h, list.priorAt ?? null));
     const hits = dedupeHits([...got.flatMap(r => (Array.isArray(r.hits) ? r.hits : [])), ...old]);
     return { sha: c.sha, subject: c.subject, bucket, mode: c.mode, topScore: maxScore([...got.map(r => r.topScore), carried?.topScore]), hits };
@@ -362,22 +362,23 @@ export const COMMITS_USAGE = `gstack-pr-prep-commits <list|stamp|self|paths> [op
   list    commits to audit between --base and HEAD (merges excluded):
           NEW (full searches), CARRY (audited before with a verdict: search
           only items updated since the day before that audit's stamp, keep
-          the old verdict), RECHECK (audited
-          before as UNVERIFIED or EXACT_DUP, or under another subject, or
-          the last report's worst came from a row no audited commit
-          carries, printed as \`floor\`: full searches, the verdict is
-          re-derived, but a known EXACT_DUP stays until a full search
-          returns a verdict and a reworded commit keeps its verified
-          one); release-only commits
-          (only VERSION, CHANGELOG.md, the agents digest, and package.json
-          with nothing but its version changed) and empty commits are
-          skipped and listed. Only a prior stamped for the same --repo
-          (the upstream the searches run against) carries anything
+          the old verdict), RECHECK (audited before as UNVERIFIED or
+          EXACT_DUP, or under another subject, or the last report's worst
+          came from a row no audited commit carries, printed as
+          \`floor\`: full searches, the verdict is re-derived, but a
+          known EXACT_DUP stays until a full search returns a verdict
+          and a reworded commit keeps its verified one); release-only
+          commits (only VERSION, CHANGELOG.md, the agents digest, and
+          package.json with nothing but its version changed) and empty
+          commits are skipped and listed. Only a prior stamped for the
+          same --repo (the upstream the searches run against) carries
+          anything
   stamp   validate the agent's report (JSON file), fold CARRY verdicts in
           (worst never drops), take a commit's worst row, count rows for
           skipped commits and the report's own worst, mark unreported
           commits UNVERIFIED, refuse a row that names no listed or skipped
-          commit by 7+ hex characters; stamp repo, head, base_sha,
+          commit by 7+ hex characters; give a carried hit the \`seen_at\`
+          of the audit that found it; stamp repo, head, base_sha,
           generated_at and audited patch-ids; write --out, then
           --persist (the next list's prior), atomically; a failed
           --persist is a WARN line, never a failed stamp. A refused or
