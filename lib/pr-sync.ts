@@ -196,6 +196,10 @@ export function qualifyQueue(r: GhResult, mainVersion: string): QueueAnswer {
   } catch {
     throw refuse('output is not JSON');
   }
+  // An upstream PR's queue is GitHub's open-PR list. Any other host ("unknown" for an
+  // origin whose URL has no github.com, "gitlab" for a mirror) never read it, even
+  // with offline:false and no fallback.
+  if (j.host !== 'github') throw refuse(`host ${JSON.stringify(j.host)}: the GitHub PR queue was not read`);
   if (j.offline !== false) throw refuse('offline answer (the queue was not read)');
   if (j.fallback !== null && j.fallback !== undefined) throw refuse(`fallback "${String(j.fallback)}" reads the wrong repo for an upstream PR`);
   if (j.base_version !== mainVersion) throw refuse(`base_version ${String(j.base_version)} is not upstream's ${mainVersion}`);
@@ -203,6 +207,8 @@ export function qualifyQueue(r: GhResult, mainVersion: string): QueueAnswer {
   if (!Array.isArray(j.claimed)) throw refuse('claimed[] missing');
   const claimed = j.claimed.map(c => (c as { version?: unknown })?.version).filter((v): v is string => typeof v === 'string');
   const warnings = Array.isArray(j.warnings) ? j.warnings.filter((w): w is string => typeof w === 'string') : [];
+  const unread = warnings.find(w => /queue(-awareness)? unavailable/i.test(w));
+  if (unread) throw refuse(`it says the queue was unavailable (${JSON.stringify(unread.slice(0, 120))})`);
   return { version: j.version, claimed, reason: typeof j.reason === 'string' ? j.reason : '', warnings };
 }
 
