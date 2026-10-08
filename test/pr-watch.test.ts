@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { classifyActor, signalsFrom, sizeVerdict, percentile, watchMain, pollForWrite, absorptionOf, SEED_PROXIES } from '../lib/pr-watch';
-import { prStateDir, topicFor, readStateFor, defaultGit, type GhRunner } from '../lib/pr-context';
+import { prStateDir, topicFor, readStateFor, writeState, defaultGit, type GhRunner } from '../lib/pr-context';
 
 setDefaultTimeout(120_000);
 
@@ -425,6 +425,23 @@ describe('poll, ack and the write gate', () => {
     const prefix = await poll('login-prefix', 'fix: other (#99)\n\nCo-authored-by: meow <meow@users.noreply.github.com>');
     expect(prefix.code, prefix.text).toBe(0);
     expect(prefix.text).not.toContain('absorbed:');
+  });
+
+  test("a topic whose state belongs to another PR is poll's precondition exit 30, and the write gate refuses", async () => {
+    // topicFor folds `pr/w` and `w` together: a fork PR me/gw `w` and the upstream PR acme/gw `pr/w` share a topic dir.
+    const t = topology('foreign-state', null);
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') };
+    writeState(prStateDir({ cwd: t.clone, topic: 'w', env }), {
+      v: 1, topic: 'w', repo: 'me/gw', number: 3, headRef: 'w', headOwner: 'me', headRemote: null, upstreamRemote: null, defaultBranch: 'main',
+      focused: null, validation: null, bodyStaleSince: null, lastPublishedBodySha256: null, signals: { latched: [], acked: [] }, audit: null,
+    });
+    const gh = fakeGh(t, {});
+    const out: string[] = [];
+    expect(await watchMain(['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone], { gh, env, out: l => out.push(l) }), out.join('\n')).toBe(30);
+    expect(out[0]).toMatch(/^RESULT ERROR .*belongs to/);
+    const gate = pollForWrite({ gh, git: defaultGit, env, now: () => new Date(), out: () => {} }, 'acme/gw', 7, t.clone);
+    expect(gate.ok).toBe(false);
+    expect(gate.reason).toContain('belongs to');
   });
 
   test('an endpoint that does not answer is UNVERIFIED, never quiet', async () => {

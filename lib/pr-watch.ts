@@ -333,9 +333,14 @@ function ghJson<T>(d: WatchDeps, args: string[], what: string): T {
 
 class UnverifiedError extends Error {}
 
-/** A read that did not answer: UNVERIFIED. A busy PR lock (45) is not one; it propagates. */
+/**
+ * A read that did not answer: UNVERIFIED. Two PrContextErrors are not
+ * reads and propagate with their own code: a busy PR lock (45), and a
+ * topic state that belongs to another PR (30, readStateFor), which no
+ * retry fixes and which the usage text documents as 30.
+ */
 const unverifiable = (error: unknown): boolean =>
-  error instanceof UnverifiedError || (error instanceof PrContextError && error.code !== 45);
+  error instanceof UnverifiedError || (error instanceof PrContextError && error.code !== 45 && error.code !== 30);
 
 const PAGE_SIZE = 100;
 const MAX_PAGES = 30;
@@ -539,7 +544,14 @@ export function poll(d: WatchDeps, repo: string, n: number, cwd: string): PollRe
 
 /** For writers: refuse unless a fresh poll answered on every endpoint, the PR is open, and nothing waits for the owner. */
 export function pollForWrite(d: WatchDeps, repo: string, n: number, cwd: string): { ok: boolean; reason: string } {
-  const r = poll(d, repo, n, cwd);
+  let r: PollResult;
+  try {
+    r = poll(d, repo, n, cwd);
+  } catch (error) {
+    // Another PR's state in this topic: a refusal with its reason, as before. A busy lock (45) still throws.
+    if (error instanceof PrContextError && error.code === 30) return { ok: false, reason: error.message };
+    throw error;
+  }
   if (r.code === WATCH_EXIT.UNVERIFIED) return { ok: false, reason: `watch could not verify the PR (${r.error ?? 'unknown'})` };
   if (r.state !== 'open') return { ok: false, reason: `PR #${n} is ${r.state}` };
   if (r.unacked.length) return { ok: false, reason: `unacknowledged ${r.unacked.map(s => `${s.level} ${s.kind} [${s.id}]`).join(', ')}` };
