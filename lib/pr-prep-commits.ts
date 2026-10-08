@@ -278,6 +278,11 @@ export const COMMITS_USAGE = `gstack-pr-prep-commits <list|stamp|self|paths> [op
   self    drop this branch's own open PR from a candidate list on stdin
   paths   print the default persistent report path for this branch
 
+list prints \`RESULT OK <n> to audit, <m> skipped\` and then the JSON;
+stamp prints \`RESULT OK <worst> <out>\` and then the \`PR_PREP_REPORT:\`
+line. self and paths print only their data (it is redirected to a file
+or read as a path). Any failure prints \`RESULT USAGE|ERROR <why>\`.
+
 Exit codes: 0 ok, 1 git failure, 2 usage or a malformed report.`;
 
 export async function commitsMain(argv: string[], deps: { git?: GitRunner; out?: (l: string) => void; stdin?: () => string; env?: NodeJS.ProcessEnv; now?: () => Date } = {}): Promise<number> {
@@ -328,6 +333,7 @@ export async function commitsMain(argv: string[], deps: { git?: GitRunner; out?:
         sha: c.sha, subject: c.subject, files: c.files, patchId: c.patchId, mode: c.mode, since: c.since,
         qualifier: searchQualifier(c), prior: c.prior ? { bucket: worstOf([c.prior.bucket]) } : null,
       }));
+      out(`RESULT OK ${audit.length} to audit, ${list.skipped.length} skipped`);
       out(JSON.stringify({ ...list, audit }, null, 2));
       return 0;
     }
@@ -337,6 +343,7 @@ export async function commitsMain(argv: string[], deps: { git?: GitRunner; out?:
       const text = JSON.stringify(report) + '\n';
       writeAtomic(flags.out, text);
       writeAtomic(flags.persist ?? persistDefault(), text);
+      out(`RESULT OK ${String(report.worst)} ${flags.out}`);
       out(`PR_PREP_REPORT: ${flags.out} (${String(report.worst)})`);
       return 0;
     }
