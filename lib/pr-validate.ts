@@ -31,7 +31,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  PrContextError, RELEASE_FILES, defaultGh, defaultGit, parsePrRefFor, upstreamRepoFromGh, remoteForRepo,
+  PrContextError, RELEASE_FILES, envelope, defaultGh, defaultGit, parsePrRefFor, upstreamRepoFromGh, remoteForRepo,
   pinBranch, readPr, topicFor, prStateDir, readStateFor, writeState, withPrLock,
   type GhResult, type GhRunner, type GitRunner, type PrInfo, type PrState,
 } from './pr-context';
@@ -82,7 +82,8 @@ Options:
   --accept-full-risk    a FULL trigger does not by itself make the run red;
                         the recorded summary says the full suite was waived
 
-First line of output: RESULT <WORD> ...`;
+First line of stdout: RESULT <WORD> ... (run prints the upstream range
+of a staged sync on stderr before executing it).`;
 
 // ── environment ─────────────────────────────────────────────────────────────
 
@@ -342,6 +343,8 @@ export const defaultTool: ToolRunner = (cmd, args, opts) => {
 export interface ValidateDeps {
   gh: GhRunner; git: GitRunner; tool: ToolRunner; env: NodeJS.ProcessEnv; now: () => Date;
   out: (line: string) => void; which: (cmd: string) => boolean;
+  /** Progress that must not displace stdout's RESULT first line (the upstream range). */
+  err: (line: string) => void;
   /** Free test files of a tree; default scripts/test-free-shards.ts collectFreeTestFiles. */
   universe: (root: string) => string[];
   /** Where per-run TMPDIRs are made; the macOS named regressions re-run on it unresolved. */
@@ -366,6 +369,7 @@ export function systemTempDir(): string {
 const realDeps = (): ValidateDeps => ({
   gh: defaultGh, git: defaultGit, tool: defaultTool, env: process.env, now: () => new Date(),
   out: l => process.stdout.write(l + '\n'),
+  err: l => process.stderr.write(l + '\n'),
   which: cmd => spawnSync('/bin/sh', ['-c', `command -v ${cmd}`], { timeout: 10_000 }).status === 0,
   universe: root => collectFreeTestFiles(root),
   tempRoot: systemTempDir,
@@ -561,11 +565,13 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   const tool = (cmd: string, args: string[], timeoutMs?: number, input?: string) => d.tool(cmd, args, { cwd: c.tree, env, timeoutMs, input });
 
   // What runs is upstream code: say which range before executing any of it.
+  // On stderr, so stdout's first line stays RESULT; the subjects are
+  // contributors' PR titles, so they are enveloped as untrusted data.
   if (c.stagedH0) {
     const mb0 = gitOk(d, c.tree, ['merge-base', c.stagedH0, c.base], 'git merge-base').trim();
     const range = gitOk(d, c.tree, ['log', '--oneline', '--no-merges', `${mb0}..${c.base}`], 'git log').split('\n').filter(Boolean);
-    d.out(`UPSTREAM_RANGE ${mb0.slice(0, 12)}..${c.base.slice(0, 12)} ${range.length} commit(s) about to run locally`);
-    for (const r of range.slice(0, 20)) d.out(`  ${r}`);
+    d.err(`UPSTREAM_RANGE ${mb0.slice(0, 12)}..${c.base.slice(0, 12)} ${range.length} commit(s) about to run locally`);
+    if (range.length) d.err(envelope(range.slice(0, 20).join('\n'), 'upstream-range'));
   }
 
   const workflow = showBase(c, '.github/workflows/free-tests.yml');
