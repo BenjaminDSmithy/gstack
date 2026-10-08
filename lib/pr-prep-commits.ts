@@ -74,7 +74,7 @@ export type Mode = 'NEW' | 'CARRY' | 'RECHECK';
  */
 const RECHECK_BUCKETS: ReadonlySet<string> = new Set(['UNVERIFIED', 'EXACT_DUP']);
 export interface AuditCommit { sha: string; subject: string; files: string[]; patchId: string; mode: Mode; since: string | null; prior: PriorEntry | null }
-export interface CommitList { base: string; head: string; floor?: Bucket | null; audit: AuditCommit[]; skipped: { sha: string; subject: string; reason: 'release-only' | 'empty' }[] }
+export interface CommitList { base: string; head: string; floor?: Bucket | null; priorAt?: string | null; audit: AuditCommit[]; skipped: { sha: string; subject: string; reason: 'release-only' | 'empty' }[] }
 
 /**
  * The part of the last report's `worst` that no audited commit carries, or
@@ -141,6 +141,13 @@ function dedupeHits(hits: unknown[]): unknown[] {
   });
 }
 
+/** A carried hit with the time it was last seen; a `seen_at` it already has wins. */
+function seenAt(h: unknown, at: string | null): unknown {
+  if (!h || typeof h !== 'object' || Array.isArray(h)) return h;
+  const had = (h as { seen_at?: unknown }).seen_at;
+  return { ...h, seen_at: typeof had === 'string' && had ? had : at };
+}
+
 function maxScore(scores: unknown[]): number {
   const n = scores.filter((x): x is number => typeof x === 'number' && Number.isFinite(x));
   return n.length ? Math.max(...n) : 0;
@@ -178,7 +185,8 @@ export function listAuditCommits(g: GitRunner, cwd: string, base: string, prior:
   const shas = git(g, cwd, ['rev-list', '--no-merges', '--reverse', `${baseSha}..${head}`]).split('\n').filter(Boolean);
   const index = priorIndex(prior);
   const floor = priorFloor(prior);
-  const out: CommitList = { base: baseSha, head, floor, audit: [], skipped: [] };
+  const at = typeof prior?.generated_at === 'string' && Number.isFinite(Date.parse(prior.generated_at)) ? new Date(prior.generated_at).toISOString() : null;
+  const out: CommitList = { base: baseSha, head, floor, priorAt: at, audit: [], skipped: [] };
   for (const sha of shas) {
     const subject = git(g, cwd, ['log', '-1', '--format=%s', sha]).trim();
     const files = git(g, cwd, ['diff-tree', '--no-commit-id', '--name-only', '-r', '--root', sha]).split('\n').filter(Boolean);
@@ -264,7 +272,10 @@ export function stampReport(agent: unknown, list: CommitList, now: Date, opts: {
     const carried = c.prior && (verified || keepsDup) ? c.prior : null;
     if (carried) bucket = worstOf([bucket, carried.bucket]);
     // The delta search's hits come first, so a re-found item keeps its newest state.
-    const hits = dedupeHits([...got.flatMap(r => (Array.isArray(r.hits) ? r.hits : [])), ...(carried && Array.isArray(carried.hits) ? carried.hits : [])]);
+    // A carried hit was not re-found, so its state is as of the search that
+    // found it: a PR closed unmerged since then matches no delta search.
+    const old = (carried && Array.isArray(carried.hits) ? carried.hits : []).map(h => seenAt(h, list.priorAt ?? null));
+    const hits = dedupeHits([...got.flatMap(r => (Array.isArray(r.hits) ? r.hits : [])), ...old]);
     return { sha: c.sha, subject: c.subject, bucket, mode: c.mode, topScore: maxScore([...got.map(r => r.topScore), carried?.topScore]), hits };
   });
   const skipped = list.skipped.map(s => {

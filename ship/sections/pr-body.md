@@ -80,6 +80,7 @@ Render the matches as ONE collapsed block, one line per hit:
   <details><summary>Upstream context: U UNVERIFIED, N OVERLAP, M SIBLING</summary>
 
   - `<sha7>` <subject> — <BUCKET>: <ref> "<title>" (<state>)
+  - a hit with `seen_at` was carried from an earlier audit, not found again: write `(<state> as of <seen_at date>)`
   - an UNVERIFIED commit has no hits: give the reason the search did not run
 
   </details>
