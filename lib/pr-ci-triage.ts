@@ -21,7 +21,8 @@
  * and gets the blame protocol instead. The onset scan is disclosure only:
  * these flakes appear on other branches at a background rate, so "it also
  * happened elsewhere" never clears a run. This helper never commits or
- * pushes; the commit goes through gstack-pr-sync's push path.
+ * pushes; with the owner's yes, `gstack-pr-sync retrigger` builds and
+ * pushes the commit from the drafted message.
  */
 
 import fs from 'node:fs';
@@ -252,6 +253,9 @@ function download(d: TriageDeps, repo: string, run: number, name: string): strin
 
 const RUN_FIELDS = 'databaseId,headSha,headBranch,event,conclusion,createdAt,status';
 
+/** A path as one shell word (single-quoted unless plainly safe). */
+const shq = (s: string): string => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
+
 /** A GitHub enum value (status, conclusion) as printable text: anything else is dropped. */
 const word = (v: string | undefined): string => (v && /^[a-z_]{1,32}$/.test(v) ? v : '');
 
@@ -370,7 +374,7 @@ function cmdRun(d: TriageDeps, f: Flags): number {
   const file = path.join(dir, `ci-retrigger-${runId}.txt`);
   fs.writeFileSync(file, draftMessage({ run: runId, head: pr.headOid, shards: triaged }), { mode: 0o600 });
   d.out(`RESULT DRAFTED run=${runId} message=${file}`);
-  d.out('NEXT with the owner\'s yes: `git commit --allow-empty -F <message>` on the PR branch (add the repo\'s trailer), then push it the same way a sync push goes (fast-forward, receipted), then publish the PR body (its facts name the new head)');
+  d.out(`NEXT with the owner's yes in this turn: gstack-pr-sync retrigger --pr ${pr.number} --repo ${repo} --cwd ${shq(f.cwd)} --message ${shq(file)} --yes (it builds and pushes the empty commit; never commit or push by hand), then gstack-pr-body publish (its facts name the new head)`);
   return TRIAGE_EXIT.DRAFTED;
 }
 

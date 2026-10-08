@@ -193,6 +193,12 @@ describe('run', () => {
     expect(path.dirname(file)).toBe(prStateDir({ cwd: repoDir, topic: topicFor('pr/t'), env: r.env }));
     expect(r.calls.some(c => c.includes('rerun') || c[1] === 'edit' || c[1] === 'comment')).toBe(false);
     expect(spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8', timeout: 10_000 }).stdout.trim()).toBe(head);
+    // the next step is the gated retrigger with this file, never a hand-made commit or push
+    const next = r.out.find(l => l.startsWith('NEXT')) ?? '';
+    expect(next).toContain('gstack-pr-sync retrigger');
+    expect(next).toContain(`--message ${file}`);
+    expect(next).toContain('--yes');
+    expect(next).not.toMatch(/git (commit|push)/);
   });
 
   test('a run on an older head, or one with a newer run on the head, gets no draft', async () => {
