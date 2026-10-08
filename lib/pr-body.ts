@@ -358,9 +358,16 @@ export function collectFacts(c: Ctx): Facts {
     codeSha = parent;
   }
   const mb = gitOut(c, ['merge-base', head, base]).trim();
+  // A merge of the base branch: its merged parent is in the pinned base's
+  // history. A merge of a side branch is not one, whatever it carries.
+  const inBase = (sha: string) => {
+    const r = d.git(['merge-base', '--is-ancestor', sha, base], { cwd: c.f.cwd });
+    if (r.status === 0 || r.status === 1) return r.status === 0;
+    throw new PrContextError(`git merge-base --is-ancestor failed: ${(r.error ?? r.stderr).trim().split('\n').at(-1)}`, 1);
+  };
   const merges = gitOut(c, ['rev-list', '--first-parent', '--merges', '--parents', `${base}..${head}`]).split('\n').filter(Boolean).reverse()
     .map(line => line.split(' ')[2])
-    .filter((p): p is string => !!p)
+    .filter((p): p is string => !!p && inBase(p))
     .map(p => ({ upstream: p, version: show(p, 'VERSION'), pr: prNum(gitOut(c, ['log', '-1', '--format=%s', p]).trim()) }));
   const exclude = RELEASE_FILES.map(f => `:(exclude)${f}`);
   const stat = gitOut(c, ['diff', '--numstat', mb, head, '--', '.', ...exclude]).split('\n').filter(Boolean);
