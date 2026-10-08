@@ -267,6 +267,21 @@ describe('CLI', () => {
     expect(fs.statSync(persisted).mode & 0o777).toBe(0o600);
   });
 
+  test('a failed persistent copy keeps the /ship report and its verdict, and says so', async () => {
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(ROOT, 'home-persist') };
+    const blocker = path.join(ROOT, 'blocker');
+    fs.writeFileSync(blocker, 'a regular file where a directory should be\n');
+    const agent = path.join(ROOT, 'agent-persist.json');
+    fs.writeFileSync(agent, JSON.stringify({ summary: 's', commits: [{ sha: sha.c1, bucket: 'EXACT_DUP' }, { sha: sha.c4, bucket: 'CLEAN' }] }));
+    const ship = path.join(ROOT, 'ship-persist.json');
+    const lines: string[] = [];
+    const code = await commitsMain(['stamp', '--base', base, '--report', agent, '--out', ship, '--persist', path.join(blocker, 'sub', 'audit.json'), '--cwd', repo], { out: l => lines.push(l), env });
+    expect(code).toBe(0);
+    expect(lines.slice(0, 2)).toEqual([`RESULT OK EXACT_DUP ${ship}`, `PR_PREP_REPORT: ${ship} (EXACT_DUP)`]);
+    expect(lines[2]).toMatch(/^WARN /);
+    expect(JSON.parse(fs.readFileSync(ship, 'utf8')).worst).toBe('EXACT_DUP');
+  });
+
   test('stamp writes the /ship report and the persistent copy; the next list carries from it; each prints RESULT first', async () => {
     const env = { ...process.env, GSTACK_STATE_ROOT: path.join(ROOT, 'home') };
     let out: string[] = [];

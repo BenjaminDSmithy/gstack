@@ -280,7 +280,9 @@ export const COMMITS_USAGE = `gstack-pr-prep-commits <list|stamp|self|paths> [op
           skipped commits and the report's own worst, mark unreported
           commits UNVERIFIED, refuse a row that names no listed or skipped
           commit by 7+ hex characters; stamp head, base_sha, generated_at
-          and audited patch-ids; write --out (and --persist) atomically
+          and audited patch-ids; write --out, then --persist (the next
+          list's prior), atomically; a failed --persist is a WARN line,
+          never a failed stamp
   self    drop this branch's own open PR from a candidate list on stdin
   paths   print the default persistent report path for this branch
 
@@ -347,10 +349,19 @@ export async function commitsMain(argv: string[], deps: { git?: GitRunner; out?:
       if (!flags.report || !flags.out) throw new PrContextError('stamp needs --report and --out', 2);
       const report = stampReport(readJson(flags.report), list, (deps.now ?? (() => new Date()))());
       const text = JSON.stringify(report) + '\n';
+      // The /ship report first: it is what the gate reads. The persistent
+      // copy only feeds the next run's carry, so its failure must not make
+      // the helper (and the template) call a valid report "not written".
       writeAtomic(flags.out, text);
-      writeAtomic(flags.persist ?? persistDefault(), text);
+      let warn: string | null = null;
+      try {
+        writeAtomic(flags.persist ?? persistDefault(), text);
+      } catch (error) {
+        warn = `WARN the persistent copy was not written (${(error as Error).message.split('\n')[0]}): the next list carries from the older copy, if any, and audits the rest in full`;
+      }
       out(`RESULT OK ${String(report.worst)} ${flags.out}`);
       out(`PR_PREP_REPORT: ${flags.out} (${String(report.worst)})`);
+      if (warn) out(warn);
       return 0;
     }
     throw new PrContextError(`unknown subcommand ${JSON.stringify(sub)}`, 2);
