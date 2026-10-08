@@ -22,7 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   syncMain, parseMergeTree, classifyConflicts, changelogBlock, rebuildChangelog, renameBlockHeading,
-  qualifyQueue, pickVersion, cmpVersion, readStagedSync, type SyncDeps,
+  qualifyQueue, pickVersion, cmpVersion, readStagedSync, classifyPush, type SyncDeps,
 } from '../lib/pr-sync';
 import { prStateDir, topicFor, readStateFor, writeState, type GhRunner, type PrState } from '../lib/pr-context';
 import { listReceipts } from '../lib/egress-receipt';
@@ -279,6 +279,21 @@ describe('pure helpers', () => {
     }
   });
 
+  test('classifyPush reads git push --porcelain: a hook refusal is 41, a non-fast-forward 40, a server refusal 41', () => {
+    const ref = 'refs/heads/pr/feat';
+    const res = (status: number, stdout: string, stderr: string) => ({ status, stdout, stderr });
+    // git 2.56 output, captured from real pushes.
+    expect(classifyPush(res(0, `To ../bare.git\n \tX:${ref}\t2b349fb..90b238c\nDone\n`, ''), ref)).toMatchObject({ landed: true, code: 0 });
+    expect(classifyPush(res(1, '', "pre-push: BLOCKED - secret\nerror: failed to push some refs to '../bare.git'\n"), ref)).toMatchObject({ landed: false, code: 41 });
+    expect(classifyPush(res(1, `To ../bare.git\n!\tX:${ref}\t[rejected] (non-fast-forward)\nDone\n`, "error: failed to push some refs to '../bare.git'\nhint: Updates were rejected\n"), ref)).toMatchObject({ landed: false, code: 40 });
+    expect(classifyPush(res(1, `To ../bare.git\n!\tX:${ref}\t[remote rejected] (pre-receive hook declined)\nDone\n`, "remote: secret found\nerror: failed to push some refs to '../bare.git'\n"), ref)).toMatchObject({ landed: false, code: 41 });
+    expect(classifyPush(res(1, `To ../bare.git\n!\tX:${ref}\t[remote rejected] (deny updating a hidden ref)\nDone\n`, "error: failed to push some refs to '../bare.git'\n"), ref)).toMatchObject({ landed: false, code: 41 });
+    // Never reached the remote for another reason: a plain failure, not a hook.
+    expect(classifyPush(res(128, '', "fatal: '/nonexistent/x.git' does not appear to be a git repository\nfatal: Could not read from remote repository.\n"), ref)).toMatchObject({ landed: false, code: 1 });
+    // A rejection whose text says "rejected" is not a non-fast-forward unless git's status line says so.
+    expect(classifyPush(res(1, '', "push rejected: secret scan found a token\nerror: failed to push some refs to 'x'\n"), ref).code).toBe(41);
+  });
+
   test('pickVersion keeps ours only when it is above main and unclaimed', () => {
     const q = (claimed: string[]) => ({ version: '1.0.3.0', claimed, reason: '', warnings: [] });
     expect(pickVersion('1.0.2.0', '1.0.1.0', q([]))).toEqual({ version: '1.0.2.0', kept: true });
@@ -484,6 +499,31 @@ describe('push', () => {
     const r = await run(t, ['push', '--yes'], { gh: warned });
     expect(r.code, r.out.join('\n')).toBe(30);
     expect(r.out[0]).toContain('superseded-comment');
+    expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
+  });
+
+  test('a local pre-push hook refusal is exit 41 with the hook\'s own words, for push and retrigger', async () => {
+    const t = topology('p6', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    recordValidation(t, s.sha, 0);
+    // The owner's installed hook prints this shape; git adds only "failed to push some refs".
+    write(t.clone, '.git/hooks/pre-push', '#!/bin/sh\necho "pre-push: BLOCKED — secret-shaped token(s) in pushed range" >&2\necho "intentional override: git push --no-verify" >&2\nexit 1\n', 0o755);
+    const r = await run(t, ['push', '--yes']);
+    expect(r.code, r.out.join('\n')).toBe(41);
+    expect(r.out[0]).toStartWith('RESULT HOOK_REFUSED');
+    expect(r.out.join('\n')).toContain('pre-push: BLOCKED');
+    expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
+    expect(readStagedSync(stateDir(t), pr)?.sha).toBe(s.sha);
+    expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBeNull();
+
+    expect((await run(t, ['abort'])).code).toBe(0);
+    const msg = path.join(t.base, 'ci-msg.txt');
+    fs.writeFileSync(msg, 'ci: re-run CI\n');
+    const rt = await run(t, ['retrigger', '--message', msg, '--yes']);
+    expect(rt.code, rt.out.join('\n')).toBe(41);
+    expect(rt.out.join('\n')).toContain('pre-push: BLOCKED');
     expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
   });
 

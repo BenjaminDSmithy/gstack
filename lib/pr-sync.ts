@@ -28,7 +28,7 @@ import path from 'node:path';
 import {
   PrContextError, RELEASE_FILES, defaultGh, defaultGit, parsePrRefFor, upstreamRepoFromGh,
   remoteForRepo, pinBranch, readPr, viewerLogin, assertWritableIdentity, topicFor, prStateDir,
-  readStateFor, writeState, withPrLock, receiptedSend, requireApproval,
+  readStateFor, writeState, withPrLock, receiptedSend, requireApproval, envelope,
   type GhResult, type GhRunner, type GitRunner, type PrInfo, type PrState,
 } from './pr-context';
 import { pollForWrite } from './pr-watch';
@@ -76,7 +76,8 @@ Exit codes: 0 synced/pushed/ok, 1 error, 2 usage or approval missing,
 10 nothing to do, 20 code conflict (resolve by hand), 21 code diff changed
 (review; push needs --accept-diff-change), 30 precondition, 31 validation
 missing or red for the staged commit, 32 PR body still stale from an earlier
-push, 40 remote moved or not fast-forward, 41 a push hook refused,
+push, 40 remote moved or not fast-forward, 41 a pre-push hook or the
+remote refused the push (stop and report; never --no-verify),
 45 lock busy, 50 a sync is already staged or the local branch has unpushed
 commits, 60 the version queue could not be read (never guessed).`;
 
@@ -206,6 +207,31 @@ export function pickVersion(ours: string, main: string, q: QueueAnswer): { versi
 }
 
 export type ProofVerdict = 'IDENTICAL' | 'CONTEXT-ONLY' | 'CHANGED';
+
+export interface PushOutcome { landed: boolean; code: number; why: string }
+
+/**
+ * `git push --porcelain` for one ref, classified by what git did rather than
+ * by words in its stderr (a hook's own text may say anything). Once git has
+ * talked to the remote it prints a status line per ref: `!` with
+ * `[rejected] (...)` is git's own non-fast-forward refusal (40), and
+ * `[remote rejected] (<reason>)` is the server refusing (a pre-receive hook,
+ * a ruleset, a hidden ref: 41, stop and report). A failure with no status
+ * line, no fatal transport error and git's "failed to push some refs" never
+ * left the machine: a pre-push hook refused it (41, never --no-verify).
+ */
+export function classifyPush(r: GhResult, ref: string): PushOutcome {
+  const row = r.stdout.replace(/\r/g, '').split('\n').map(l => l.split('\t')).find(f => f.length >= 3 && f[1].endsWith(`:${ref}`));
+  const flag = row?.[0];
+  const summary = (row?.[2] ?? '').trim();
+  if (r.status === 0 && flag !== '!') return { landed: true, code: SYNC_EXIT.SYNCED, why: summary };
+  if (flag === '!' && summary.startsWith('[rejected]')) return { landed: false, code: SYNC_EXIT.REMOTE_MOVED, why: 'git refused the push as not a fast-forward: abort and re-sync' };
+  if (flag === '!' && summary.startsWith('[remote rejected]')) return { landed: false, code: SYNC_EXIT.HOOK_REFUSED, why: 'the remote refused the push (its reason is in the git output below): stop and report it (never --no-verify, never force)' };
+  if (!row && r.status !== null && !/^fatal:/m.test(r.stderr) && /failed to push some refs/.test(r.stderr)) {
+    return { landed: false, code: SYNC_EXIT.HOOK_REFUSED, why: 'the local pre-push hook refused the push (its words are below): stop and report it (never --no-verify)' };
+  }
+  return { landed: false, code: SYNC_EXIT.ERROR, why: `git push failed (exit ${r.status ?? 'none'}${r.error ? `, ${r.error}` : ''}); git's output is below` };
+}
 
 // ── runners ─────────────────────────────────────────────────────────────────
 
@@ -785,6 +811,30 @@ function commitMessage(c: Ctx, p: Pinned, x: { upToDate: boolean; conflicts: str
 
 // ── push / abort / status ───────────────────────────────────────────────────
 
+/** A refusal whose evidence (git's own output, enveloped) prints after the RESULT line. */
+export class SyncError extends PrContextError {
+  detail: string[];
+  constructor(message: string, code: number, detail: string[]) {
+    super(message, code);
+    this.detail = detail;
+  }
+}
+
+/**
+ * The one push both writes make: `<sha>` to the PR head ref, fast-forward
+ * only, receipted, classified by classifyPush. On a refusal it throws with
+ * git's whole output (the hook's or the server's reason) as untrusted data.
+ */
+function pushOrThrow(c: Ctx, cwd: string, sha: string, payloadClass: string): void {
+  const ref = `refs/heads/${c.pr.headRef}`;
+  const r = receiptedSend({ host: 'github.com', payloadClass, consent: 'user ran /pr-prep', env: c.d.env }, () =>
+    c.d.git(['push', '--porcelain', c.headRemote, `${sha}:${ref}`], { cwd, timeoutMs: 300_000 }));
+  const o = classifyPush(r, ref);
+  if (o.landed) return;
+  const said = [r.stderr, r.stdout, r.error ?? ''].map(x => x.trim()).filter(Boolean).join('\n');
+  throw new SyncError(o.why, o.code, said ? [envelope(said, `git push ${c.headRemote} (${payloadClass})`)] : []);
+}
+
 function cmdPush(c: Ctx): number {
   const { d } = c;
   requireApproval(c.f.argv, { valueFlags: VALUE_FLAGS });
@@ -807,14 +857,7 @@ function cmdPush(c: Ctx): number {
     if (parent !== staged.h0) throw new PrContextError('the staged commit is not one commit on top of the PR head', SYNC_EXIT.PRECONDITION);
     const now = pinBranch(d.git, c.cwd, c.headRemote, c.pr.headRef).sha;
     if (now !== staged.h0) throw new PrContextError(`${c.headRemote}/${c.pr.headRef} moved to ${now.slice(0, 12)}; abort and re-sync`, SYNC_EXIT.REMOTE_MOVED);
-    const r = receiptedSend({ host: 'github.com', payloadClass: 'pr-sync-push', consent: 'user ran /pr-prep', env: d.env }, () =>
-      d.git(['push', c.headRemote, `${staged.sha}:refs/heads/${c.pr.headRef}`], { cwd: staged.scratch, timeoutMs: 300_000 }));
-    if (r.status !== 0) {
-      const text = `${r.error ?? ''}\n${r.stderr}`;
-      if (/hook declined|pre-push hook|pre-receive hook declined/i.test(text)) throw new PrContextError('a push hook refused the sync: stop and report it (never --no-verify)', SYNC_EXIT.HOOK_REFUSED);
-      if (/non-fast-forward|fetch first|rejected/i.test(text)) throw new PrContextError('the push was not a fast-forward: abort and re-sync', SYNC_EXIT.REMOTE_MOVED);
-      throw new PrContextError(`git push failed: ${text.trim().split('\n').at(-1)}`, 1);
-    }
+    pushOrThrow(c, staged.scratch, staged.sha, 'pr-sync-push');
     let seen = '';
     for (let i = 0; i < 5; i++) {
       seen = readPr(d.gh, c.repo, c.pr.number).headOid;
@@ -860,14 +903,7 @@ function cmdRetrigger(c: Ctx): number {
     const tree = gitOk(d, c.cwd, ['rev-parse', `${h0}^{tree}`], 'git rev-parse').trim();
     const sha = gitOk(d, c.cwd, ['commit-tree', tree, '-p', h0, '-F', '-'], 'git commit-tree', { input: msg }).trim();
     if (pinBranch(d.git, c.cwd, c.headRemote, c.pr.headRef).sha !== h0) throw new PrContextError('the remote head moved', SYNC_EXIT.REMOTE_MOVED);
-    const r = receiptedSend({ host: 'github.com', payloadClass: 'pr-ci-retrigger-push', consent: 'user ran /pr-prep', env: d.env }, () =>
-      d.git(['push', c.headRemote, `${sha}:refs/heads/${c.pr.headRef}`], { cwd: c.cwd, timeoutMs: 300_000 }));
-    if (r.status !== 0) {
-      const text = `${r.error ?? ''}\n${r.stderr}`;
-      if (/hook declined|pre-push hook|pre-receive hook declined/i.test(text)) throw new PrContextError('a push hook refused the commit: stop and report it (never --no-verify)', SYNC_EXIT.HOOK_REFUSED);
-      if (/non-fast-forward|fetch first|rejected/i.test(text)) throw new PrContextError('the push was not a fast-forward', SYNC_EXIT.REMOTE_MOVED);
-      throw new PrContextError(`git push failed: ${text.trim().split('\n').at(-1)}`, 1);
-    }
+    pushOrThrow(c, c.cwd, sha, 'pr-ci-retrigger-push');
     const st = readStateFor(c.stateDir, c.pr) ?? freshState(c.pr, { headRemote: c.headRemote, upstreamRemote: c.upRemote });
     writeState(c.stateDir, { ...st, bodyStaleSince: sha });
     const clean = d.git(['status', '--porcelain', '--untracked-files=no'], { cwd: c.cwd });
@@ -924,8 +960,9 @@ export async function syncMain(argv: string[], deps: Partial<SyncDeps> = {}): Pr
     }
   } catch (error) {
     if (error instanceof PrContextError) {
-      const word = error.code === 2 ? 'USAGE' : error.code === 30 ? 'PRECONDITION' : error.code === 40 ? 'REMOTE_MOVED' : 'ERROR';
+      const word = error.code === 2 ? 'USAGE' : error.code === 30 ? 'PRECONDITION' : error.code === 40 ? 'REMOTE_MOVED' : error.code === 41 ? 'HOOK_REFUSED' : 'ERROR';
       d.out(`RESULT ${word} ${error.message}`);
+      if (error instanceof SyncError) for (const line of error.detail) d.out(line);
       return error.code;
     }
     d.out(`RESULT ERROR ${(error as Error).message}`);
