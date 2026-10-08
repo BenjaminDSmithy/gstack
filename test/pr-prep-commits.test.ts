@@ -92,6 +92,8 @@ describe('stampReport', () => {
     expect(() => stampReport({ commits: [] }, l, now)).toThrow();
     expect(worstOf(['CLEAN', 'MAYBE'])).toBe('UNVERIFIED');
     expect(worstOf(['CLEAN', 'SIBLING', 'EXACT_DUP', 'UNVERIFIED'])).toBe('EXACT_DUP');
+    // An unknown bucket ranks as UNVERIFIED; it must not hide a later EXACT_DUP.
+    expect(worstOf(['MAYBE', 'EXACT_DUP'])).toBe('EXACT_DUP');
   });
 });
 

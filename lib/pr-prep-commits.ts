@@ -27,12 +27,12 @@ export const BUCKETS = ['CLEAN', 'SIBLING', 'OVERLAP', 'UNVERIFIED', 'EXACT_DUP'
 export type Bucket = (typeof BUCKETS)[number];
 const rank = (b: string) => BUCKETS.indexOf(b as Bucket);
 
+/** The most severe bucket; an unknown one ranks as UNVERIFIED and the scan goes on. */
 export function worstOf(buckets: readonly string[]): Bucket {
   let w = 0;
   for (const b of buckets) {
     const r = rank(b);
-    if (r < 0) return 'UNVERIFIED';
-    if (r > w) w = r;
+    w = Math.max(w, r < 0 ? rank('UNVERIFIED') : r);
   }
   return BUCKETS[w];
 }
