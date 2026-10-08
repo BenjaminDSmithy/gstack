@@ -452,6 +452,28 @@ describe('poll, ack and the write gate', () => {
     expect(gate.reason).toContain('belongs to');
   });
 
+  test("a new PR from a closed PR's branch never inherits its acks: a maintainer cross-reference is not silenced (30, gate shut)", async () => {
+    // #6 was closed after the owner acknowledged acme's cross-reference from #9; #7 is opened from the same pr/w.
+    const t = topology('successor', null);
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') };
+    writeState(prStateDir({ cwd: t.clone, topic: topicFor('pr/w'), env }), {
+      v: 1, topic: topicFor('pr/w'), repo: 'acme/gw', number: 6, headRef: 'pr/w', headOwner: 'me', headRemote: null, upstreamRemote: null, defaultBranch: 'main',
+      focused: null, validation: null, bodyStaleSince: null, lastPublishedBodySha256: null, audit: null,
+      signals: { latched: [{ id: 'xref:9', level: 'P0', kind: 'maintainer-cross-reference', at: '2026-10-07T00:00:00Z', ref: '#9' }], acked: ['xref:9'] },
+    });
+    const xref9 = {
+      event: 'cross-referenced', actor: { login: 'acme', type: 'User' }, created_at: '2026-10-08T00:00:00Z',
+      source: { issue: { number: 9, user: { login: 'acme' }, author_association: 'OWNER', pull_request: { url: 'https://api.github.com/repos/acme/gw/pulls/9' } } },
+    };
+    const gh = fakeGh(t, { timeline: [xref9] });
+    const out: string[] = [];
+    expect(await watchMain(['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone], { gh, env, out: l => out.push(l) }), out.join('\n')).toBe(30);
+    expect(out[0]).toMatch(/^RESULT ERROR .*#6/);
+    const gate = pollForWrite({ gh, git: defaultGit, env, now: () => new Date(), out: () => {} }, 'acme/gw', 7, t.clone);
+    expect(gate.ok).toBe(false);
+    expect(gate.reason).toContain('#6');
+  });
+
   test('an endpoint that does not answer is UNVERIFIED, never quiet', async () => {
     const t = topology('unverified', null);
     const out: string[] = [];

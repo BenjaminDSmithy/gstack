@@ -38,7 +38,8 @@
  * and gstack-next-version.
  *
  * State identity: a topic dir does not name one PR (topicFor folds feat/x,
- * feat-x and pr/feat-x; the fork's PR and the upstream PR share a head ref).
+ * feat-x and pr/feat-x; the fork's PR and the upstream PR share a head ref;
+ * a PR opened from a closed PR's branch shares everything but its number).
  * Helpers read state through readStateFor(dir, pr), or call assertStateFor
  * after every readState, so one PR never inherits another's validation,
  * latched signals or acks; writeState refuses to replace another PR's state.
@@ -790,32 +791,45 @@ export function readState(dir: string): PrState | null {
   return parsed as PrState;
 }
 
+/** Who a state belongs to: repo and head ref, plus the head owner and the PR number when known. */
+export interface StateIdentity { repo: string; headRef: string; headOwner?: string; number?: number | null }
+
 /**
  * Refuse (code 30) a state that belongs to another PR. A topic dir does not
- * name one PR: topicFor folds feat/x, feat-x and pr/feat-x together, and
- * one checkout can hold the fork's own PR and the upstream PR for the same
- * head ref. So the state's repo must equal `pr.repo` (case-insensitively),
- * its headRef `pr.headRef` exactly, and its headOwner `pr.headOwner`
- * (case-insensitively) when both name one. A PrInfo, or another PrState,
- * serves as `pr`. Helpers read through readStateFor, or call this after
- * every readState, before trusting a latched signal or a validation.
+ * name one PR: topicFor folds feat/x, feat-x and pr/feat-x together, one
+ * checkout can hold the fork's own PR and the upstream PR for the same head
+ * ref, and a PR opened from a closed PR's head branch has the same repo,
+ * head ref and owner. So the state's repo must equal `pr.repo`
+ * (case-insensitively), its headRef `pr.headRef` exactly, its headOwner
+ * `pr.headOwner` (case-insensitively) when both name one, and its number
+ * `pr.number` when both have one: the new PR must never inherit the old
+ * one's acks, latches or validation. A PrInfo, or another PrState, serves
+ * as `pr`. Helpers read through readStateFor, or call this after every
+ * readState, before trusting a latched signal or a validation.
  */
-export function assertStateFor(s: PrState, pr: { repo: string; headRef: string; headOwner?: string }): void {
+export function assertStateFor(s: PrState, pr: StateIdentity): void {
   const sameRepo = s.repo.toLowerCase() === pr.repo.toLowerCase();
   const sameOwner = !s.headOwner || !pr.headOwner || s.headOwner.toLowerCase() === pr.headOwner.toLowerCase();
-  if (sameRepo && s.headRef === pr.headRef && sameOwner) return;
-  const name = (x: { repo: string; headRef: string; headOwner?: string }) =>
-    JSON.stringify(`${x.repo} ${x.headRef}${x.headOwner ? ` (head owner ${x.headOwner})` : ''}`);
+  const sameNumber = s.number === null || pr.number === undefined || pr.number === null || s.number === pr.number;
+  if (sameRepo && s.headRef === pr.headRef && sameOwner && sameNumber) return;
+  const name = (x: StateIdentity) =>
+    JSON.stringify(`${x.repo}${x.number ? ` #${x.number}` : ''} ${x.headRef}${x.headOwner ? ` (head owner ${x.headOwner})` : ''}`);
   throw new PrContextError(
     `the pr-prep state in topic ${JSON.stringify(s.topic)} belongs to ${name(s)}, not to ${name(pr)}; `
-    + 'the two PRs share one topic dir, so move that state aside or set GSTACK_PROJECT_SLUG for one of them', 30);
+    + 'the two PRs share one topic dir (one head ref, or a PR reopened from a closed one\'s branch), so move that state aside or set GSTACK_PROJECT_SLUG for one of them', 30);
 }
 
-/** readState for one PR: null when there is no state yet, code 30 when the state is another PR's (assertStateFor). */
-export function readStateFor(dir: string, pr: { repo: string; headRef: string; headOwner?: string }): PrState | null {
+/**
+ * readState for one PR: null when there is no state yet, code 30 when the
+ * state is another PR's (assertStateFor). A state written before the PR
+ * had a number is adopted by the first PR that reads it with one: it comes
+ * back carrying that number, which the caller's next writeState records.
+ */
+export function readStateFor(dir: string, pr: StateIdentity): PrState | null {
   const s = readState(dir);
-  if (s) assertStateFor(s, pr);
-  return s;
+  if (!s) return null;
+  assertStateFor(s, pr);
+  return s.number === null && typeof pr.number === 'number' ? { ...s, number: pr.number } : s;
 }
 
 /**
