@@ -7,8 +7,8 @@
  *
  *   gstack-pr-body facts   --pr <n|url> [--repo o/r] [--cwd <pr worktree>]
  *   gstack-pr-body render  --pr <n|url> [...] [--template <path>] [--out <path>]
- *   gstack-pr-body publish --pr <n|url> [...] --body <path> --yes
- *                          [--accept-live-diff] [--confirm-redaction <key,...>]
+ *   gstack-pr-body publish --pr <n|url> [...] --body <path> --body-sha256 <hex> --yes
+ *                          [--accept-live-diff <live sha256>] [--confirm-redaction <key,...>]
  *   gstack-pr-body check   --pr <n|url> [...]
  *
  * Volatile facts (head, base, version, merges of the base branch, the
@@ -20,9 +20,12 @@
  * bytes: every `user-attachments/assets/<id>` URL and every ticked
  * checklist line in the live body must also be in the body we send, wherever
  * it sits, or nothing is sent. A live body that changed since our last
- * publish (an owner web edit) needs --accept-live-diff after the owner has
- * seen the enveloped diff. GitHub keeps the last writer: an owner tab left
- * open on the description overwrites whatever is published here.
+ * publish (an owner web edit) needs --accept-live-diff <its sha256> after
+ * the owner has seen the enveloped diff of exactly that live body; the yes
+ * (--yes) is bound to the body's sha256 (--body-sha256), so neither carries
+ * over to bytes the owner did not see. GitHub keeps the last writer: an
+ * owner tab left open on the description overwrites whatever is published
+ * here.
  */
 
 import { createHash } from 'node:crypto';
@@ -52,7 +55,8 @@ The PR description is an owner template plus one regenerated facts block.
             attachment or ticked box, state another PR's version claim, or
             say "the head" outside the facts block
   publish   re-fetch, re-check, redaction-scan the exact bytes, then
-            gh pr edit --body-file (needs --yes); read back and verify
+            gh pr edit --body-file (needs --yes and --body-sha256); read
+            back and verify
   check     liveness: screenshot attached, box 1 ticked, no placeholder,
             every asset URL answers 200
 
@@ -64,12 +68,16 @@ Options:
   --out PATH                rendered body (default: <state>/pr-body-<date>.md)
   --body PATH               the rendered body to publish
   --yes                     the owner approved this publish in this turn
-  --accept-live-diff        the owner saw the live-body diff and accepts replacing it
+  --body-sha256 HEX         the body sha256 (12+ hex, from render's RESULT line)
+                            the owner approved; publish refuses other bytes
+  --accept-live-diff HEX    the live-body sha256 (12+ hex) printed with the diff
+                            the owner saw and accepted; a live body that changed
+                            since gets a new diff and a new sha256
   --confirm-redaction K,..  the owner confirmed each MEDIUM finding key (id@line:col)
 
 Exit codes: 0 ok, 1 error, 2 usage or approval missing, 20 refused (a live
-attachment or ticked box would be lost, a lint rule, or an unaccepted live
-diff), 22 redaction (HIGH, or MEDIUM not confirmed), 30 precondition (PR
+attachment or ticked box would be lost, a lint rule, an unaccepted live
+diff, or a body that is not the approved sha256), 22 redaction (HIGH, or MEDIUM not confirmed), 30 precondition (PR
 not OPEN, pre-write gate), 40 liveness pending (check).`;
 
 export const FACTS_BEGIN = '<!-- pr-prep:facts:begin v1 -->';
@@ -367,12 +375,13 @@ const realDeps = (): BodyDeps => ({
 
 interface Flags {
   sub: string; pr: string | null; repo: string | null; cwd: string; template: string | null; out: string | null;
-  body: string | null; acceptLiveDiff: boolean; confirm: string[]; argv: string[];
+  body: string | null; bodySha: string | null; acceptLiveDiff: string | null; confirm: string[]; argv: string[];
 }
-const VALUE_FLAGS = ['--pr', '--repo', '--cwd', '--template', '--out', '--body', '--confirm-redaction'];
+const VALUE_FLAGS = ['--pr', '--repo', '--cwd', '--template', '--out', '--body', '--body-sha256', '--accept-live-diff', '--confirm-redaction'];
+const SHA_PREFIX_RE = /^[0-9a-f]{12,64}$/;
 
 export function parseBodyArgs(argv: string[]): Flags {
-  const f: Flags = { sub: argv[0] ?? '', pr: null, repo: null, cwd: process.cwd(), template: null, out: null, body: null, acceptLiveDiff: false, confirm: [], argv };
+  const f: Flags = { sub: argv[0] ?? '', pr: null, repo: null, cwd: process.cwd(), template: null, out: null, body: null, bodySha: null, acceptLiveDiff: null, confirm: [], argv };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--') break;
@@ -388,7 +397,12 @@ export function parseBodyArgs(argv: string[]): Flags {
     else if (a === '--out') f.out = path.resolve(val());
     else if (a === '--body') f.body = path.resolve(val());
     else if (a === '--confirm-redaction') f.confirm = val().split(',').map(s => s.trim()).filter(Boolean);
-    else if (a === '--accept-live-diff') f.acceptLiveDiff = true;
+    else if (a === '--body-sha256' || a === '--accept-live-diff') {
+      const v = val().toLowerCase();
+      if (!SHA_PREFIX_RE.test(v)) throw new PrContextError(`${a} needs a sha256 or its first 12+ hex characters`, 2);
+      if (a === '--body-sha256') f.bodySha = v;
+      else f.acceptLiveDiff = v;
+    }
     else if (a === '--yes') { /* requireApproval */ }
     else throw new PrContextError(`unknown option ${a}`, 2);
   }
@@ -638,6 +652,7 @@ function cmdPublish(c: Ctx): number {
   const { d } = c;
   requireApproval(c.f.argv, { valueFlags: VALUE_FLAGS });
   if (!c.f.body || !fs.existsSync(c.f.body)) throw new PrContextError('--body <rendered file> is required', 2);
+  if (!c.f.bodySha) throw new PrContextError('--body-sha256 <the sha256 the owner approved> is required', 2);
   assertWritableIdentity(c.pr, viewerLogin(d.gh));
   // The gate polls gstack-pr-watch, which takes the PR lock itself: run it just before taking the lock.
   const gate = d.preWriteGate({ gh: d.gh, git: d.git, env: d.env, cwd: c.f.cwd, repo: c.repo, number: c.pr.number, state: readStateFor(c.stateDir, c.pr) });
@@ -646,6 +661,10 @@ function cmdPublish(c: Ctx): number {
     const raw = fs.readFileSync(c.f.body!, 'utf8');
     const body = normalizeBody(raw);
     if (body !== raw) throw new PrContextError('the body file is not normalised (render it with gstack-pr-body render)', 2);
+    if (!sha256(body).startsWith(c.f.bodySha!)) {
+      d.out(`RESULT REFUSED the body's sha256 is ${sha256(body).slice(0, 12)}, not the ${c.f.bodySha} the owner approved: show the owner this body and ask again`);
+      return BODY_EXIT.REFUSED;
+    }
     const live = liveBody(c);
     const lost = lostOwnerContent(live, body);
     if (lost.length) {
@@ -664,8 +683,10 @@ function cmdPublish(c: Ctx): number {
       for (const l of lint) d.out(`LINT ${l}`);
       return BODY_EXIT.REFUSED;
     }
-    if (liveChanged(c, live) && !c.f.acceptLiveDiff) {
-      d.out('RESULT REFUSED the live body is not the one we last published (owner edit, or the first publish over a hand-written body): show the owner the diff below, then pass --accept-live-diff');
+    const liveSha = sha256(live);
+    if (liveChanged(c, live) && !(c.f.acceptLiveDiff && liveSha.startsWith(c.f.acceptLiveDiff))) {
+      const again = c.f.acceptLiveDiff ? ' (it changed after the diff the owner accepted)' : '';
+      d.out(`RESULT REFUSED live-sha256=${liveSha.slice(0, 12)} the live body is not the one we last published${again} (an owner or maintainer edit, or the first publish over a hand-written body): show the owner the diff below; on their yes pass --accept-live-diff ${liveSha.slice(0, 12)}`);
       const diff = lineDiff(live, body);
       if (!diff) throw new PrContextError('the live body differs from the outgoing one but their diff is empty', 1);
       d.out(envelope(diff, `pr-${c.pr.number}-live-vs-new`));

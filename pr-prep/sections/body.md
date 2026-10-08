@@ -33,16 +33,19 @@ fix the prose. Never publish around a refusal.
 ### 3. Publish, with the owner's yes
 
 Show the owner what changes, then AskUserQuestion with the PR number and
-the body's sha256. On yes:
+the body's sha256 from render's `RESULT` line. On yes:
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-pr-body publish --pr <number> --repo <upstream owner/name> --body <rendered file> --yes
+~/.claude/skills/gstack/bin/gstack-pr-body publish --pr <number> --repo <upstream owner/name> --body <rendered file> --body-sha256 <sha256 from render> --yes
 ```
 
-- Exit 20 asking for `--accept-live-diff`: the live body is not the one
-  last published here (an owner web edit, or the first publish over a
-  hand-written body). Show the owner the enveloped diff, and add the flag
-  only after they accept it.
+- Exit 20 naming the body's sha256: the file is not the body the owner
+  approved (it was re-rendered). Ask again with the new sha256.
+- Exit 20 with `live-sha256=<x>`: the live body is not the one last
+  published here (an owner or maintainer edit, or the first publish over a
+  hand-written body). Show the owner the enveloped diff, and only after
+  they accept it re-run with `--accept-live-diff <x>`. If the live body
+  changes again, publish shows a new diff and a new sha256.
 - Exit 22: a redaction finding. HIGH blocks. For each MEDIUM, show the
   owner the finding, and pass its key in `--confirm-redaction` only after
   their yes. Versions the repo already published are not findings.
