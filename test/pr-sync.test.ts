@@ -214,7 +214,7 @@ function fakeGh(t: Topo, opts: { state?: string } = {}): GhRunner & { calls: str
 
 function queue(t: Topo, answer: Record<string, unknown>): void {
   const file = path.join(t.base, 'queue.json');
-  fs.writeFileSync(file, JSON.stringify({ offline: false, fallback: null, claimed: [], reason: 'test', warnings: [], ...answer }));
+  fs.writeFileSync(file, JSON.stringify({ host: 'github', offline: false, fallback: null, claimed: [], reason: 'test', warnings: [], ...answer }));
   process.env.FAKE_QUEUE = file;
   process.env.FAKE_QUEUE_LOG = path.join(t.base, 'queue.log');
 }
@@ -276,9 +276,11 @@ describe('pure helpers', () => {
   });
 
   test('qualifyQueue fails closed on every unusable answer (code 60)', () => {
-    const ok = (j: Record<string, unknown>) => ({ status: 0, stdout: JSON.stringify({ version: '1.0.2.0', base_version: '1.0.1.0', offline: false, fallback: null, claimed: [], ...j }), stderr: '' });
+    const ok = (j: Record<string, unknown>) => ({ status: 0, stdout: JSON.stringify({ version: '1.0.2.0', base_version: '1.0.1.0', host: 'github', offline: false, fallback: null, claimed: [], ...j }), stderr: '' });
     expect(qualifyQueue(ok({}), '1.0.1.0').version).toBe('1.0.2.0');
-    for (const bad of [ok({ offline: true }), ok({ fallback: 'git' }), ok({ base_version: '1.0.0.0' }), ok({ version: '1.0.2' }), { status: 2, stdout: '', stderr: 'boom' }, { status: 0, stdout: 'nope', stderr: '' }]) {
+    // host "unknown" (an ssh alias origin, gh logged out) comes back offline:false, fallback:null, claimed:[]: the queue was never read.
+    const unread = { host: 'unknown', warnings: ['host unknown; queue-awareness unavailable', 'host queue unavailable AND git found no claims'] };
+    for (const bad of [ok({ offline: true }), ok({ fallback: 'git' }), ok({ base_version: '1.0.0.0' }), ok({ version: '1.0.2' }), ok(unread), ok({ host: 'gitlab' }), ok({ host: undefined }), ok({ warnings: ['host queue unavailable'] }), { status: 2, stdout: '', stderr: 'boom' }, { status: 0, stdout: 'nope', stderr: '' }]) {
       expect(() => qualifyQueue(bad, '1.0.1.0')).toThrow(expect.objectContaining({ code: 60 }));
     }
   });
