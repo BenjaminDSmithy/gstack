@@ -147,7 +147,7 @@ function release(dir: string, version: string, date: string, note: string): void
 
 interface Topo { base: string; up: string; fork: string; seed: string; clone: string; wt: string }
 
-function topology(name: string, opts: { pr: (d: string) => void; main?: (d: string) => void }): Topo {
+function topology(name: string, opts: { pr: (d: string) => void; main?: (d: string) => void; base?: (d: string) => void }): Topo {
   const base = path.join(ROOT, name);
   const up = path.join(base, 'up', 'acme', 'gstack.git');
   const fork = path.join(base, 'fork', 'me', 'gstack.git');
@@ -160,6 +160,7 @@ function topology(name: string, opts: { pr: (d: string) => void; main?: (d: stri
   fs.mkdirSync(seed, { recursive: true });
   git(seed, 'init', '-q', '-b', 'main');
   seedTree(seed);
+  opts.base?.(seed);
   git(seed, 'add', '-A');
   git(seed, 'commit', '-q', '-m', 'base');
   git(seed, 'push', '-q', up, 'main');
@@ -397,6 +398,34 @@ describe('merge', () => {
     expect(tmpl).toContain('line 2 ours');
     expect(tmpl).toContain('line 5 main');
     expect(git(s.scratch, 'show', 'HEAD:x/SKILL.md') + '\n').toBe(render(tmpl));
+  });
+
+  test('upstream turning a file the PR edits by hand into a generated one is code: a conflict stops (20), a clean merge proves CHANGED (21)', async () => {
+    // y/SKILL.md is hand-written at the base; upstream adds y/SKILL.md.tmpl and renders it.
+    const handWritten = (d: string) => write(d, 'y/SKILL.md', TMPL);
+    const upstreamTemplate = (d: string) => { const m = TMPL.replace('line 2', 'line 2 main'); write(d, 'y/SKILL.md.tmpl', m); write(d, 'y/SKILL.md', render(m)); };
+    const clash = topology('s14', {
+      base: handWritten,
+      pr: d => { write(d, 'y/SKILL.md', TMPL.replace('line 2', 'line 2 OURS')); release(d, '1.0.1.0', '2026-10-02', 'ours'); },
+      main: upstreamTemplate,
+    });
+    queue(clash, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    const plan = await run(clash, ['plan']);
+    expect(plan.code, plan.out.join('\n')).toBe(20);
+    expect(plan.out.join('\n')).toContain('CONFLICT\tcode\ty/SKILL.md');
+    expect((await run(clash, ['merge'])).code).toBe(20);
+
+    // No textual conflict: the merge keeps our line 5, then regeneration from upstream's template drops it.
+    const quiet = topology('s15', {
+      base: handWritten,
+      pr: d => { write(d, 'y/SKILL.md', TMPL.replace('line 5', 'line 5 OURS')); release(d, '1.0.1.0', '2026-10-02', 'ours'); },
+      main: upstreamTemplate,
+    });
+    queue(quiet, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    const r = await run(quiet, ['merge']);
+    expect(r.code, r.out.join('\n')).toBe(21);
+    expect(r.out).toContain('CHANGED\ty/SKILL.md');
+    expect(readStagedSync(stateDir(quiet), pr)?.proof).toBe('CHANGED');
   });
 
   test('preconditions: a VERSION move with no entry, or two entries, stops with 30', async () => {
