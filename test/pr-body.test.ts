@@ -123,6 +123,26 @@ describe('pure helpers', () => {
     expect(lintBody(spliceFacts(TEMPLATE, renderFactsBlock(FACTS)))).toEqual([]);
   });
 
+  test('lint: head phrasings, this PR\'s commit ids in prose, and another PR\'s version beside its number', () => {
+    const sha = `06c53bff1${'a'.repeat(31)}`;
+    const ctx = { shas: [sha], prNumber: 3066, released: ['1.91.29.0'] };
+    for (const l of ['The PR\'s head `06c53bff1` has three merges.', 'Our head passes every shard.', 'Validated at `06c53bff1`: 15/15 green.',
+      'HEAD 06C53BFF1 passes.', '#3033 takes 1.91.30.0, so this PR moves to 1.91.31.0.', 'PR #3033 holds 1.91.30.0.', '| #3033 | 1.91.30.0 | open |']) {
+      expect(lintBody(`${l}\n`, ctx), l).not.toEqual([]);
+    }
+    for (const l of ['The head branch is pr/x.', 'Since #3033 (v1.91.29.0) the resolver retries.', 'This PR ships 1.91.31.0 for #3066.', '```\nHEAD 06c53bff1 15/15\n```']) {
+      expect(lintBody(`${l}\n`, ctx), l).toEqual([]);
+    }
+    expect(lintBody('Validated at `06c53bff1`.\n')).toEqual([]);
+  });
+
+  test('lint reports the body\'s own line numbers below the facts block', () => {
+    const body = spliceFacts(TEMPLATE.replace('- **Changed:** lib/x.ts', 'Our head moved.'), renderFactsBlock(FACTS));
+    const line = body.split('\n').indexOf('Our head moved.') + 1;
+    expect(line).toBeGreaterThan(12);
+    expect(lintBody(body)).toEqual([`line ${line}: says "head" in prose (the facts block owns the head)`]);
+  });
+
   test('a commit id in the facts block is never a phone finding; the same digits in prose still are', () => {
     // About 1 facts block in 50 prints an all-digit 12-hex prefix (measured 39/2000).
     const body = spliceFacts(TEMPLATE.replace('Because.', 'Call 123456789012 now.'), renderFactsBlock({ ...FACTS, head: `123456789012${'a'.repeat(28)}` }));
@@ -277,6 +297,15 @@ describe('facts and render', () => {
     fs.writeFileSync(path.join(g.dir, 'body.tmpl.md'), TEMPLATE);
     expect(await g.call(['render'])).toBe(20);
     expect(g.out.some(l => l.startsWith('LOST attachment') && l.includes('f509953c'))).toBe(true);
+  });
+
+  test('render refuses prose that names one of this PR\'s commits', async () => {
+    const f = fixture('render-sha', TEMPLATE);
+    const code = git(f.clone, 'rev-parse', 'HEAD^');
+    fs.mkdirSync(f.dir, { recursive: true });
+    fs.writeFileSync(path.join(f.dir, 'body.tmpl.md'), TEMPLATE.replace('Because.', `Validated at \`${code.slice(0, 9)}\`: 15/15 green.`));
+    expect(await f.call(['render'])).toBe(20);
+    expect(f.out.some(l => l.startsWith(`LINT line 3: names \`${code.slice(0, 9)}\``))).toBe(true);
   });
 
   test('live ticked lines that would be lost are printed only inside the envelope, control bytes stripped', async () => {

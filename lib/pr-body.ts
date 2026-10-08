@@ -234,13 +234,51 @@ function printOwnerContent(d: BodyDeps, word: 'LOST' | 'VANISHED', items: string
   d.out(envelope(ticks.join('\n'), `pr-${pr}-${word.toLowerCase()}-ticks`));
 }
 
-/** Rules for prose outside the facts block. */
-export function lintBody(body: string): string[] {
+/**
+ * What lint knows about the PR: `shas` are this PR's commits (base..head,
+ * so the head, the code commit and earlier heads), `prNumber` its own
+ * number, `released` the versions the base branch has published.
+ */
+export interface LintCtx { shas?: string[]; prNumber?: number; released?: string[] }
+
+const VERSION4_RE = /\b\d+\.\d+\.\d+\.\d+\b/g;
+const HEAD_PHRASE_RE = /\b(?:the|this|our|its|latest|old|stale|previous|an earlier|earlier|current|new|PR'?s|PR)\s+head\b(?!\s+(?:branch|ref|repo))/i;
+
+/**
+ * Rules for prose outside the facts block, reported at the body's own line
+ * numbers (each block is blanked, not removed):
+ * - a version claim (a claim word beside a 4-part version);
+ * - another PR's number beside a version the base has not released (a
+ *   claim in other words: it goes stale when that PR merges or moves);
+ * - "the head" and its variants;
+ * - a 7-40 hex literal that is a prefix of one of this PR's commits,
+ *   outside a fenced evidence block (the #3032 stale-head defect).
+ */
+export function lintBody(body: string, ctx: LintCtx = {}): string[] {
   const problems: string[] = [];
-  const prose = stripFacts(body).split('\n');
+  const prose = body.replace(FACTS_BLOCK_RE, block => block.replace(/[^\n]/g, '')).split('\n');
+  const shas = (ctx.shas ?? []).map(s => s.toLowerCase());
+  const released = new Set(ctx.released ?? []);
+  let fenced = false;
   prose.forEach((l, i) => {
-    if (/\bclaim(s|ed|ing)?\b/i.test(l) && /\b\d+\.\d+\.\d+\.\d+\b/.test(l)) problems.push(`line ${i + 1}: states a version claim (claims go stale when other PRs merge)`);
-    if (/\b(the|this PR's|previous|an earlier|earlier|current|new) head\b(?! (branch|ref|repo))/i.test(l)) problems.push(`line ${i + 1}: says "head" in prose (the facts block owns the head)`);
+    const at = `line ${i + 1}`;
+    if (/^\s*(```|~~~)/.test(l)) {
+      fenced = !fenced;
+      return;
+    }
+    const versions = l.match(VERSION4_RE) ?? [];
+    const others = [...l.matchAll(/#(\d+)\b/g)].map(m => Number(m[1])).filter(n => n !== ctx.prNumber);
+    if (/\bclaim(s|ed|ing)?\b/i.test(l) && versions.length) problems.push(`${at}: states a version claim (claims go stale when other PRs merge)`);
+    else if (others.length && versions.some(v => !released.has(v))) problems.push(`${at}: names #${others[0]} beside an unreleased version (another PR's version goes stale when it merges)`);
+    if (HEAD_PHRASE_RE.test(l)) problems.push(`${at}: says "head" in prose (the facts block owns the head)`);
+    if (fenced || !shas.length) return;
+    for (const m of l.matchAll(/\b[0-9a-fA-F]{7,40}\b/g)) {
+      const token = m[0].toLowerCase();
+      if (shas.some(s => s.startsWith(token))) {
+        problems.push(`${at}: names \`${m[0]}\`, a commit of this PR, in prose (commit ids move; the facts block owns them)`);
+        break;
+      }
+    }
   });
   return problems;
 }
@@ -515,7 +553,7 @@ function cmdRender(c: Ctx): number {
     slotProblems.push(`the template's facts slot sits in the "## Liveness proof" section, which render takes from the live body to keep the owner's screenshot (${error.message}): move ${FACTS_MARKER} out of that section`);
   }
   const lost = lostOwnerContent(live, body);
-  const lint = lintBody(body);
+  const lint = lintBody(body, lintContext(c, facts.head, facts.baseSha));
   const out = c.f.out ?? path.join(c.stateDir, `pr-body-${today(d)}.md`);
   fs.writeFileSync(out, body, { mode: 0o600 });
   const word = lost.length || lint.length || slotProblems.length ? 'REFUSED' : 'RENDERED';
@@ -565,7 +603,8 @@ function cmdPublish(c: Ctx): number {
       d.out(`RESULT REFUSED the body must hold exactly one facts block; it has ${count(body, FACTS_BEGIN)} (render it with gstack-pr-body render)`);
       return BODY_EXIT.REFUSED;
     }
-    const lint = lintBody(body);
+    const revs = pinnedRevs(c);
+    const lint = lintBody(body, lintContext(c, c.pr.headOid, revs[1] ?? null));
     if (lint.length) {
       for (const l of lint) d.out(`LINT ${l}`);
       d.out('RESULT REFUSED lint');
@@ -577,7 +616,7 @@ function cmdPublish(c: Ctx): number {
       return BODY_EXIT.REFUSED;
     }
     // Scan exactly the bytes that will be sent.
-    const pubv = publishedVersions(gitTexts(c));
+    const pubv = publishedVersions(gitTexts(c, revs));
     const result = scanOutgoing(body, pubv);
     const high = result.findings.filter(f => f.severity === 'HIGH');
     const medium = result.findings.filter(f => f.severity === 'MEDIUM');
@@ -620,10 +659,10 @@ function cmdPublish(c: Ctx): number {
   });
 }
 
-/** VERSION and CHANGELOG at the PR head and the base branch, from git objects only. */
-function gitTexts(c: Ctx): string[] {
+/** VERSION and CHANGELOG at the given revisions, from git objects only. */
+function gitTexts(c: Ctx, revs: string[]): string[] {
   const out: string[] = [];
-  for (const rev of [c.pr.headOid, ...pinnedBase(c)]) {
+  for (const rev of revs) {
     for (const file of ['VERSION', 'CHANGELOG.md']) {
       const r = c.d.git(['show', `${rev}:${file}`], { cwd: c.f.cwd });
       if (r.status === 0) out.push(r.stdout);
@@ -632,9 +671,20 @@ function gitTexts(c: Ctx): string[] {
   return out;
 }
 
-function pinnedBase(c: Ctx): string[] {
+/** The PR head and the pinned base (fetched now), for the published versions and lint. */
+function pinnedRevs(c: Ctx): string[] {
   const up = remoteForRepo(c.d.git, c.f.cwd, c.repo);
-  return up ? [pinBranch(c.d.git, c.f.cwd, up, c.pr.baseRef).sha] : [];
+  return [c.pr.headOid, ...(up ? [pinBranch(c.d.git, c.f.cwd, up, c.pr.baseRef).sha] : [])];
+}
+
+/** This PR's commits (base..head, plus the head itself) and the versions the base has released. */
+function lintContext(c: Ctx, head: string, base: string | null): LintCtx {
+  const shas = new Set([head]);
+  if (base) {
+    const r = c.d.git(['rev-list', `${base}..${head}`], { cwd: c.f.cwd });
+    if (r.status === 0) for (const s of r.stdout.split('\n').filter(Boolean)) shas.add(s);
+  }
+  return { shas: [...shas], prNumber: c.pr.number, released: base ? publishedVersions(gitTexts(c, [base])) : [] };
 }
 
 // ── check ───────────────────────────────────────────────────────────────────
