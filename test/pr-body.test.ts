@@ -141,7 +141,7 @@ function write(dir: string, rel: string, text: string): void {
   fs.writeFileSync(path.join(dir, rel), text);
 }
 
-function fixture(name: string, liveInitial: string, opts: { state?: string; viewer?: string; webEditDropsImages?: boolean; headLag?: boolean } = {}) {
+function fixture(name: string, liveInitial: string, opts: { state?: string; viewer?: string; webEditDropsImages?: boolean; headLag?: boolean; sideMerge?: boolean } = {}) {
   const base = path.join(ROOT, name);
   const up = path.join(base, 'up', 'acme', 'gx.git');
   const fork = path.join(base, 'fork', 'me', 'gx.git');
@@ -159,6 +159,13 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
   write(seed, 'VERSION', '1.0.1.0\n');
   write(seed, 'CHANGELOG.md', '# Changelog\n\n## [1.0.1.0] - 2026-10-02\n\n- ours\n\n## [1.0.0.0] - 2026-10-01\n\n- base\n');
   git(seed, 'add', '-A'); git(seed, 'commit', '-q', '-m', 'feat: x');
+  if (opts.sideMerge) {
+    git(seed, 'checkout', '-q', '-b', 'side');
+    write(seed, 'lib/side.ts', 'export const s = 1;\n');
+    git(seed, 'add', '-A'); git(seed, 'commit', '-q', '-m', 'side work');
+    git(seed, 'checkout', '-q', 'pr/b');
+    git(seed, 'merge', '-q', '--no-ff', '--no-edit', 'side');
+  }
   git(seed, 'checkout', '-q', 'main');
   write(seed, 'lib/other.ts', 'export {};\n');
   git(seed, 'add', '-A'); git(seed, 'commit', '-q', '-m', 'main moves (#2)');
@@ -216,6 +223,14 @@ describe('facts and render', () => {
     expect(facts).toMatchObject({ version: '1.0.1.0', baseVersion: '1.0.0.0', basePr: '#2', commits: 2 });
     expect(facts.diff.files).toBe(1);
     expect(facts.ci).toEqual({ pass: 1, fail: 1, pending: 0, skipping: 1, error: null });
+  });
+
+  test('only merges that bring in the base branch are listed as merges of it', async () => {
+    const f = fixture('facts-side', TEMPLATE, { sideMerge: true });
+    expect(await f.call(['facts'])).toBe(0);
+    const facts = JSON.parse(fs.readFileSync(path.join(f.dir, 'facts.json'), 'utf8')) as Facts;
+    expect(facts.merges).toHaveLength(1);
+    expect(facts.merges[0]).toMatchObject({ version: '1.0.0.0', pr: '#2' });
   });
 
   test('CI is not read for a head GitHub has not caught up with', async () => {
