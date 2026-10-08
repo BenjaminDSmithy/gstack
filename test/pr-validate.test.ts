@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { validationEnv, selectTests, judgeBunRun, bunPinFrom, macosNamedFrom, validateMain, defaultTool, bunfigPreload, writeCiGitConfig, shellcheckTargetsFrom, type ValidateDeps, type ToolRunner } from '../lib/pr-validate';
+import { validationEnv, selectTests, uncoveredCode, judgeBunRun, bunPinFrom, macosNamedFrom, validateMain, defaultTool, bunfigPreload, writeCiGitConfig, shellcheckTargetsFrom, type ValidateDeps, type ToolRunner } from '../lib/pr-validate';
 import { prStateDir, topicFor, readStateFor, type GhRunner } from '../lib/pr-context';
 
 setDefaultTimeout(180_000);
@@ -136,6 +136,16 @@ describe('selectTests', () => {
     expect(fx['test/d.test.ts']).toEqual(['names:test/fixtures/pr/one.json', 'names:test/fixtures/pr/two.json']);
     // browse/test/e.test.ts names its own browse/test/fixtures/pr/one.json, not test/'s.
     expect(fx['browse/test/e.test.ts']).toBeUndefined();
+  });
+
+  test('coverage: the skill-rendering tests cover a template; code, test and release tripwires never cover', () => {
+    const changed = ['x/SKILL.md.tmpl', 'bin/gstack-thing', 'test/helpers/walk.ts', 'lib/foo.ts', 'test/helpers/unused.ts'];
+    const s = sel(changed);
+    expect(uncoveredCode(changed, s, () => true)).toEqual(['test/helpers/unused.ts']);
+    // test/b.test.ts names the bin; without its pass, egress wiring's class:code pass covers nothing.
+    expect(s.files.find(f => f.file === 'test/egress-receipt-wiring.test.ts')!.rules).toContain('class:code(bin/gstack-thing)');
+    expect(uncoveredCode(changed, s, f => f !== 'test/b.test.ts')).toEqual(['bin/gstack-thing', 'test/helpers/unused.ts']);
+    expect(uncoveredCode(changed, sel(changed, { declared: ['test/a.test.ts'] }), () => true)).toEqual([]);
   });
 
   test('a path named in a test source selects it; release files never do', () => {
@@ -356,6 +366,34 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(d.out.some(l => l.startsWith('NO_TESTS'))).toBe(false);
   });
 
+  test('coverage is per changed file: a passing class tripwire never covers code, an import or a declared test does', async () => {
+    // A tripwire that passes, as test/egress-receipt-wiring.test.ts does for nearly every change.
+    const wiring = { 'test/egress-receipt-wiring.test.ts': "import { test, expect } from 'bun:test';\ntest('wired', () => expect(1).toBe(1));\n" };
+    const universe = ['test/x.test.ts', 'test/z.test.ts', 'test/egress-receipt-wiring.test.ts'];
+    const f = fixture('class-only', null, { universe, base: wiring, pr: { 'lib/orphan.ts': 'export const o = 1 / 0;\n' } });
+    expect(await f.call(['select'])).toBe(0);
+    expect(f.out).toContain('SELECT\ttest/egress-receipt-wiring.test.ts\tclass:code(lib/orphan.ts)');
+    expect(f.out.find(l => l.startsWith('NO_TESTS'))).toContain('lib/orphan.ts');
+    f.out.length = 0;
+    expect(await f.call(['run'])).toBe(1);
+    expect(f.out[0]).toMatch(/^RESULT RED .*1\/1 selected files green/);
+    expect(f.out.find(l => l.startsWith('NO_TESTS'))).toContain('lib/orphan.ts');
+    expect(readStateFor(f.dir, pr)!.validation).toMatchObject({ worst: 1 });
+
+    // Two changed modules, one imported by a passing test: only the other is uncovered.
+    const two = fixture('class-and-import', "test('x', () => expect(y).toBe(2));", { universe, base: wiring, pr: { 'lib/y.ts': 'export const y = 2;\n', 'lib/orphan.ts': 'export const o = 1;\n' } });
+    expect(await two.call(['run'])).toBe(1);
+    const line = two.out.find(l => l.startsWith('NO_TESTS'))!;
+    expect(line).toContain('lib/orphan.ts');
+    expect(line).not.toContain('lib/y.ts');
+
+    // The owner declares the test that covers the orphan: green.
+    expect(await f.call(['declare', 'test/z.test.ts'])).toBe(0);
+    f.out.length = 0;
+    expect(await f.call(['run'])).toBe(0);
+    expect(f.out.some(l => l.startsWith('NO_TESTS'))).toBe(false);
+  });
+
   test('a rename selects the tests that still import the old path', async () => {
     const f = fixture('rename', null, { pr: { 'lib/y.ts': null, 'lib/w.ts': 'export const y = 1;\n' } });
     expect(await f.call(['select'])).toBe(0);
@@ -464,7 +502,8 @@ describe('run, select and declare against a fixture PR tree', () => {
   test('the shellcheck mirror covers what CI shellchecks, including the extensionless setup', async () => {
     let tree = '';
     const rec = recorder(() => tree);
-    const f = fixture('shellcheck', "test('x', () => expect(y).toBe(2));", {
+    // x.test.ts names both shell files, so they are covered as well as shellchecked.
+    const f = fixture('shellcheck', "test('x', () => expect(y).toBe(2));\nconst shell = ['setup', 'scripts/x.sh'];", {
       base: { '.github/workflows/quality-gate.yml': "jobs:\n  gate:\n    steps:\n      - name: Install ShellCheck\n        run: shellcheck --version\n      - name: ShellCheck setup and build boundaries\n        run: >-\n          shellcheck --severity=error\n          setup\n          scripts/build.sh\n      - name: Next\n        run: echo done\n", setup: '#!/bin/bash\necho 1\n' },
       pr: { 'lib/y.ts': 'export const y = 2;\n', setup: '#!/bin/bash\necho 2\n', 'scripts/x.sh': '#!/bin/bash\necho x\n' },
       deps: { tool: rec.tool, which: cmd => cmd === 'shellcheck' },
