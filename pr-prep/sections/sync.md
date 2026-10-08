@@ -51,8 +51,9 @@ also fails on the base (run it there too) before you call it pre-existing.
 
 ### 4. Push, with the owner's yes
 
-AskUserQuestion: PR number, `<head remote> <head ref>`, old head -> staged
-SHA, the version change, and the validation summary. On yes:
+AskUserQuestion, with `<gstack-qid:pr-prep-sync-push>` in the question: PR
+number, `<head remote> <head ref>`, old head -> staged SHA, the version
+change, and the validation summary. On yes:
 
 ```bash
 ~/.claude/skills/gstack/bin/gstack-pr-sync push --pr <number> --repo <upstream owner/name> --yes

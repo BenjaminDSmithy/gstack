@@ -7,7 +7,9 @@
  */
 import { describe, test, expect } from 'bun:test';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { between, expectTokens, expectAbsent, expectOrdered, expectMentions } from './helpers/prompt-structure';
 import { getQuestion } from '../scripts/question-registry';
 
@@ -16,6 +18,10 @@ const SKILL = fs.readFileSync(path.join(ROOT, 'pr-prep', 'SKILL.md'), 'utf8');
 const TMPL = fs.readFileSync(path.join(ROOT, 'pr-prep', 'SKILL.md.tmpl'), 'utf8');
 const section = (id: string) => fs.readFileSync(path.join(ROOT, 'pr-prep', 'sections', `${id}.md`), 'utf8');
 const MODES = ['open', 'sync', 'body', 'watch', 'ci', 'liveness'];
+// The section whose AskUserQuestion gates each write, and that write's registered question id.
+const WRITE_QIDS: Record<string, string> = {
+  sync: 'pr-prep-sync-push', body: 'pr-prep-body-publish', ci: 'pr-prep-ci-retrigger-push', open: 'pr-prep-open-pr',
+};
 
 describe('frontmatter', () => {
   test('model-invocable, so /ship Step 1.5 can run the audit through the Skill tool', () => {
@@ -123,4 +129,35 @@ describe('one-way doors', () => {
       expect(getQuestion(id), id).toMatchObject({ skill: 'pr-prep', door_type: 'one-way' });
     }
   });
+
+  test('each write is asked under its registered id, never an ad-hoc one', () => {
+    // The registry protects only a question that carries its id: under an
+    // ad-hoc `{skill}-{slug}` id a stored never-ask auto-decides the push.
+    for (const [mode, id] of Object.entries(WRITE_QIDS)) expectTokens(section(mode), [`<gstack-qid:${id}>`], `${mode} section`);
+    const safety = between(SKILL, '## Write safety (every mode)', '\n---\n');
+    expectTokens(safety, Object.values(WRITE_QIDS), 'Write safety');
+    expectMentions(safety, [['stored', 'preference', 'never']], 'Write safety');
+  });
+
+  test('a stored never-ask cannot auto-decide a registered write; the same question under an ad-hoc id would', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-prep-qpref-'));
+    try {
+      const env = { ...process.env, GSTACK_STATE_ROOT: home, GSTACK_HOME: home };
+      const bin = path.join(ROOT, 'bin', 'gstack-question-preference');
+      const q = (args: string[], input?: string) => spawnSync(bin, args, { cwd: ROOT, env, input, encoding: 'utf8', timeout: 60_000 });
+      expect(q(['--read']).status).toBe(0);
+      const [slug] = fs.readdirSync(path.join(home, 'projects'));
+      // --write refuses never-ask on a one-way id, so plant the file a pre-#2488 write could have left.
+      const adHoc = 'pr-prep-push-confirm';
+      const prefs = Object.fromEntries([...Object.values(WRITE_QIDS), adHoc].map(id => [id, 'never-ask']));
+      fs.writeFileSync(path.join(home, 'projects', slug, 'question-preferences.json'), JSON.stringify(prefs));
+      const summary = 'Push the staged sync to PR 3066 (origin pr/hook-check-gaps, 1a2b3c4 -> 4d5e6f7, version 1.91.35.0)?';
+      for (const id of Object.values(WRITE_QIDS)) {
+        expect(q(['--check', id, '--summary-stdin'], summary).stdout.trim().split('\n')[0], id).toBe('ASK_NORMALLY');
+      }
+      expect(q(['--check', adHoc, '--summary-stdin'], summary).stdout.trim().split('\n')[0]).toBe('AUTO_DECIDE');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  }, 120_000);
 });
