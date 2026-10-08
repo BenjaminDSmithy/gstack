@@ -16,7 +16,8 @@
  *
  * A draft is written ONLY for a CRASH whose signature, exit code, empty
  * failingFiles and clean log all agree, or a HANG whose shard passed on an
- * earlier run of the identical tree. A failure that names a test is REAL
+ * earlier run of the identical tree, and in both cases only when the
+ * runner's own count says the missing summary was the only failure. A failure that names a test is REAL
  * and gets the blame protocol instead. The onset scan is disclosure only:
  * these flakes appear on other branches at a background rate, so "it also
  * happened elsewhere" never clears a run. This helper never commits or
@@ -30,6 +31,7 @@ import {
   PrContextError, defaultGh, defaultGit, parsePrRefFor, upstreamRepoFromGh, remoteForRepo, pinBranch, readPr,
   topicFor, prStateDir, envelope, stripControl, type GhRunner, type GitRunner, type PrInfo,
 } from './pr-context';
+import { classifyBunTestOutputLine, stripAnsiLine } from '../scripts/lib/shard-engine';
 
 export const TRIAGE_EXIT = { DRAFTED: 0, ERROR: 1, USAGE: 2, NO_DRAFT: 10, NOTHING: 11 } as const;
 
@@ -43,9 +45,11 @@ export const TRIAGE_USAGE = `gstack-pr-ci-triage <run|onset> [options]
           only; never clears a run)
 
 A ci: commit message is drafted only for a CRASH whose signature, exit
-code (3 or 9), empty failingFiles and log (no "(fail)" before the abort)
-agree, or a HANG whose shard passed on an earlier run of the same tree,
-and only when the run is for the PR's current head with no newer run.
+code (3 or 9), empty failingFiles and log (no "(fail)" or "✗" line, no
+unhandled error) agree, or a HANG whose shard passed on an earlier run of
+the same tree; in both, the runner must count the missing summary as the
+only unattributed failure. And only when the run is for the PR's current
+head with no newer run.
 
 Exit codes: 0 drafted, 1 error, 2 usage, 10 triaged without a draft
 (REAL, UNKNOWN, a stale run, or evidence missing), 11 nothing failed.`;
@@ -63,11 +67,34 @@ const GLIB_RE = /GLib-ERROR[^\n]*g_system_thread_free/;
 
 export type ShardClass = 'REAL' | 'CRASH' | 'HANG' | 'INFRA' | 'UNKNOWN';
 
-export interface ShardOutcome { status?: string; exitCode?: number | null; elapsedMs?: number; failingFiles?: string[] | null }
+/**
+ * The windows-result-<n> outcome (scripts/test-free-shards.ts). The runner
+ * adds 1 to unattributedFailures for a missing terminal summary and more for
+ * an unhandled error between tests, an unreported failure or lost capture.
+ */
+export interface ShardOutcome {
+  status?: string; exitCode?: number | null; elapsedMs?: number; failingFiles?: string[] | null;
+  unattributedFailures?: number; summary?: { sawTerminalSummary?: boolean | null } | null;
+}
 
 export interface ShardTriage {
   shard: number; klass: ShardClass; signature: 'IOCP' | 'GLib' | null; inFlight: string | null;
-  failLines: number; outcome: ShardOutcome | null; why: string; sameTreeGreen: string | null;
+  /** Test failure lines (`(fail)` or `✗`) and `# Unhandled error between tests` lines in the log. */
+  failLines: number; unhandled: number; logRead: boolean;
+  outcome: ShardOutcome | null; why: string; sameTreeGreen: string | null;
+}
+
+/** Failure evidence in a shard log, read with the free runner's own line classifier. */
+export function logFailureEvidence(log: string): { failLines: number; unhandled: number } {
+  let failLines = 0;
+  let unhandled = 0;
+  for (const raw of log.split('\n')) {
+    const kind = classifyBunTestOutputLine(raw);
+    const line = stripAnsiLine(raw).replace(/\r+$/, '');
+    if (kind === 'failed-test' || /^(?:\(fail\)|✗)\s/.test(line)) failLines++;
+    else if (kind === 'unhandled-between-tests' || line.startsWith('# Unhandled error')) unhandled++;
+  }
+  return { failLines, unhandled };
 }
 
 /** The last `::group::<file>:` line opened in the log: the file bun was in when it stopped. */
@@ -81,7 +108,8 @@ export function inFlightFile(log: string): string | null {
 
 /** Pure: classify one failed shard from its result artifact and (when read) its log. */
 export function classifyShard(shard: number, outcome: ShardOutcome | null, log: string | null): ShardTriage {
-  const base = { shard, outcome, signature: null, inFlight: log ? inFlightFile(log) : null, failLines: log ? (log.match(/^\(fail\)/gm) ?? []).length : 0, sameTreeGreen: null };
+  const evidence = log !== null ? logFailureEvidence(log) : { failLines: 0, unhandled: 0 };
+  const base = { shard, outcome, signature: null, inFlight: log ? inFlightFile(log) : null, ...evidence, logRead: log !== null, sameTreeGreen: null };
   if (!outcome) return { ...base, klass: 'UNKNOWN', why: 'no windows-result artifact' };
   const failing = outcome.failingFiles ?? [];
   if (outcome.status === 'passed') return { ...base, klass: 'INFRA', why: 'the shard passed but its job failed: read the failing setup step' };
@@ -98,12 +126,19 @@ export function classifyShard(shard: number, outcome: ShardOutcome | null, log: 
   return { ...base, klass: 'UNKNOWN', why: `status ${outcome.status ?? '?'} exit ${outcome.exitCode ?? '?'} failing ${failing.length}` };
 }
 
-/** Pure: may this shard earn an empty ci: commit? */
+/**
+ * Pure: may this shard earn an empty ci: commit? Only when the abort or the
+ * hang is the shard's sole failure evidence: the log was read and holds no
+ * failed test and no unhandled error, and the runner counted exactly one
+ * unattributed failure, the terminal summary it never saw. An artifact
+ * without those fields is missing evidence, not a pass.
+ */
 export function draftable(t: ShardTriage): boolean {
-  if (t.klass === 'CRASH') {
-    return !!t.signature && (t.outcome?.exitCode === 3 || t.outcome?.exitCode === 9) && (t.outcome?.failingFiles ?? []).length === 0 && t.failLines === 0;
-  }
-  return t.klass === 'HANG' && !!t.sameTreeGreen;
+  const o = t.outcome;
+  const onlyMissingSummary = o?.unattributedFailures === 1 && o.summary?.sawTerminalSummary === false;
+  const clean = t.logRead && t.failLines === 0 && t.unhandled === 0 && (o?.failingFiles ?? []).length === 0 && onlyMissingSummary;
+  if (t.klass === 'CRASH') return clean && !!t.signature && (o?.exitCode === 3 || o?.exitCode === 9);
+  return t.klass === 'HANG' && clean && o?.status === 'timed-out' && !!t.sameTreeGreen;
 }
 
 export function draftMessage(x: { run: number; head: string; shard: ShardTriage; otherDrafts: number[] }): string {

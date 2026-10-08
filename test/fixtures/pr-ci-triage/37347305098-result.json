@@ -1,9 +1,15 @@
 {
   "outcome": {
+    "shard": 5,
     "status": "timed-out",
     "exitCode": null,
     "elapsedMs": 562659,
     "failingFiles": [],
-    "sawTerminalSummary": null
+    "unattributedFailures": 1,
+    "summary": {
+      "testsRan": null,
+      "filesRan": null,
+      "sawTerminalSummary": false
+    }
   }
 }
