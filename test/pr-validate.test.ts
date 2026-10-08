@@ -363,7 +363,12 @@ describe('run, select and declare against a fixture PR tree', () => {
     git(f.tree, 'commit', '-q', '-m', 'tsconfig');
     expect(await f.call(['run'])).toBe(1);
     expect(f.out.join('\n')).toContain('selection FULL (tsconfig.test.json)');
+    f.out.length = 0;
     expect(await f.call(['run', '--accept-full-risk'])).toBe(0);
+    // The waiver travels with the verdict: the push question and the PR body read this summary.
+    const waived = 'FULL waived (tsconfig.test.json): the full suite did not run';
+    expect(readStateFor(f.dir, pr)!.validation!.summary).toContain(waived);
+    expect(f.out[0]).toContain(waived);
   });
 
   test('declare adds a test that always runs; a dirty tree is refused', async () => {

@@ -78,7 +78,8 @@ Options:
   --repo OWNER/NAME     upstream repo (default: gh repo view in --cwd)
   --cwd DIR             the PR worktree (default: .)
   --tree DIR            tree to validate (default: the staged sync, else --cwd)
-  --accept-full-risk    a FULL trigger does not by itself make the run red
+  --accept-full-risk    a FULL trigger does not by itself make the run red;
+                        the recorded summary says the full suite was waived
 
 First line of output: RESULT <WORD> ...`;
 
@@ -636,7 +637,9 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   }
 
   const skipped = unverified.length ? `; ${unverified.length} unverified (every test skipped: ${unverified.slice(0, 3).join(', ')}${unverified.length > 3 ? ', ...' : ''})` : '';
-  const summary = `${green}/${sel.files.length} selected files green${skipped}${worst ? '; RED' : ''}`;
+  // The summary is what the push question shows and gstack-pr-body publishes: a waiver must travel with it.
+  const waived = sel.full.length && c.f.acceptFull ? `; FULL waived (${sel.full.join(', ')}): the full suite did not run` : '';
+  const summary = `${green}/${sel.files.length} selected files green${skipped}${waived}${worst ? '; RED' : ''}`;
   lines.push(`VALIDATE-END worst=${worst}`);
   fs.writeFileSync(path.join(outDir, 'summary.txt'), lines.join('\n') + '\n');
   withPrLock(c.stateDir, () => {
