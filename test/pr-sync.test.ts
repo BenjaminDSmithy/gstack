@@ -22,7 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   syncMain, parseMergeTree, classifyConflicts, changelogBlock, rebuildChangelog, renameBlockHeading,
-  qualifyQueue, pickVersion, cmpVersion, readStagedSync, classifyPush, type SyncDeps,
+  qualifyQueue, pickVersion, cmpVersion, readStagedSync, classifyPush, defaultTool, type SyncDeps, type ToolRunner,
 } from '../lib/pr-sync';
 import { prStateDir, topicFor, readStateFor, writeState, type GhRunner, type PrState } from '../lib/pr-context';
 import { listReceipts } from '../lib/egress-receipt';
@@ -419,6 +419,23 @@ describe('merge', () => {
     expect((await run(t, ['merge'])).code).toBe(50);
     git(t.clone, 'checkout', '-q', '-b', 'pr/feat-r2');
     expect((await run(t, ['merge'])).code).toBe(30);
+  });
+
+  test('a merge leaves SIGINT and SIGTERM at their default, so a signal ends it', async () => {
+    // merge is synchronous (spawnSync throughout), so a JS signal listener could
+    // never run during it; installing one would only swallow the signal.
+    const t = topology('s13', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    const before = { int: process.listenerCount('SIGINT'), term: process.listenerCount('SIGTERM') };
+    const during: { int: number; term: number }[] = [];
+    const tool: ToolRunner = (cmd, args, opts) => {
+      if (args.includes('gen:skill-docs')) during.push({ int: process.listenerCount('SIGINT'), term: process.listenerCount('SIGTERM') });
+      return defaultTool(cmd, args, opts);
+    };
+    const r = await run(t, ['merge'], { tool });
+    expect(r.code, r.out.join('\n')).toBe(0);
+    expect(during.length).toBeGreaterThan(0);
+    for (const x of during) expect(x).toEqual(before);
   });
 
   test('a queue that cannot be read is never guessed around (60), and the scratch worktree is removed', async () => {
