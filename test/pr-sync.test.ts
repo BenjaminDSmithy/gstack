@@ -445,6 +445,21 @@ describe('merge', () => {
     expect(git(s.scratch, 'status', '--porcelain')).toBe('');
   });
 
+  test('no release of our own while upstream releases: the record, RESULT line and commit say VERSION is upstream\'s', async () => {
+    const t = topology('s17', { pr: d => write(d, 'src/a.txt', 'a1\nOURS\na3\n'), main: d => release(d, '1.0.1.0', '2026-10-03', 'theirs') });
+    queue(t, { version: '1.0.2.0', base_version: '1.0.1.0' });
+    const r = await run(t, ['merge']);
+    expect(r.code, r.out.join('\n')).toBe(0);
+    expect(r.out[0]).toContain('release=no');
+    const s = readStagedSync(stateDir(t), pr)!;
+    expect(s.version).toBe('1.0.1.0');
+    expect(git(s.scratch, 'show', 'HEAD:VERSION')).toBe(s.version);
+    const msg = git(s.scratch, 'log', '-1', '--format=%B');
+    expect(msg).toContain('No release of our own');
+    expect(msg).not.toContain('our CHANGELOG entry');
+    expect(msg).not.toMatch(/kept|re-slotted/);
+  });
+
   test('preconditions: a VERSION move with no entry, or two entries, stops with 30', async () => {
     const noEntry = topology('s6a', { pr: d => { write(d, 'src/a.txt', 'a1\nOURS\na3\n'); write(d, 'VERSION', '1.0.1.0\n'); }, main: d => write(d, 'src/b.txt', 'b9\n') });
     queue(noEntry, { version: '1.0.1.0', base_version: '1.0.0.0' });

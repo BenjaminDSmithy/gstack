@@ -710,8 +710,9 @@ function stageSync(c: Ctx, p: Pinned, pre: Pre, scratch: string, upToDate: boole
   }
 
   // Version: re-check the queue on every sync, including the up-to-date path.
-  let version = p.oldVersion;
-  let kept = true;
+  // With no release of our own, VERSION is upstream's (taken with the release files).
+  let version = pre.release ? p.oldVersion : p.mainVersion;
+  let kept = pre.release;
   let queue: QueueAnswer | null = null;
   const advisories: string[] = [];
   if (pre.release) {
@@ -789,7 +790,7 @@ function stageSync(c: Ctx, p: Pinned, pre: Pre, scratch: string, upToDate: boole
     if (l1.length) proof = { ...proof, verdict: 'CHANGED', changed: [...new Set([...proof.changed, ...l1])].sort() };
   }
 
-  const msg = commitMessage(c, p, { upToDate, conflicts: dry?.conflicts ?? [], version, kept, regenerated: regenerated.size, proof });
+  const msg = commitMessage(c, p, { upToDate, release: pre.release, conflicts: dry?.conflicts ?? [], version, kept, regenerated: regenerated.size, proof });
   s(['commit', '-q', '-F', '-'], 'git commit', { input: msg });
   const sha = s(['rev-parse', 'HEAD'], 'git rev-parse').trim();
   const staged: StagedSync = {
@@ -803,7 +804,7 @@ function stageSync(c: Ctx, p: Pinned, pre: Pre, scratch: string, upToDate: boole
     writeStagedSync(c.stateDir, staged);
   });
   const code = proof.verdict === 'CHANGED' ? SYNC_EXIT.DIFF_CHANGED : SYNC_EXIT.SYNCED;
-  d.out(`RESULT ${code ? 'DIFF_CHANGED' : 'STAGED'} sha=${sha.slice(0, 12)} kind=${staged.kind} version=${p.oldVersion}->${version} proof=${proof.verdict} scratch=${scratch}`);
+  d.out(`RESULT ${code ? 'DIFF_CHANGED' : 'STAGED'} sha=${sha.slice(0, 12)} kind=${staged.kind} version=${p.oldVersion}->${version} release=${pre.release ? 'yes' : 'no'} proof=${proof.verdict} scratch=${scratch}`);
   for (const f of proof.changed) d.out(`CHANGED\t${f}`);
   for (const a of advisories) d.out(`ADVISORY ${a}`);
   for (const w of queue?.warnings ?? []) d.out(`QUEUE_WARNING ${w}`);
@@ -851,6 +852,10 @@ function checkInvariants(c: Ctx, p: Pinned, pre: Pre, scratch: string, version: 
     const digest = read(DIGEST);
     if (digest !== null && !digest.startsWith(`# gstack digest v${version}`)) throw fail('the agents digest does not name the new version');
   }
+  if (!pre.release) {
+    if ((read('VERSION') ?? '').trim() !== p.mainVersion) throw fail(`with no release of our own, VERSION must be upstream's ${p.mainVersion}`);
+    if (read('package.json') !== show(d, scratch, base, 'package.json')) throw fail("with no release of our own, package.json must be upstream's");
+  }
   const cl = read('CHANGELOG.md') ?? '';
   const baseCl = show(d, scratch, base, 'CHANGELOG.md') ?? '';
   if (pre.release) {
@@ -877,7 +882,7 @@ function checkInvariants(c: Ctx, p: Pinned, pre: Pre, scratch: string, version: 
   if (loose.length) throw fail(`the scratch worktree has changes the commit would not carry: ${loose.map(l => l.slice(3)).join(', ')}`);
 }
 
-function commitMessage(c: Ctx, p: Pinned, x: { upToDate: boolean; conflicts: string[]; version: string; kept: boolean; regenerated: number; proof: { verdict: ProofVerdict; changed: string[]; oldId: string; newId: string } }): string {
+function commitMessage(c: Ctx, p: Pinned, x: { upToDate: boolean; release: boolean; conflicts: string[]; version: string; kept: boolean; regenerated: number; proof: { verdict: ProofVerdict; changed: string[]; oldId: string; newId: string } }): string {
   const short = (s: string) => s.slice(0, 9);
   const how = x.kept ? 'kept (above upstream and unclaimed)' : 're-slotted by bin/gstack-next-version';
   if (x.upToDate) {
@@ -895,10 +900,17 @@ function commitMessage(c: Ctx, p: Pinned, x: { upToDate: boolean; conflicts: str
     '',
     `Upstream ${c.pr.baseRef} moved to ${short(p.b)} (v${p.mainVersion}).`,
     x.conflicts.length ? `Conflicts: ${x.conflicts.join(', ')}.` : 'No conflicts.',
-    'Release files resolved mechanically: VERSION, package.json and the agents',
-    "digest from upstream, then our CHANGELOG entry on top of upstream's entries,",
-    'which are byte-identical.',
-    `Version: ${p.oldVersion} -> ${x.version}, ${how}.`,
+    ...(x.release
+      ? [
+        'Release files resolved mechanically: VERSION, package.json and the agents',
+        "digest from upstream, then our CHANGELOG entry on top of upstream's entries,",
+        'which are byte-identical.',
+        `Version: ${p.oldVersion} -> ${x.version}, ${how}.`,
+      ]
+      : [
+        `No release of our own: VERSION (${x.version}), package.json and CHANGELOG.md`,
+        "are upstream's; the agents digest is the generator's output for the merged tree.",
+      ]),
   ];
   if (x.regenerated) lines.push(`Generated files regenerated: ${x.regenerated} (gen:skill-docs --dry-run clean).`);
   lines.push(`PR diff without release and generated files: ${x.proof.verdict} (patch-id ${x.proof.oldId || '-'} -> ${x.proof.newId || '-'}).`);
