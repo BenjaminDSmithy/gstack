@@ -87,7 +87,7 @@ Options:
 
 Exit 30: a precondition (the tree lacks gstack's release tooling,
 bin/gstack-next-version and scripts/gen-agents-digest.ts; uncommitted
-changes; no remote for the repo).
+changes or untracked files; no remote for the repo).
 
 First line of stdout: RESULT <WORD> ... (run prints the upstream range
 of a staged sync on stderr before executing it).`;
@@ -546,8 +546,13 @@ function freshState(pr: PrInfo): PrState {
 function cmdRun(c: Ctx): number {
   const { d } = c;
   const sha = gitOk(d, c.tree, ['rev-parse', 'HEAD'], 'git rev-parse').trim();
-  const dirty = gitOk(d, c.tree, ['status', '--porcelain', '--untracked-files=no'], 'git status').trim();
-  if (dirty) throw new PrContextError(`${c.tree} has uncommitted changes; a verdict must name a commit`, VALIDATE_EXIT.PRECONDITION);
+  // Untracked files count: a test can import one the commit lacks, and the verdict would name that commit.
+  const dirty = gitOk(d, c.tree, ['status', '--porcelain', '--untracked-files=normal'], 'git status').split('\n').filter(Boolean);
+  if (dirty.length) {
+    const untracked = dirty.filter(l => l.startsWith('??')).map(l => l.slice(3));
+    const what = untracked.length === dirty.length ? `untracked files (${untracked.slice(0, 5).join(', ')})` : `uncommitted changes (${dirty.slice(0, 5).map(l => l.slice(3)).join(', ')})`;
+    throw new PrContextError(`${c.tree} has ${what}; a verdict must name a commit that holds everything the tests use`, VALIDATE_EXIT.PRECONDITION);
+  }
   const outDir = path.join(c.stateDir, 'validate', sha.slice(0, 12));
   fs.rmSync(outDir, { recursive: true, force: true });
   fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });

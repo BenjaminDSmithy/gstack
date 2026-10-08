@@ -411,6 +411,17 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(readStateFor(f.dir, pr)).toBeNull();
   });
 
+  test('an untracked file is refused before anything runs: the verdict must name a commit that contains what the tests used', async () => {
+    const f = fixture('untracked', null, {
+      universe: ['test/x.test.ts', 'test/n.test.ts'],
+      pr: { 'lib/y.ts': 'export const y = 1;\n', 'test/n.test.ts': "import { test, expect } from 'bun:test';\nimport { n } from '../lib/n';\ntest('n', () => expect(n).toBe(1));\n" },
+    });
+    write(f.tree, 'lib/n.ts', 'export const n = 1;\n');
+    expect(await f.call(['run'])).toBe(30);
+    expect(f.out[0]).toMatch(/^RESULT PRECONDITION .*untracked.*lib\/n\.ts/);
+    expect(readStateFor(f.dir, pr)).toBeNull();
+  });
+
   test('a runner/dependency change keeps the run red unless the owner accepts the full-suite risk', async () => {
     const f = fixture('full', "test('x', () => expect(y).toBe(2));");
     write(f.tree, 'tsconfig.test.json', '{}\n');
