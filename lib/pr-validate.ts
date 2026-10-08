@@ -43,6 +43,14 @@ import { FREE_HOME_SURFACES, privateFreeHome, type FreeHomeGuard } from '../scri
 
 export const VALIDATE_EXIT = { GREEN: 0, RED: 1, USAGE: 2, PRECONDITION: 30 } as const;
 
+/**
+ * How long a finished run waits for the PR state lock to record its
+ * verdict. The default 10 s is too short to wait out a sync push holding
+ * the lock across its network write, and losing a minutes-long run's
+ * verdict to a busy lock (exit 45) means running it all again.
+ */
+export const VERDICT_LOCK_BUDGET_MS = 120_000;
+
 /** gstack's release tooling: the selection rules and CI mirrors assume a tree that carries it. */
 const PLATFORM_FILES = ['bin/gstack-next-version', 'scripts/gen-agents-digest.ts'];
 
@@ -859,7 +867,7 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
       summary = summaryOf();
     }
     writeState(c.stateDir, { ...s, validation: { sha, worst: worst ? 1 : 0, summary, at: d.now().toISOString() } });
-  });
+  }, { budgetMs: VERDICT_LOCK_BUDGET_MS });
   lines.push(`VALIDATE-END worst=${worst}`);
   d.out(`RESULT ${worst ? 'RED' : 'GREEN'} sha=${sha.slice(0, 12)} ${summary} summary=${path.join(outDir, 'summary.txt')}`);
   for (const l of lines) d.out(l);

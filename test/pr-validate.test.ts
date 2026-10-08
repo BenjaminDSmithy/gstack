@@ -5,7 +5,7 @@
  * Real bun runs on tiny fixture tests; gh is faked in-process.
  */
 import { describe, test, expect, beforeAll, afterAll, setDefaultTimeout } from 'bun:test';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -743,6 +743,24 @@ describe('run, select and declare against a fixture PR tree', () => {
     f.out.length = 0;
     expect(await f.call(['run'])).toBe(1);
     expect(f.out.find(l => l.startsWith('test/w.test.ts'))).toContain('RED');
+  });
+
+  test('a finished run waits out a lock a sync push holds past the default 10 s and still records its verdict', async () => {
+    let tree = '';
+    const rec = recorder(() => tree);
+    const f = fixture('lock-wait', "test('x', () => expect(y).toBe(2));", { deps: { tool: rec.tool } });
+    tree = f.tree;
+    fs.mkdirSync(f.dir, { recursive: true });
+    // Another process holds the PR state lock for 14 s, as gstack-pr-sync push does across its network write.
+    const holder = spawn(process.execPath, ['-e', `const { withPrLock } = await import(${JSON.stringify(path.resolve(import.meta.dir, '../lib/pr-context.ts'))}); withPrLock(${JSON.stringify(f.dir)}, () => Bun.sleepSync(14_000));`], { stdio: 'ignore' });
+    try {
+      for (let i = 0; i < 600 && !fs.existsSync(path.join(f.dir, '.lock')); i++) await Bun.sleep(50);
+      expect(fs.existsSync(path.join(f.dir, '.lock'))).toBe(true);
+      expect(await f.call(['run'])).toBe(0);
+      expect(readStateFor(f.dir, pr)!.validation).toMatchObject({ worst: 0 });
+    } finally {
+      holder.kill('SIGKILL');
+    }
   });
 
   test('declare stores the universe form, refuses what would never run, and voids a verdict that did not run it', async () => {
