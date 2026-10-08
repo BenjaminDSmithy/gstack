@@ -192,18 +192,25 @@ export function draftable(t: ShardTriage): boolean {
   return t.klass === 'HANG' && clean && o?.status === 'timed-out' && !!t.sameTreeGreen;
 }
 
-export function draftMessage(x: { run: number; head: string; shard: ShardTriage; otherDrafts: number[] }): string {
-  const t = x.shard;
-  const what = t.klass === 'HANG' ? 'a hang' : t.signature === 'GLib' ? 'a GLib abort' : 'a Bun IOCP crash';
-  const lines = [
-    `ci: re-run CI after ${what} on windows-free-shard (${t.shard})`,
-    '',
-    `Windows Free Tests run ${x.run} on ${x.head.slice(0, 9)} failed in shard ${t.shard}`,
-    `with no failing test: ${t.why}${t.inFlight ? `, in ${t.inFlight}` : ''}.`,
-  ];
-  if (t.klass === 'HANG') lines.push(`The same tree passed that shard in run ${t.sameTreeGreen}.`);
-  if (x.otherDrafts.length) lines.push(`Shard(s) ${x.otherDrafts.join(', ')} of the same run failed the same way.`);
-  lines.push('A fork contributor cannot re-run the job, so this empty commit triggers', 'a fresh run.', '');
+const causeOf = (t: ShardTriage): string => (t.klass === 'HANG' ? 'a hang' : t.signature === 'GLib' ? 'a GLib abort' : 'a Bun IOCP crash');
+
+/**
+ * The empty ci: commit's message: one evidence line per draftable shard (its
+ * own cause, reason, in-flight file and, for a hang, the run where the same
+ * tree passed). The subject names the shared cause, or "runner flakes" when
+ * the shards differ. Every value in it is fixed vocabulary, a number, or a
+ * path that passed safeTestPath.
+ */
+export function draftMessage(x: { run: number; head: string; shards: ShardTriage[] }): string {
+  const causes = new Set(x.shards.map(causeOf));
+  const subject = `ci: re-run CI after ${causes.size === 1 ? [...causes][0] : 'runner flakes'} on windows-free-shard (${x.shards.map(t => t.shard).join(', ')})`;
+  const lines = [subject, '', `Windows Free Tests run ${x.run} on ${x.head.slice(0, 9)} failed with no failing test:`, ''];
+  for (const t of x.shards) {
+    const reason = t.klass === 'HANG' ? `hang, ${t.why}` : t.why;
+    const passed = t.klass === 'HANG' ? `; the same tree passed this shard in run ${t.sameTreeGreen}` : '';
+    lines.push(`- shard ${t.shard}: ${reason}${t.inFlight ? `, in ${t.inFlight}` : ''}${passed}.`);
+  }
+  lines.push('', 'A fork contributor cannot re-run the job, so this empty commit triggers', 'a fresh run.', '');
   return lines.join('\n');
 }
 
@@ -361,7 +368,7 @@ function cmdRun(d: TriageDeps, f: Flags): number {
   const dir = prStateDir({ cwd: f.cwd, topic: topicFor(pr.headRef), env: d.env });
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = path.join(dir, `ci-retrigger-${runId}.txt`);
-  fs.writeFileSync(file, draftMessage({ run: runId, head: pr.headOid, shard: triaged[0], otherDrafts: triaged.slice(1).map(t => t.shard) }), { mode: 0o600 });
+  fs.writeFileSync(file, draftMessage({ run: runId, head: pr.headOid, shards: triaged }), { mode: 0o600 });
   d.out(`RESULT DRAFTED run=${runId} message=${file}`);
   d.out('NEXT with the owner\'s yes: `git commit --allow-empty -F <message>` on the PR branch (add the repo\'s trailer), then push it the same way a sync push goes (fast-forward, receipted), then publish the PR body (its facts name the new head)');
   return TRIAGE_EXIT.DRAFTED;

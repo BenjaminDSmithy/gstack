@@ -243,6 +243,26 @@ describe('run', () => {
     expect(r.out.some(l => l.includes('same-tree-green 150'))).toBe(true);
   });
 
+  test('a draft over shards with different causes gives each shard its own evidence line', async () => {
+    const draftOf = (r: { out: string[] }) => fs.readFileSync(r.out.find(l => l.startsWith('RESULT DRAFTED'))!.match(/message=(\S+)/)![1], 'utf8');
+    // IOCP on shard 4 and a real GLib abort (run 37252003926 shard 2) on shard 2
+    const crashes = await triage([{ id: 500, sha: B, shards: { 2: { fixture: '37252003926' }, 4: { fixture: '37346036310' } } }]);
+    expect(crashes.code).toBe(0);
+    const two = draftOf(crashes);
+    expect(two.split('\n')[0]).toMatch(/^ci: re-run CI after runner flakes on windows-free-shard \((2, 4|4, 2)\)$/);
+    expect(two).not.toContain('the same way');
+    expect(two.split('\n').find(l => /shard 2\b/.test(l))).toMatch(/GLib/);
+    expect(two.split('\n').find(l => /shard 4\b/.test(l))).toMatch(/GetQueuedCompletionStatusEx/);
+    // an IOCP crash plus a hang whose tree passed shard 5 in run 400: the hang line names run 400
+    const passed = { id: 400, sha: A, conclusion: 'success', jobs: [{ name: 'windows-free-shard (5)', conclusion: 'success' }] };
+    const mixed = await triage([{ id: 501, sha: B, shards: { 4: { fixture: '37346036310' }, 5: { fixture: '37347305098' } } }, passed]);
+    expect(mixed.code).toBe(0);
+    const hangLine = draftOf(mixed).split('\n').find(l => /shard 5\b/.test(l)) ?? '';
+    expect(hangLine).toMatch(/hang/i);
+    expect(hangLine).toContain('run 400');
+    expect(hangLine).not.toMatch(/GetQueuedCompletionStatusEx|IOCP/);
+  });
+
   test('a named failing test is REAL: the blame protocol, never a draft; no failed run is NOTHING', async () => {
     const r = await triage([{ id: 300, sha: B, shard: 2, fixture: 'none', result: { status: 'failed', exitCode: 1, elapsedMs: 1000, failingFiles: ['test/x.test.ts'] } }]);
     expect(r.code).toBe(10);
