@@ -180,7 +180,7 @@ function write(dir: string, rel: string, text: string): void {
   fs.writeFileSync(path.join(dir, rel), text);
 }
 
-function fixture(name: string, liveInitial: string, opts: { state?: string; viewer?: string; webEditDropsImages?: boolean; headLag?: boolean; sideMerge?: boolean; comments?: unknown[] } = {}) {
+function fixture(name: string, liveInitial: string, opts: { state?: string; viewer?: string; webEditDropsImages?: boolean; headLag?: boolean; sideMerge?: boolean; comments?: unknown[]; storeEdit?: (sent: string) => string } = {}) {
   const base = path.join(ROOT, name);
   const up = path.join(base, 'up', 'acme', 'gx.git');
   const fork = path.join(base, 'fork', 'me', 'gx.git');
@@ -240,7 +240,7 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
       const file = args[args.indexOf('--body-file') + 1];
       const sent = fs.readFileSync(file, 'utf8');
       edits.push(sent);
-      live = opts.webEditDropsImages ? sent.replace(/<img[^>]*>/g, '') : sent;
+      live = opts.storeEdit ? opts.storeEdit(sent) : opts.webEditDropsImages ? sent.replace(/<img[^>]*>/g, '') : sent;
       return ok('');
     }
     return { status: 1, stdout: '', stderr: `unexpected gh ${args.join(' ')}` };
@@ -422,6 +422,26 @@ describe('publish', () => {
     f.out.length = 0;
     expect(await f.call(['check'])).toBe(40);
     expect(f.out[0]).toContain('body-stale-since=none');
+  });
+
+  test('a read-back that is not the body sent is an error: nothing is recorded as ours, and the next publish shows the difference', async () => {
+    const f = fixture('readback', TEMPLATE, { storeEdit: sent => `${sent}MAINTAINER-NOTE please split this PR\n` });
+    const file = await rendered(f);
+    f.out.length = 0;
+    expect(await f.publish(file, ...f.acceptLive())).toBe(1);
+    expect(f.out[0]).toMatch(/^RESULT ERROR /);
+    const text = f.out.join('\n');
+    expect(text.slice(text.indexOf('BEGIN UNTRUSTED TRACKER CONTENT'))).toContain('+ MAINTAINER-NOTE please split this PR');
+    expect(fs.readdirSync(f.dir).some(n => n.startsWith('pr-body-restore-'))).toBe(true);
+    expect(readStateFor(f.dir, prRef)?.lastPublishedBodySha256 ?? null).toBeNull();
+    f.out.length = 0;
+    expect(await f.publish(file)).toBe(20);
+    expect(f.out.join('\n')).toContain('- MAINTAINER-NOTE please split this PR');
+    // The stored body kept the attachments and ticks but rewrote the facts block.
+    const g = fixture('readback-facts', TEMPLATE, { storeEdit: sent => sent.replace(/Commits: \d+/, 'Commits: 999') });
+    const gfile = await rendered(g);
+    expect(await g.publish(gfile, ...g.acceptLive())).toBe(1);
+    expect(fs.readdirSync(g.dir).some(n => n.startsWith('pr-body-restore-'))).toBe(true);
   });
 
   test('the yes is bound to the body sha256 and the live-diff acceptance to the live body that was shown', async () => {
