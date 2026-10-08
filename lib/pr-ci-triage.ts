@@ -303,6 +303,16 @@ function parseArgs(argv: string[]): Flags {
   return f;
 }
 
+/**
+ * The distinct shard numbers among failed jobs. A two-dimension diagnostic
+ * matrix (`windows-free-shard (4, 1)` ... `(4, 10)`) is one shard with one
+ * windows-result-4 artifact, so it is downloaded and counted once.
+ */
+export function failedShards(jobs: { name: string }[]): number[] {
+  const all = jobs.map(j => Number(SHARD_JOB_RE.exec(j.name)?.[1])).filter(n => Number.isInteger(n) && n > 0);
+  return [...new Set(all)].sort((a, b) => a - b);
+}
+
 function treeOf(d: TriageDeps, cwd: string, sha: string): string | null {
   const r = d.git(['rev-parse', `${sha}^{tree}`], { cwd });
   return r.status === 0 ? r.stdout.trim() : null;
@@ -354,7 +364,7 @@ function cmdRun(d: TriageDeps, f: Flags): number {
     return TRIAGE_EXIT.NO_DRAFT;
   }
   const failed = (run.jobs ?? []).filter(j => j.conclusion === 'failure');
-  const shards = failed.map(j => Number(SHARD_JOB_RE.exec(j.name)?.[1])).filter(n => Number.isInteger(n) && n > 0);
+  const shards = failedShards(failed);
   if (!shards.length) {
     const aggregate = failed.some(j => j.name === 'windows-free-tests');
     d.out(`RESULT ${aggregate ? 'AGGREGATE' : 'NOTHING'} run=${runId} ${aggregate ? 'windows-free-tests failed with no failed shard: read its job log (plan, verify or a cancelled shard)' : 'no Windows shard failed'}`);
@@ -415,9 +425,7 @@ function cmdOnset(d: TriageDeps, f: Flags): number {
     if (r.conclusion === 'failure') {
       c.failedRuns++;
       const view = ghJson<RunInfo>(d, ['run', 'view', String(r.databaseId), '-R', repo, '--json', 'databaseId,jobs'], 'gh run view');
-      for (const j of (view.jobs ?? []).filter(x => x.conclusion === 'failure')) {
-        const n = Number(SHARD_JOB_RE.exec(j.name)?.[1]);
-        if (!Number.isInteger(n) || n < 1) continue;
+      for (const n of failedShards((view.jobs ?? []).filter(x => x.conclusion === 'failure'))) {
         if (downloads >= CAP) { c.other++; continue; }
         downloads++;
         const res = download(d, repo, r.databaseId, `windows-result-${n}`);
