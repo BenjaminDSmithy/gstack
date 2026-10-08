@@ -15,7 +15,7 @@ import {
   normalizeBody, renderFactsBlock, spliceFacts, stripFacts, carryLiveness, lostOwnerContent, lintBody, livenessOf,
   publishedVersions, scanOutgoing, lineDiff, bodyMain, FACTS_BEGIN, FACTS_END, sha256, type Facts, type BodyDeps,
 } from '../lib/pr-body';
-import { prStateDir, topicFor, readStateFor, defaultGit, type GhRunner } from '../lib/pr-context';
+import { prStateDir, topicFor, readStateFor, writeState, defaultGit, type GhRunner, type PrState } from '../lib/pr-context';
 import { listReceipts } from '../lib/egress-receipt';
 import { scan } from '../lib/redact-engine';
 
@@ -257,7 +257,14 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
   const publish = (file: string, ...extra: string[]) => call(['publish', '--body', file, '--body-sha256', shaOf(file), '--yes', ...extra]);
   // The owner accepted the live body as it is right now.
   const acceptLive = () => ['--accept-live-diff', sha256(normalizeBody(live)).slice(0, 12)];
-  return { base, clone, out, call, publish, acceptLive, shaOf, dir, edits, log, deps, getLive: () => live, setLive: (text: string) => { live = text; }, env };
+  // A code commit pushed to the fork's pr/b, the way a sync push or another push lands; returns its sha.
+  const pushCommit = (text: string) => {
+    write(seed, 'lib/x.ts', `export const x = ${JSON.stringify(text)};\n`);
+    git(seed, 'add', '-A'); git(seed, 'commit', '-q', '-m', `fix: ${text}`);
+    git(seed, 'push', '-q', fork, 'pr/b');
+    return git(seed, 'rev-parse', 'HEAD');
+  };
+  return { base, clone, out, call, publish, acceptLive, shaOf, pushCommit, dir, edits, log, deps, getLive: () => live, setLive: (text: string) => { live = text; }, env };
 }
 const prRef = { repo: 'acme/gx', number: 9, headRef: 'pr/b', headOwner: 'me' };
 
@@ -380,6 +387,43 @@ describe('publish', () => {
     expect(f.edits).toHaveLength(2);
   });
 
+  test('a body whose facts name an old head is refused; publishing the current head clears body_stale_since, which every mode reports', async () => {
+    const f = fixture('stale', TEMPLATE);
+    const h1file = await rendered(f);
+    const h2 = f.pushCommit('two');
+    const state: PrState = {
+      v: 1, topic: topicFor('pr/b'), repo: 'acme/gx', number: 9, headRef: 'pr/b', headOwner: 'me', headRemote: null, upstreamRemote: null,
+      defaultBranch: 'main', focused: null, validation: null, bodyStaleSince: h2, lastPublishedBodySha256: null, signals: { latched: [], acked: [] }, audit: null,
+    };
+    writeState(f.dir, state);
+    f.out.length = 0;
+    expect(await f.publish(h1file, ...f.acceptLive())).toBe(30);
+    expect(f.out[0]).toMatch(new RegExp(`^RESULT PRECONDITION .*${h2.slice(0, 12)}.*re-render`));
+    expect(f.edits).toHaveLength(0);
+    f.out.length = 0;
+    expect(await f.call(['facts'])).toBe(0);
+    expect(f.out[0]).toContain(`body-stale-since=${h2.slice(0, 12)}`);
+    // A stale mark that is not in the PR head's history is refused too.
+    writeState(f.dir, { ...state, bodyStaleSince: git(f.clone, 'commit-tree', 'HEAD^{tree}', '-m', 'elsewhere') });
+    const h2file = await rendered(f);
+    expect(f.out[0]).toContain('body-stale-since=');
+    f.out.length = 0;
+    expect(await f.publish(h2file, ...f.acceptLive())).toBe(30);
+    expect(f.out[0]).toMatch(/^RESULT PRECONDITION .*not in the PR head's history/);
+    // Stale since h2, and a later push h3 the body names: published, cleared.
+    const h3 = f.pushCommit('three');
+    writeState(f.dir, state);
+    const h3file = await rendered(f);
+    expect(fs.readFileSync(h3file, 'utf8')).toContain(`Head \`${h3.slice(0, 12)}\``);
+    f.out.length = 0;
+    expect(await f.publish(h3file, ...f.acceptLive())).toBe(0);
+    expect(f.out[0]).toContain(`cleared-stale=${h2.slice(0, 12)}`);
+    expect(readStateFor(f.dir, prRef)!.bodyStaleSince).toBeNull();
+    f.out.length = 0;
+    expect(await f.call(['check'])).toBe(40);
+    expect(f.out[0]).toContain('body-stale-since=none');
+  });
+
   test('the yes is bound to the body sha256 and the live-diff acceptance to the live body that was shown', async () => {
     const f = fixture('bind', TEMPLATE);
     const file = await rendered(f);
@@ -479,7 +523,7 @@ describe('publish', () => {
     expect(await f.call(['render'])).toBe(20);
     expect(f.out.some(l => l.startsWith('LINT') && l.includes('version claim'))).toBe(true);
     const bad = path.join(f.base, 'bad.md');
-    fs.writeFileSync(bad, normalizeBody(spliceFacts(TEMPLATE.replace('Because.', 'Because 1.0.2.0 is claimed by #12.'), renderFactsBlock(FACTS))));
+    fs.writeFileSync(bad, normalizeBody(spliceFacts(TEMPLATE.replace('Because.', 'Because 1.0.2.0 is claimed by #12.'), renderFactsBlock({ ...FACTS, head: git(f.clone, 'rev-parse', 'HEAD') }))));
     f.out.length = 0;
     expect(await f.publish(bad, ...f.acceptLive())).toBe(20);
     expect(f.out[0]).toMatch(/^RESULT REFUSED /);
