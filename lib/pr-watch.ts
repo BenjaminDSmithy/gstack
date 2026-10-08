@@ -108,7 +108,7 @@ interface TimelineEvent {
   event?: string; actor?: { login?: string; type?: string } | null; created_at?: string; commit_id?: string | null;
   source?: { issue?: { number?: number; user?: { login?: string; type?: string }; author_association?: string; pull_request?: unknown } } | null;
 }
-interface PullState { state?: string; merged?: boolean; mergeable_state?: string; head?: { sha?: string } }
+interface PullState { state?: string; merged?: boolean; mergeable_state?: string; head?: { sha?: string }; closed_at?: string | null }
 
 export interface Absorbed { sha: string; credit: boolean; cites?: boolean }
 
@@ -165,7 +165,12 @@ export function signalsFrom(x: SignalInput): Signal[] {
       out.push({ id: `renamed:${at}`, level: 'P2', kind: 'title-renamed', at, ref: '', who: `${actor} (${who})` });
     }
   }
-  if (x.pull.state === 'closed' && !x.pull.merged) out.push({ id: 'closed-unmerged', level: 'P0', kind: 'closed-unmerged', at: '', ref: '', who: '' });
+  // Keyed on the close itself: once the owner acks one close, a reopen and a
+  // second close is a new P0, not an id already acknowledged.
+  if (x.pull.state === 'closed' && !x.pull.merged) {
+    const at = x.pull.closed_at ?? '';
+    out.push({ id: at ? `closed-unmerged:${at}` : 'closed-unmerged', level: 'P0', kind: 'closed-unmerged', at, ref: '', who: '' });
+  }
   // Our trailer alone is not this PR's absorption: upstream credits the owner
   // per PR, so 28f1385ea's credit for #3032 sits on the base of every other
   // open PR too. It counts only when the commit cites (#N) or GitHub linked
