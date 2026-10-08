@@ -28,6 +28,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -62,7 +63,8 @@ of reach), CI=true (as GitHub
 Actions sets it: a committed test.only fails) and a real-path
 TMPDIR; git reads CI's global config (identity, init.defaultBranch main,
 safe.directory) instead of yours. Records the verdict for the exact
-commit in the PR state.
+commit in the PR state; red if HEAD or a tracked file changed after
+the preconditions, while the tests ran.
 
   run       preconditions + selection + per-file runs + mirrors
             (typecheck, typecheck:test, the added-line secret scan,
@@ -663,6 +665,19 @@ function cmdDeclare(c: Ctx): number {
   return 0;
 }
 
+/** HEAD and the tracked worktree changes against it (`git diff HEAD`), per file and as one digest. */
+function treeState(c: Ctx): { head: string; diff: string; files: Map<string, string> } {
+  const head = gitOk(c.d, c.tree, ['rev-parse', 'HEAD'], 'git rev-parse').trim();
+  const r = c.d.git(['diff', 'HEAD', '--no-color', '--binary', '--no-ext-diff'], { cwd: c.tree });
+  if (r.status !== 0) throw new PrContextError(`git diff HEAD failed: ${(r.error ?? r.stderr).trim().split('\n').at(-1)}`, 1);
+  const files = new Map<string, string>();
+  for (const part of r.stdout.split(/^(?=diff --git )/m).filter(p => p.startsWith('diff --git '))) {
+    const name = /^diff --git a\/(.+?) b\//.exec(part)?.[1] ?? part.split('\n')[0];
+    files.set(name, createHash('sha256').update(part).digest('hex'));
+  }
+  return { head, diff: createHash('sha256').update(r.stdout).digest('hex'), files };
+}
+
 function freshState(pr: PrInfo): PrState {
   return {
     v: 1, topic: topicFor(pr.headRef), repo: pr.repo, number: pr.number, headRef: pr.headRef, headOwner: pr.headOwner,
@@ -755,6 +770,8 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   const gates = script('build:gates', 900_000);
   script('build:cso', 600_000);
   const testEnv: NodeJS.ProcessEnv = gates ? { ...env, GSTACK_EXPECT_BINARIES: '1' } : env;
+  // The verdict names `sha`: from here on, only what the preconditions left may be in the tree.
+  const before = treeState(c);
 
   for (const f of sel.missingDeclared) line(`declared ${f} RED: not a free test file in this tree`, true);
   if (sel.full.length) line(`selection FULL (${sel.full.join(', ')}): the full free suite is the real gate${c.f.acceptFull ? '; accepted by --accept-full-risk' : ''}`, !c.f.acceptFull);
@@ -809,6 +826,14 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   if (shellChanged.length && d.which('shellcheck')) {
     const r = tool('shellcheck', ['--severity=error', ...shellChanged], 300_000);
     line(`mirror shellcheck rc=${r.status} (${shellChanged.length} file(s))`, r.status !== 0);
+  }
+
+  // An edit or commit made while the tests ran (minutes) was tested, not `sha`; the verdict cannot name it.
+  const after = treeState(c);
+  if (after.head !== before.head) line(`tree changed during the run: HEAD moved from ${before.head.slice(0, 12)} to ${after.head.slice(0, 12)}; the verdict cannot name either`, true);
+  else if (after.diff !== before.diff) {
+    const moved = [...new Set([...before.files.keys(), ...after.files.keys()])].filter(f => before.files.get(f) !== after.files.get(f));
+    line(`tree changed during the run: tracked files ${moved.slice(0, 5).join(', ') || '(content)'} differ from what the preconditions left; ${sha.slice(0, 12)} was not what ran`, true);
   }
 
   const skipped = unverified.length ? `; ${unverified.length} unverified (every test skipped: ${unverified.slice(0, 3).join(', ')}${unverified.length > 3 ? ', ...' : ''})` : '';
