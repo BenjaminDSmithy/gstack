@@ -39,7 +39,9 @@ export const WATCH_USAGE = `gstack-pr-watch <poll|ack|enable|disable|size> --pr 
   ack      record that the owner acknowledged these signal ids
   enable   let the opt-in LaunchAgent (contrib/pr-watch) poll this PR
   disable  stop the LaunchAgent polling it
-  size     churn, files and commits against merged contributor PRs
+  size     churn, files and commits against contributor PRs merged among
+           the last 200 merged (absorbed PRs are not sampled); under 20
+           such PRs, the 2026-10-07 static thresholds
 
 Signals: P0 SUPERSEDED (a maintainer or maintainer-proxy bot says the work
 was rewritten, replaced or will be closed; a maintainer or proxy references
@@ -188,12 +190,24 @@ export function rankOf(values: number[], x: number): number {
   return values.length ? Math.round((100 * values.filter(v => v <= x).length) / values.length) : 0;
 }
 
-/** GREEN within the merged-contributor p90 on churn and files; AMBER up to the open-contributor p90 churn; RED beyond. */
-export function sizeVerdict(ours: SizeSample, sample: SizeSample[]): { verdict: 'GREEN' | 'AMBER' | 'RED'; green: SizeSample; live: boolean } {
-  const live = sample.length >= 5;
+/**
+ * Below this many merged contributor PRs the p90 is mostly the largest one
+ * (upstream's last 200 merged held 9 on 2026-10-08, one of churn 7058, which
+ * lifted an interpolated p90 to churn 1679), so the static thresholds apply.
+ */
+export const LIVE_MIN = 20;
+
+/**
+ * GREEN within the merged-contributor p90 on churn and files; AMBER up to
+ * the open-contributor p90 churn, or the green churn bound when a live one is
+ * higher (so a bigger PR never reads better than a smaller one); RED beyond.
+ */
+export function sizeVerdict(ours: SizeSample, sample: SizeSample[]): { verdict: 'GREEN' | 'AMBER' | 'RED'; green: SizeSample; amberChurn: number; live: boolean } {
+  const live = sample.length >= LIVE_MIN;
   const green = live ? { churn: percentile(sample.map(s => s.churn), 0.9), files: percentile(sample.map(s => s.files), 0.9) } : STATIC_GREEN;
-  const verdict = ours.churn <= green.churn && ours.files <= green.files ? 'GREEN' : ours.churn <= AMBER_CHURN ? 'AMBER' : 'RED';
-  return { verdict, green, live };
+  const amberChurn = Math.max(AMBER_CHURN, green.churn);
+  const verdict = ours.churn <= green.churn && ours.files <= green.files ? 'GREEN' : ours.churn <= amberChurn ? 'AMBER' : 'RED';
+  return { verdict, green, amberChurn, live };
 }
 
 // ── deps / context ──────────────────────────────────────────────────────────
@@ -463,7 +477,7 @@ function cmdSize(d: WatchDeps, f: Flags): number {
   const v = sizeVerdict(ours, sample);
   d.out(`RESULT ${v.verdict} churn=${ours.churn} files=${ours.files} commits=${ours.commits} (commits are shown, not scored: upstream squash-merges)`);
   if (note) d.out(note);
-  d.out(`BASELINE ${v.live ? `${sample.length} merged contributor PRs` : 'static 2026-10-07'}: green up to churn ${Math.round(v.green.churn)} and ${Math.round(v.green.files)} files; amber up to churn ${AMBER_CHURN}`);
+  d.out(`BASELINE ${v.live ? `${sample.length} merged contributor PRs` : sample.length ? `static 2026-10-07 (only ${sample.length} merged contributor PRs in the last 200 merged; a live p90 needs ${LIVE_MIN})` : 'static 2026-10-07'}: green up to churn ${Math.round(v.green.churn)} and ${Math.round(v.green.files)} files; amber up to churn ${Math.round(v.amberChurn)}`);
   if (sample.length) d.out(`RANK churn p${rankOf(sample.map(s => s.churn), ours.churn)}, files p${rankOf(sample.map(s => s.files), ours.files)} among merged contributor PRs`);
   return 0;
 }
