@@ -105,9 +105,12 @@ export function listAuditCommits(g: GitRunner, cwd: string, base: string, prior:
     if (files.every(f => RELEASE_FILES.includes(f))) { out.skipped.push({ sha, subject, reason: 'release-only' }); continue; }
     const diff = git(g, cwd, ['show', '--format=', '--no-color', sha]);
     const patchId = diff ? (git(g, cwd, ['patch-id', '--stable'], diff).trim().split(/\s+/)[0] ?? '') : '';
-    const p = foldPrior([...(index.get(`s:${sha}`) ?? []), ...(patchId ? (index.get(`p:${patchId}`) ?? []) : [])]);
+    const entries = [...(index.get(`s:${sha}`) ?? []), ...(patchId ? (index.get(`p:${patchId}`) ?? []) : [])];
+    const p = foldPrior(entries);
     let mode: Mode = 'NEW';
-    if (p) mode = RECHECK_BUCKETS.has(p.bucket) ? 'RECHECK' : 'CARRY';
+    // The search keywords come from the subject: a reworded commit (same diff,
+    // new subject) was never searched under its new keywords.
+    if (p) mode = RECHECK_BUCKETS.has(p.bucket) || !entries.some(e => e.subject === subject) ? 'RECHECK' : 'CARRY';
     out.audit.push({ sha, subject, files, patchId, mode, since: mode === 'CARRY' ? (prior?.generated_at ?? null) : null, prior: p });
   }
   return out;
@@ -202,9 +205,9 @@ export const COMMITS_USAGE = `gstack-pr-prep-commits <list|stamp|self|paths> [op
   list    commits to audit between --base and HEAD (merges excluded):
           NEW (full searches), CARRY (audited before with a verdict: search
           only items updated since, keep the old verdict), RECHECK (audited
-          before as UNVERIFIED or EXACT_DUP: full searches, the verdict is
-          re-derived); release-only and empty commits are skipped and
-          listed
+          before as UNVERIFIED or EXACT_DUP, or under another subject:
+          full searches, the verdict is re-derived); release-only and
+          empty commits are skipped and listed
   stamp   validate the agent's report (JSON file), fold CARRY verdicts in
           (worst never drops), take a commit's worst row, count rows for
           skipped commits and the report's own worst, mark unreported
