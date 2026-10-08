@@ -245,6 +245,34 @@ export function publishedVersions(texts: string[]): string[] {
   return [...out].sort();
 }
 
+/**
+ * The redaction scan of the exact outgoing bytes, with the versions the repo
+ * already published allowlisted. A finding that starts inside a git object
+ * id the facts block printed (a backticked hex token) is dropped by
+ * POSITION: an all-digit 12-hex prefix reads as a phone number to
+ * pii.phone.e164 (39 of 2000 random facts blocks), which would ask the owner
+ * to confirm a commit id. The same digits anywhere else are still findings.
+ */
+export function scanOutgoing(body: string, published: string[]): ReturnType<typeof scan> {
+  const result = scan(body, { repoVisibility: 'public', allowlist: published });
+  const ids: [number, number][] = [];
+  for (const block of body.matchAll(FACTS_BLOCK_RE)) {
+    for (const m of block[0].matchAll(/`([0-9a-f]{7,40})`/g)) {
+      const start = block.index! + m.index! + 1;
+      ids.push([start, start + m[1].length]);
+    }
+  }
+  const lineStart = [0];
+  for (let i = 0; i < body.length; i++) if (body[i] === '\n') lineStart.push(i + 1);
+  const findings = result.findings.filter(f => {
+    const at = (lineStart[f.line - 1] ?? 0) + f.col - 1;
+    return !ids.some(([a, b]) => at >= a && at < b);
+  });
+  const counts = { HIGH: 0, MEDIUM: 0, LOW: 0, WARN: 0 };
+  for (const f of findings) counts[f.severity] += 1;
+  return { ...result, findings, counts };
+}
+
 export const findingKey = (f: Finding) => `${f.id}@${f.line}:${f.col}`;
 
 // ── deps ────────────────────────────────────────────────────────────────────
@@ -532,7 +560,7 @@ function cmdPublish(c: Ctx): number {
     }
     // Scan exactly the bytes that will be sent.
     const pubv = publishedVersions(gitTexts(c));
-    const result = scan(body, { repoVisibility: 'public', allowlist: pubv });
+    const result = scanOutgoing(body, pubv);
     const high = result.findings.filter(f => f.severity === 'HIGH');
     const medium = result.findings.filter(f => f.severity === 'MEDIUM');
     if (high.length || result.oversize) {

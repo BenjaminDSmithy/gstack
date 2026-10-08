@@ -13,10 +13,11 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   normalizeBody, renderFactsBlock, spliceFacts, stripFacts, carryLiveness, lostOwnerContent, lintBody, livenessOf,
-  publishedVersions, bodyMain, FACTS_BEGIN, FACTS_END, sha256, type Facts,
+  publishedVersions, scanOutgoing, bodyMain, FACTS_BEGIN, FACTS_END, sha256, type Facts,
 } from '../lib/pr-body';
 import { prStateDir, topicFor, readStateFor, type GhRunner } from '../lib/pr-context';
 import { listReceipts } from '../lib/egress-receipt';
+import { scan } from '../lib/redact-engine';
 
 setDefaultTimeout(120_000);
 
@@ -120,6 +121,14 @@ describe('pure helpers', () => {
     expect(lintBody('This PR\'s head `06c53bff1` has three merges.\n')).toHaveLength(1);
     expect(lintBody('The head branch is pr/x.\n')).toEqual([]);
     expect(lintBody(spliceFacts(TEMPLATE, renderFactsBlock(FACTS)))).toEqual([]);
+  });
+
+  test('a commit id in the facts block is never a phone finding; the same digits in prose still are', () => {
+    // About 1 facts block in 50 prints an all-digit 12-hex prefix (measured 39/2000).
+    const body = spliceFacts(TEMPLATE.replace('Because.', 'Call 123456789012 now.'), renderFactsBlock({ ...FACTS, head: `123456789012${'a'.repeat(28)}` }));
+    const phoneLines = (r: ReturnType<typeof scan>) => r.findings.filter(f => f.id === 'pii.phone.e164').map(f => f.line);
+    expect(phoneLines(scan(body, { repoVisibility: 'public' }))).toEqual([3, 9, 15]);
+    expect(phoneLines(scanOutgoing(body, []))).toEqual([3]);
   });
 
   test('livenessOf and publishedVersions', () => {
