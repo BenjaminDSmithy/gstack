@@ -97,6 +97,16 @@ describe('pure helpers', () => {
     expect(lostOwnerContent(live, out)).toEqual([]);
   });
 
+  test('an owner tick typed as [X] or on a + or numbered item is carried and guarded', () => {
+    const live = TEMPLATE.replace('Screenshot to follow from @me.', IMG66).replace(BOX1_OPEN, BOX1_OPEN.replace('- [ ]', '- [X]'));
+    const out = carryLiveness(TEMPLATE, live);
+    expect(lostOwnerContent(live, out)).toEqual([]);
+    expect(lostOwnerContent('- [X] Owner ran it\n', '- [x] Owner ran it\n')).toEqual([]);
+    for (const tick of ['+ [x] Owner confirmed the Windows run by hand', '1. [x] Owner confirmed the Windows run by hand', '2) [X] Owner re-ran CI']) {
+      expect(lostOwnerContent(`${TEMPLATE}${tick}\n`, TEMPLATE)).toEqual([`ticked: ${tick}`]);
+    }
+  });
+
   test('lostOwnerContent finds an image anywhere (#3032 put it at the top) and lost ticks', () => {
     const live = `## Liveness screenshot attached\n${IMG32}\n\n${TEMPLATE.replace(BOX1_OPEN, BOX1_DONE)}`;
     const lost = lostOwnerContent(live, TEMPLATE);
