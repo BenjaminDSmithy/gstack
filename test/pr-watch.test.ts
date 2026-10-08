@@ -197,6 +197,24 @@ describe('poll, ack and the write gate', () => {
     expect(out.join('\n')).toContain('fix wave rewrote the fix');
   });
 
+  test('an acknowledged P1 comment edited into a supersede notice latches again as P0', async () => {
+    const t = topology('escalate', null);
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') };
+    const data: FakeData = { comments: [{ id: 77, user: { login: 'acme' }, author_association: 'OWNER', created_at: '2026-10-01T00:00:00Z', html_url: 'u', body: 'Can you rebase?' }] };
+    const gh = fakeGh(t, data);
+    const out: string[] = [];
+    const argv = (sub: string, ...rest: string[]) => [sub, '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone, ...rest];
+    expect(await watchMain(argv('poll'), { gh, env, out: l => out.push(l) })).toBe(11);
+    expect(await watchMain(argv('ack', 'comment:77'), { gh, env, out: l => out.push(l) })).toBe(0);
+    data.comments = [{ ...(data.comments![0] as object), body: 'Closing in favour of #9: the fix wave rewrote the fix.' }];
+    out.length = 0;
+    expect(await watchMain(argv('poll'), { gh, env, out: l => out.push(l) }), out.join('\n')).toBe(10);
+    expect(out.join('\n')).toContain('SIGNAL\tP0\tcomment:77\tsuperseded-comment');
+    expect(pollForWrite({ gh, git: defaultGit, env, now: () => new Date(), out: () => {} }, 'acme/gw', 7, t.clone).ok).toBe(false);
+    expect(await watchMain(argv('ack', 'comment:77'), { gh, env, out: () => {} })).toBe(0);
+    expect(await watchMain(argv('poll'), { gh, env, out: () => {} })).toBe(0);
+  });
+
   test('our trailer on upstream\'s base branch is ABSORBED-WITH-CREDIT', async () => {
     const t = topology('absorbed', 'fix: wave (#99)\n\nCo-authored-by: me <me@example.com>');
     const out: string[] = [];
