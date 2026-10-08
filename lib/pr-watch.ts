@@ -311,7 +311,10 @@ function printSignals(d: WatchDeps, r: PollResult, n: number): void {
   d.out(`RESULT ${word} pr=${n} state=${r.state} new=${r.fresh.length} unacknowledged=${r.unacked.length}${r.error ? ` error=${r.error}` : ''}`);
   for (const s of r.unacked) d.out(`SIGNAL\t${s.level}\t${s.id}\t${s.kind}\t${s.who}\t${s.ref}`);
   for (const s of r.signals.filter(x => x.level === 'P2')) d.out(`INFO\t${s.id}\t${s.kind}\t${s.who}`);
-  for (const s of r.fresh) if (s.excerpt) d.out(envelope(s.excerpt, `pr-${n}-${s.id}`));
+  // Every unacknowledged signal, not only this call's new ones: the LaunchAgent
+  // and the write gate latch with their output discarded, so the owner's poll
+  // is often not the first. The excerpt is re-read on each poll, never stored.
+  for (const s of r.unacked) if (s.excerpt) d.out(envelope(s.excerpt, `pr-${n}-${s.id}`));
   if (r.unacked.some(s => s.level === 'P0')) {
     d.out('NEXT stop every push and body publish for this PR, show the owner the signal, and suggest turning Auto-fix off; a follow-up PR is the owner\'s call. After the owner has read it: gstack-pr-watch ack <id>');
   }
