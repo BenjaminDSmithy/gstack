@@ -132,7 +132,7 @@ function topology(name: string, mainMsg: string | null) {
   return { base, clone, fork };
 }
 
-interface FakeData { comments?: unknown[]; reviews?: unknown[]; timeline?: unknown[]; pull?: Record<string, unknown>; failComments?: boolean }
+interface FakeData { comments?: unknown[]; reviews?: unknown[]; timeline?: unknown[]; pull?: Record<string, unknown>; failComments?: boolean; headOid?: string }
 
 /** Answers list endpoints the way GitHub does: one page per call (per_page capped at 100, default 30), oldest first. */
 function fakeGh(t: { fork: string }, data: FakeData): GhRunner & { calls: string[][] } {
@@ -149,7 +149,7 @@ function fakeGh(t: { fork: string }, data: FakeData): GhRunner & { calls: string
       return ok(items.slice((p - 1) * per, p * per));
     };
     if (args[0] === 'pr' && args[1] === 'view') {
-      return ok({ number: 7, state: 'OPEN', isDraft: false, headRefOid: git(t.fork, 'rev-parse', 'refs/heads/pr/w'), url: 'https://github.com/acme/gw/pull/7', headRepositoryOwner: { login: 'me' }, headRepository: { name: 'gw' }, headRefName: 'pr/w', baseRefName: 'main' });
+      return ok({ number: 7, state: data.pull?.state === 'closed' ? 'CLOSED' : 'OPEN', isDraft: false, headRefOid: data.headOid ?? git(t.fork, 'rev-parse', 'refs/heads/pr/w'), url: 'https://github.com/acme/gw/pull/7', headRepositoryOwner: { login: 'me' }, headRepository: { name: 'gw' }, headRefName: 'pr/w', baseRefName: 'main' });
     }
     if (args[0] === 'api' && args[1] === 'user') return ok('me\n');
     if (args[0] === 'api' && route === 'repos/acme/gw/pulls/7') return ok({ state: 'open', merged: false, mergeable_state: 'clean', head: { sha: 'x' }, ...data.pull });
@@ -229,6 +229,33 @@ describe('poll, ack and the write gate', () => {
     const code = await watchMain(['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone], { gh: fakeGh(t, { comments: [], failComments: true }), env: { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') }, out: l => out.push(l) });
     expect(code).toBe(12);
     expect(out[0]).toContain('RESULT UNVERIFIED');
+  });
+
+  test('a failing base scan keeps the P0 the REST reads found; with nothing found it is UNVERIFIED', async () => {
+    const t = topology('noupstream', null);
+    git(t.clone, 'remote', 'remove', 'upstream');
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') };
+    const out: string[] = [];
+    const argv = ['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone];
+    expect(await watchMain(argv, { gh: fakeGh(t, { comments: warning }), env, out: l => out.push(l) }), out.join('\n')).toBe(10);
+    expect(out[0]).toMatch(/^RESULT P0 .*error=.*no git remote for acme\/gw/);
+    expect(out.join('\n')).toContain('SIGNAL\tP0\tcomment:11\tsuperseded-comment');
+    const t2 = topology('noupstream-quiet', null);
+    git(t2.clone, 'remote', 'remove', 'upstream');
+    out.length = 0;
+    expect(await watchMain(argv.map(a => a === t.clone ? t2.clone : a), { gh: fakeGh(t2, { comments: [] }), env: { ...process.env, GSTACK_STATE_ROOT: path.join(t2.base, 'home') }, out: l => out.push(l) })).toBe(12);
+    expect(out[0]).toContain('RESULT UNVERIFIED');
+  });
+
+  test('a closed PR whose head branch was deleted still scans the base from the local head commit', async () => {
+    const t = topology('deleted', 'fix: wave (#7)');
+    const oid = git(t.fork, 'rev-parse', 'refs/heads/pr/w');
+    git(t.fork, 'update-ref', '-d', 'refs/heads/pr/w');
+    const out: string[] = [];
+    const gh = fakeGh(t, { comments: warning, headOid: oid, pull: { state: 'closed', merged: false } });
+    expect(await watchMain(['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone], { gh, env: { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') }, out: l => out.push(l) }), out.join('\n')).toBe(10);
+    expect(out[0]).not.toContain('error=');
+    for (const kind of ['superseded-comment', 'closed-unmerged', 'cited-on-base']) expect(out.join('\n')).toContain(kind);
   });
 
   test('a signal past the first hundred comments or timeline events is still read (GitHub lists oldest first)', async () => {

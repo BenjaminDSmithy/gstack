@@ -197,6 +197,10 @@ function ghJson<T>(d: WatchDeps, args: string[], what: string): T {
 
 class UnverifiedError extends Error {}
 
+/** A read that did not answer: UNVERIFIED. A busy PR lock (45) is not one; it propagates. */
+const unverifiable = (error: unknown): boolean =>
+  error instanceof UnverifiedError || (error instanceof PrContextError && error.code !== 45);
+
 const PAGE_SIZE = 100;
 const MAX_PAGES = 30;
 
@@ -261,13 +265,26 @@ function latchSignals(prev: PrState['signals'], signals: Signal[], now: Date): {
 
 export interface PollResult { code: number; signals: Signal[]; fresh: Signal[]; unacked: Signal[]; state: string; error?: string }
 
+/**
+ * The PR head commit for the merge base: GitHub's headRefOid when this
+ * checkout already has it (the usual case, and the only one left once a
+ * closed PR's branch is deleted), else a pin of the head branch.
+ */
+function headCommit(d: WatchDeps, cwd: string, pr: PrInfo): string {
+  const local = d.git(['cat-file', '-e', `${pr.headOid}^{commit}`], { cwd });
+  if (!local.error && local.status === 0) return pr.headOid;
+  if (!pr.headRepo) throw new UnverifiedError(`the head repository is deleted and ${pr.headOid.slice(0, 12)} is not in ${cwd}`);
+  const head = remoteForRepo(d.git, cwd, pr.headRepo);
+  if (!head) throw new UnverifiedError(`no git remote for ${pr.headRepo} in ${cwd}`);
+  return pinBranch(d.git, cwd, head, pr.headRef).sha;
+}
+
 /** Upstream base commits citing `(#N)` or carrying our trailer, since the PR's merge base. */
 function absorbedOnBase(d: WatchDeps, cwd: string, repo: string, pr: PrInfo, self: string): { sha: string; credit: boolean }[] {
   const up = remoteForRepo(d.git, cwd, repo);
-  const head = remoteForRepo(d.git, cwd, pr.headRepo);
-  if (!up || !head) throw new UnverifiedError(`no git remote for ${up ? pr.headRepo : repo} in ${cwd}`);
+  if (!up) throw new UnverifiedError(`no git remote for ${repo} in ${cwd}`);
   const b = pinBranch(d.git, cwd, up, pr.baseRef).sha;
-  const h = pinBranch(d.git, cwd, head, pr.headRef).sha;
+  const h = headCommit(d, cwd, pr);
   const mb = d.git(['merge-base', h, b], { cwd });
   if (mb.status !== 0) throw new UnverifiedError('git merge-base failed');
   const log = (grep: string, fixed: boolean) => {
@@ -302,7 +319,19 @@ export function poll(d: WatchDeps, repo: string, n: number, cwd: string): PollRe
     }
     const maintainers = new Set<string>([owner]);
     for (const c of comments) if (c.author_association && MAINTAINER_ASSOC.has(c.author_association) && c.user?.login) maintainers.add(c.user.login);
-    const absorbed = pull.merged ? [] : absorbedOnBase(d, cwd, repo, pr, self);
+    // The git half runs last and cannot discard what the REST reads found: a
+    // definite P0/P1 outranks a failed scan (reported as error=), and a scan
+    // failure with nothing else waiting is UNVERIFIED, never quiet.
+    let absorbed: { sha: string; credit: boolean }[] = [];
+    let scanError: string | undefined;
+    if (!pull.merged) {
+      try {
+        absorbed = absorbedOnBase(d, cwd, repo, pr, self);
+      } catch (error) {
+        if (!unverifiable(error)) throw error;
+        scanError = (error as Error).message;
+      }
+    }
     const signals = signalsFrom({ number: n, self, proxies, maintainers, pull, comments, reviews, timeline, absorbed });
     const dir = prStateDir({ cwd, topic: topicFor(pr.headRef), env: d.env });
     let fresh: Signal[] = [];
@@ -315,11 +344,12 @@ export function poll(d: WatchDeps, repo: string, n: number, cwd: string): PollRe
       const byId = new Map(signals.map(s => [s.id, s]));
       unacked = ack.latched.filter(l => !ack.acked.includes(l.id)).map(l => byId.get(l.id) ?? { ...l, who: '' } as Signal);
     });
-    const code = unacked.some(s => s.level === 'P0') ? WATCH_EXIT.P0 : unacked.some(s => s.level === 'P1') ? WATCH_EXIT.P1 : WATCH_EXIT.QUIET;
-    return { code, signals, fresh, unacked, state: pull.merged ? 'merged' : (pull.state ?? '?') };
+    const code = unacked.some(s => s.level === 'P0') ? WATCH_EXIT.P0 : unacked.some(s => s.level === 'P1') ? WATCH_EXIT.P1
+      : scanError ? WATCH_EXIT.UNVERIFIED : WATCH_EXIT.QUIET;
+    return { code, signals, fresh, unacked, state: pull.merged ? 'merged' : (pull.state ?? '?'), error: scanError };
   } catch (error) {
-    if (error instanceof UnverifiedError || (error instanceof PrContextError && error.code !== 45)) {
-      return { code: WATCH_EXIT.UNVERIFIED, signals: [], fresh: [], unacked: [], state: pr.state.toLowerCase(), error: error.message };
+    if (unverifiable(error)) {
+      return { code: WATCH_EXIT.UNVERIFIED, signals: [], fresh: [], unacked: [], state: pr.state.toLowerCase(), error: (error as Error).message };
     }
     throw error;
   }
