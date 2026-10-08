@@ -347,6 +347,52 @@ describe('poll, ack and the write gate', () => {
   });
 });
 
+describe('size before the PR is open', () => {
+  /** gh for `size` without --pr: the default branch, and a baseline that is not read (static thresholds). */
+  const sizeGh = (() => (args: string[]) => {
+    if (args[0] === 'repo' && args[1] === 'view') return { status: 0, stdout: 'main\n', stderr: '' };
+    return { status: 1, stdout: '', stderr: 'offline' };
+  }) as () => GhRunner;
+
+  function branch(name: string, orphan: boolean) {
+    const base = path.join(ROOT, name);
+    const up = path.join(base, 'up', 'acme', 'gw.git');
+    fs.mkdirSync(up, { recursive: true });
+    git(up, 'init', '-q', '--bare', '-b', 'main');
+    const clone = path.join(base, 'clone');
+    fs.mkdirSync(clone, { recursive: true });
+    git(clone, 'init', '-q', '-b', 'main');
+    fs.writeFileSync(path.join(clone, 'a.txt'), 'a\n');
+    git(clone, 'add', '-A'); git(clone, 'commit', '-q', '-m', 'base');
+    git(clone, 'remote', 'add', 'upstream', up);
+    git(clone, 'push', '-q', 'upstream', 'main');
+    git(clone, 'checkout', '-q', ...(orphan ? ['--orphan', 'pr/w'] : ['-b', 'pr/w']));
+    fs.mkdirSync(path.join(clone, 'sub'), { recursive: true });
+    for (let i = 0; i < 30; i++) fs.writeFileSync(path.join(clone, i < 15 ? '' : 'sub', `f${i}.txt`), 'x\n'.repeat(100));
+    git(clone, 'add', '-A'); git(clone, 'commit', '-q', '-m', 'feat: big');
+    return clone;
+  }
+  const size = async (cwd: string) => {
+    const out: string[] = [];
+    const code = await watchMain(['size', '--repo', 'acme/gw', '--cwd', cwd], { gh: sizeGh(), out: l => out.push(l) });
+    return { code, first: out.find(l => l.startsWith('RESULT ')) ?? '' };
+  };
+
+  test('the count covers the whole repository, whichever directory it runs from', async () => {
+    const clone = branch('size-sub', false);
+    const root = await size(clone);
+    expect(root).toMatchObject({ code: 0 });
+    expect(root.first).toMatch(/^RESULT RED churn=3000 files=30 commits=1/);
+    expect((await size(path.join(clone, 'sub'))).first).toBe(root.first);
+  });
+
+  test('a branch with no merge base is an error, never a GREEN zero', async () => {
+    const r = await size(branch('size-orphan', true));
+    expect(r.code).toBe(1);
+    expect(r.first).toMatch(/^RESULT ERROR .*merge-base/);
+  });
+});
+
 describe('LaunchAgent runner', () => {
   test('polls only valid enabled PRs and notifies with fixed text for P0/P1', () => {
     const base = path.join(ROOT, 'runner');

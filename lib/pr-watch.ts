@@ -428,12 +428,24 @@ function cmdSize(d: WatchDeps, f: Flags): number {
     const up = remoteForRepo(d.git, f.cwd, repo);
     if (!up) throw new PrContextError(`no git remote in ${f.cwd} points at ${repo}`, 30);
     const base = pinBranch(d.git, f.cwd, up, defaultBranchFromGh(d.gh, repo)).sha;
-    const mb = d.git(['merge-base', 'HEAD', base], { cwd: f.cwd }).stdout.trim();
-    const num = d.git(['diff', '--numstat', mb, 'HEAD', '--', '.', ...RELEASE_FILES.map(r => `:(exclude)${r}`)], { cwd: f.cwd }).stdout.split('\n').filter(Boolean);
+    // Every git call is checked: a failed merge-base used to leave mb '' and
+    // print a confident GREEN churn=0. The diff runs from the top level, so a
+    // subdirectory cwd does not shrink the count to its own subtree.
+    const run = (args: string[], cwd: string) => {
+      const r = d.git(args, { cwd });
+      if (r.error || r.status !== 0) throw new PrContextError(`git ${args[0]} failed: ${(r.error ?? r.stderr).trim().split('\n').at(-1) || `exit ${r.status}`}`, 1);
+      return r.stdout.trim();
+    };
+    const top = run(['rev-parse', '--show-toplevel'], f.cwd);
+    const mb = run(['merge-base', 'HEAD', base], top);
+    if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(mb)) throw new PrContextError(`git merge-base printed no commit (got ${JSON.stringify(mb.slice(0, 80))})`, 1);
+    const num = run(['diff', '--numstat', mb, 'HEAD', '--', '.', ...RELEASE_FILES.map(r => `:(exclude)${r}`)], top).split('\n').filter(Boolean);
+    const commits = run(['rev-list', '--no-merges', '--count', `${mb}..HEAD`], top);
+    if (!/^\d+$/.test(commits)) throw new PrContextError(`git rev-list printed no count (got ${JSON.stringify(commits.slice(0, 80))})`, 1);
     ours = {
       churn: num.reduce((s, l) => s + l.split('\t').slice(0, 2).reduce((a, x) => a + (Number(x) || 0), 0), 0),
       files: num.length,
-      commits: Number(d.git(['rev-list', '--no-merges', '--count', `${mb}..HEAD`], { cwd: f.cwd }).stdout.trim()),
+      commits: Number(commits),
     };
   }
   const owner = repo.split('/')[0].toLowerCase();
