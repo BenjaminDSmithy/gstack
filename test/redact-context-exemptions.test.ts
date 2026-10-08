@@ -169,6 +169,11 @@ describe("pii.ip_public: a four-part version needs a version declaration (#2784)
       "`VERSION` endpoint at 8.8.8.8",
       "Version → bump; resolver 8.8.4.4",
       "the server's 8.8.8.8",
+      // A code span alone never makes its word a version key.
+      "`gateway` → 8.8.8.8",
+      "`host` → 1.91.28.0",
+      "`resolver`: 8.8.4.4",
+      "run `ping 8.8.8.8`",
       // An arrow or a backtick counts only after a standalone version word: a
       // route, a DNS label or a field whose name ends in "version" maps to an
       // address.
@@ -183,6 +188,20 @@ describe("pii.ip_public: a four-part version needs a version declaration (#2784)
       `diversion${" ".repeat(20)}→${" ".repeat(20)}8.8.8.8`,
     ],
   );
+
+  // The residual accepted with D4: a published version written after a key
+  // that is not a version key still reads as an address. Only the exact
+  // published versions `gstack-pr-body publish` allowlists clear it, never a
+  // real address that shares their prefix.
+  test("`host` → 1.91.28.0 is clean only with 1.91.28.0 allowlisted", () => {
+    const ipIds = (text: string, allowlist?: string[]) =>
+      scan(text, { repoVisibility: "private", allowlist })
+        .findings.filter((f) => f.id === "pii.ip_public")
+        .map((f) => f.severity);
+    expect(ipIds("`host` → 1.91.28.0")).toEqual(["MEDIUM"]);
+    expect(ipIds("`host` → 1.91.28.0", ["1.91.28.0"])).toEqual([]);
+    expect(ipIds("`host` → 1.91.28.10", ["1.91.28.1"])).toEqual(["MEDIUM"]);
+  });
 });
 
 describe("db.url_with_password: postgres:postgres only on a loopback host (#2913)", () => {
