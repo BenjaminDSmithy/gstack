@@ -89,9 +89,9 @@ diff, a body that is not the approved sha256, or a facts block that is
 not the generated one), 22 redaction (HIGH, or
 MEDIUM not confirmed), 30 precondition (PR not OPEN, the pre-write gate or
 a gate older than 60 s, facts naming an older head, or a body_stale_since
-push outside the head's history), 40 liveness pending (check). facts,
-render, check and publish report body-stale-since=<sha|none> on their
-RESULT line.`;
+push outside the head's history), 40 liveness pending (check). Once the
+PR is resolved, every RESULT line of every subcommand, refusals and
+errors included, reports body-stale-since=<sha|none>.`;
 
 export const FACTS_BEGIN = '<!-- pr-prep:facts:begin v1 -->';
 export const FACTS_END = '<!-- pr-prep:facts:end -->';
@@ -479,7 +479,11 @@ function resolveCtx(d: BodyDeps, f: Flags): Ctx {
   if (!f.pr) throw new PrContextError('--pr is required', 2);
   const repo = f.repo ?? upstreamRepoFromGh(d.gh, f.cwd);
   const pr = readPr(d.gh, repo, parsePrRefFor(f.pr, repo));
-  return { d, f, repo, pr, stateDir: prStateDir({ cwd: f.cwd, topic: topicFor(pr.headRef), env: d.env }) };
+  const c: Ctx = { d, f, repo, pr, stateDir: prStateDir({ cwd: f.cwd, topic: topicFor(pr.headRef), env: d.env }) };
+  // Every RESULT line from here on, refusals and errors included, says
+  // whether a sync or ci: push left the body stale.
+  c.d = { ...d, out: line => d.out(line.startsWith('RESULT ') && !line.includes(' body-stale-since=') ? `${line} ${staleFieldOrUnknown(c)}` : line) };
+  return c;
 }
 
 function liveBody(c: Ctx): string {
@@ -853,6 +857,14 @@ function staleField(c: Ctx): string {
   return `body-stale-since=${stale ? s12(stale) : 'none'}`;
 }
 
+function staleFieldOrUnknown(c: Ctx): string {
+  try {
+    return staleField(c);
+  } catch {
+    return 'body-stale-since=unknown';
+  }
+}
+
 /** The pre-write gate must have run within this long of the edit (plan: "within 60 s of the write"). */
 export const GATE_MAX_AGE_MS = 60_000;
 
@@ -977,19 +989,19 @@ function cmdPublish(c: Ctx): number {
     } catch (error) {
       if (!(error instanceof PrContextError)) throw error;
       const restore = saveRestore(c, live);
-      d.out(`RESULT ERROR the edit was sent${editFailure ? ` (gh pr edit reported: ${editFailure})` : ''} but the read-back failed (${error.message}), so what GitHub holds is unknown. The pre-publish body is saved at ${restore}. Tell the owner; with their yes, run this publish again: it records the publish with no second edit when GitHub holds exactly this body ${staleField(c)}`);
+      d.out(`RESULT ERROR the edit was sent${editFailure ? ` (gh pr edit reported: ${editFailure})` : ''} but the read-back failed (${error.message}), so what GitHub holds is unknown. The pre-publish body is saved at ${restore}. Tell the owner; with their yes, run this publish again: it records the publish with no second edit when GitHub holds exactly this body`);
       return BODY_EXIT.ERROR;
     }
     if (after === body) return recordPublished(c, state, body, factsHead, stale, [], editFailure ? [`NOTE gh pr edit reported "${editFailure}", but the read-back is exactly the body sent`] : []);
     if (editFailure && after === live) {
-      d.out(`RESULT ERROR gh pr edit failed: ${editFailure}; the read-back shows the live body unchanged ${staleField(c)}`);
+      d.out(`RESULT ERROR gh pr edit failed: ${editFailure}; the read-back shows the live body unchanged`);
       return BODY_EXIT.ERROR;
     }
     // The read-back must hold exactly the bytes sent. Anything else (a web
     // save or a bot edit in the window) is reported, and the stored body is
     // NOT recorded as ours, so the next publish shows the difference.
     const restore = saveRestore(c, live);
-    d.out(`RESULT ERROR the read-back is not the body sent (a concurrent web edit?${editFailure ? `; gh pr edit reported: ${editFailure}` : ''}). The pre-publish body is saved at ${restore}; do not re-edit automatically, tell the owner. The difference, sent -> stored, follows. ${staleField(c)}`);
+    d.out(`RESULT ERROR the read-back is not the body sent (a concurrent web edit?${editFailure ? `; gh pr edit reported: ${editFailure}` : ''}). The pre-publish body is saved at ${restore}; do not re-edit automatically, tell the owner. The difference, sent -> stored, follows.`);
     printOwnerContent(d, 'VANISHED', lostOwnerContent(live, after), c.pr.number);
     d.out(envelope(lineDiff(body, after), `pr-${c.pr.number}-sent-vs-stored`));
     return BODY_EXIT.ERROR;
@@ -1108,20 +1120,23 @@ export async function bodyMain(argv: string[], deps: Partial<BodyDeps> = {}): Pr
     d.out(BODY_USAGE);
     return argv.length ? 0 : BODY_EXIT.USAGE;
   }
+  let c: Ctx | null = null;
   try {
     const f = parseBodyArgs(argv);
     if (!['facts', 'render', 'publish', 'check'].includes(f.sub)) throw new PrContextError(`unknown subcommand ${JSON.stringify(f.sub)}`, 2);
-    const c = resolveCtx(d, f);
+    c = resolveCtx(d, f);
     if (f.sub === 'facts') return cmdFacts(c);
     if (f.sub === 'render') return cmdRender(c);
     if (f.sub === 'publish') return cmdPublish(c);
     return await cmdCheck(c);
   } catch (error) {
+    // Once the PR is resolved, its error lines carry body-stale-since too.
+    const out = c ? c.d.out : d.out;
     if (error instanceof PrContextError) {
-      d.out(`RESULT ${error.code === 2 ? 'USAGE' : error.code === 30 ? 'PRECONDITION' : 'ERROR'} ${error.message}`);
+      out(`RESULT ${error.code === 2 ? 'USAGE' : error.code === 30 ? 'PRECONDITION' : 'ERROR'} ${error.message}`);
       return error.code;
     }
-    d.out(`RESULT ERROR ${(error as Error).message}`);
+    out(`RESULT ERROR ${(error as Error).message}`);
     return BODY_EXIT.ERROR;
   }
 }

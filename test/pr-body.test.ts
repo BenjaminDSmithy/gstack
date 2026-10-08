@@ -538,6 +538,33 @@ describe('publish', () => {
     expect(f.out[0]).toContain('body-stale-since=none');
   });
 
+  test('every publish RESULT line reports body-stale-since, refusals and thrown preconditions included', async () => {
+    const f = fixture('stale-every', TEMPLATE);
+    const file = await rendered(f);
+    const head = git(f.clone, 'rev-parse', 'HEAD');
+    writeState(f.dir, {
+      v: 1, topic: topicFor('pr/b'), repo: 'acme/gx', number: 9, headRef: 'pr/b', headOwner: 'me', headRemote: null, upstreamRemote: null,
+      defaultBranch: 'main', focused: null, validation: null, bodyStaleSince: head, lastPublishedBodySha256: null, signals: { latched: [], acked: [] }, audit: null,
+    });
+    const field = `body-stale-since=${head.slice(0, 12)}`;
+    const results = async (argv: string[], code: number) => {
+      f.out.length = 0;
+      expect(await f.call(argv)).toBe(code);
+      return f.out.filter(l => l.startsWith('RESULT '));
+    };
+    const lines = [
+      ...(await results(['publish', '--body', file, '--body-sha256', 'f'.repeat(12), '--yes'], 20)),
+      ...(await results(['publish', '--body', file, '--body-sha256', f.shaOf(file), '--yes'], 20)),
+    ];
+    f.deps.preWriteGate = () => ({ ok: false, reason: 'unacknowledged P1 attention [c41]' });
+    lines.push(...(await results(['publish', '--body', file, '--body-sha256', f.shaOf(file), '--yes', ...f.acceptLive(file)], 30)));
+    const leak = await rendered(f, TEMPLATE.replace('Because.', `Because ghp_${'1234567890abcdefghijklmnopqrstuvwxyz'} leaked.`));
+    lines.push(...(await results(['publish', '--body', leak, '--body-sha256', f.shaOf(leak), '--yes'], 22)));
+    expect(lines.map(l => l.split(' ').slice(0, 2).join(' '))).toEqual(['RESULT REFUSED', 'RESULT REFUSED', 'RESULT PRECONDITION', 'RESULT REDACTION']);
+    for (const l of lines) expect(l).toContain(field);
+    expect(f.edits).toHaveLength(0);
+  });
+
   test('a read-back that is not the body sent is an error: nothing is recorded as ours, and the next publish shows the difference', async () => {
     const f = fixture('readback', TEMPLATE, { storeEdit: sent => `${sent}MAINTAINER-NOTE please split this PR\n` });
     const file = await rendered(f);
