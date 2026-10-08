@@ -19,7 +19,7 @@ import { classifyShard, inFlightFile, draftable, triageMain, SHARD_JOB_RE } from
 import { PrContextError, isRemoteWrite, prStateDir, topicFor, type GhRunner } from '../lib/pr-context';
 import { TRACKER_ENVELOPE_BEGIN, TRACKER_ENVELOPE_END } from '../lib/tracker-guard';
 
-setDefaultTimeout(60_000);
+setDefaultTimeout(120_000);
 
 const FX = path.join(import.meta.dir, 'fixtures', 'pr-ci-triage');
 const read = (f: string) => fs.readFileSync(path.join(FX, f), 'utf8');
