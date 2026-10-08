@@ -198,7 +198,7 @@ function topology(name: string, mainMsg: string | null) {
   return { base, clone, fork };
 }
 
-interface FakeData { comments?: unknown[]; reviews?: unknown[]; timeline?: unknown[]; pull?: Record<string, unknown>; failComments?: boolean; headOid?: string }
+interface FakeData { comments?: unknown[]; reviews?: unknown[]; timeline?: unknown[]; pull?: Record<string, unknown>; failComments?: boolean; headOid?: string; merged?: unknown[] }
 
 /** Answers list endpoints the way GitHub does: one page per call (per_page capped at 100, default 30), oldest first. */
 function fakeGh(t: { fork: string }, data: FakeData): GhRunner & { calls: string[][] } {
@@ -223,7 +223,7 @@ function fakeGh(t: { fork: string }, data: FakeData): GhRunner & { calls: string
     if (args[0] === 'api' && route === 'repos/acme/gw/issues/7/comments') return data.failComments ? { status: 1, stdout: '', stderr: 'HTTP 502' } : page(data.comments);
     if (args[0] === 'api' && route === 'repos/acme/gw/pulls/7/reviews') return page(data.reviews);
     if (args[0] === 'api' && route === 'repos/acme/gw/issues/7/timeline') return page(data.timeline);
-    if (args[0] === 'pr' && args[1] === 'list') return ok([{ mergedBy: { login: 'capy-ai' } }]);
+    if (args[0] === 'pr' && args[1] === 'list') return ok(data.merged ?? [{ mergedBy: { login: 'capy-ai' } }]);
     return { status: 1, stdout: '', stderr: `unexpected gh ${args.join(' ')}` };
   }) as GhRunner & { calls: string[][] };
   gh.calls = calls;
@@ -280,6 +280,49 @@ describe('poll, ack and the write gate', () => {
     expect(pollForWrite({ gh, git: defaultGit, env, now: () => new Date(), out: () => {} }, 'acme/gw', 7, t.clone).ok).toBe(false);
     expect(await watchMain(argv('ack', 'comment:77'), { gh, env, out: () => {} })).toBe(0);
     expect(await watchMain(argv('poll'), { gh, env, out: () => {} })).toBe(0);
+  });
+
+  describe('a latch reports at its latched level when a later poll reads the signal lower', () => {
+    /** Two polls of one PR; `change` edits the fake GitHub data between them. Returns the second poll and its write gate. */
+    const twoPolls = async (name: string, data: FakeData, first: number, change: (d: FakeData) => void) => {
+      const t = topology(name, null);
+      const env = { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') };
+      const gh = fakeGh(t, data);
+      const argv = ['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone];
+      expect(await watchMain(argv, { gh, env, out: () => {} })).toBe(first);
+      change(data);
+      const out: string[] = [];
+      const code = await watchMain(argv, { gh, env, out: l => out.push(l) });
+      return { code, text: out.join('\n'), gate: pollForWrite({ gh, git: defaultGit, env, now: () => new Date(), out: () => {} }, 'acme/gw', 7, t.clone) };
+    };
+    const comment = (id: number, login: string, assoc: string, body: string, type = 'User') => ({ id, user: { login, type }, author_association: assoc, created_at: '2026-10-01T00:00:00Z', html_url: 'u', body });
+
+    test('a merge bot that has left the last 30 mergedBy still reads P0 (exit 10, never QUIET)', async () => {
+      const r = await twoPolls('lower-proxy', { merged: [{ mergedBy: { login: 'app/fixbot', is_bot: true } }], comments: [comment(501, 'fixbot[bot]', 'NONE', 'Superseded by #9, closing.', 'Bot')] }, 10, d => { d.merged = []; });
+      expect(r.code, r.text).toBe(10);
+      expect(r.text).toMatch(/^RESULT P0 /);
+      expect(r.text).toMatch(/SIGNAL\tP0\tcomment:501\tsuperseded-comment\t.*now reads P2 bot-comment/);
+      expect(r.gate.reason).toContain('P0 superseded-comment [comment:501]');
+    });
+
+    test('a supersede notice edited into plain text stays P0', async () => {
+      const r = await twoPolls('lower-edit', { comments: [comment(77, 'acme', 'OWNER', 'Closing in favour of #9.')] }, 10, d => { d.comments = [comment(77, 'acme', 'OWNER', 'Can you rebase?')]; });
+      expect(r.code, r.text).toBe(10);
+      expect(r.text).toContain('SIGNAL\tP0\tcomment:77\tsuperseded-comment');
+    });
+
+    test('a collaborator whose association drops stays P1 (exit 11)', async () => {
+      const r = await twoPolls('lower-assoc', { comments: [comment(88, 'helper', 'COLLABORATOR', 'Looks close.')] }, 11, d => { d.comments = [comment(88, 'helper', 'CONTRIBUTOR', 'Looks close.')]; });
+      expect(r.code, r.text).toBe(11);
+      expect(r.text).toContain('SIGNAL\tP1\tcomment:88\tmaintainer-comment');
+    });
+
+    test('a lower cross-reference later in the timeline from the same issue does not hide a P0 one', async () => {
+      const xref = (actor: string) => ({ event: 'cross-referenced', actor: { login: actor, type: 'User' }, created_at: '2026-10-02T00:00:00Z', source: { issue: { number: 50, user: { login: 'acme' }, author_association: 'OWNER', pull_request: { url: 'https://api.github.com/repos/acme/gw/pulls/50' } } } });
+      const r = await twoPolls('lower-xref', { timeline: [xref('acme'), xref('rando')] }, 10, () => {});
+      expect(r.code, r.text).toBe(10);
+      expect(r.text).toContain('SIGNAL\tP0\txref:50\tmaintainer-cross-reference');
+    });
   });
 
   test('our trailer on a base commit that cites this PR is ABSORBED-WITH-CREDIT; credit for another PR is information', async () => {
