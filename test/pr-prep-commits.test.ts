@@ -150,6 +150,25 @@ describe('stampReport', () => {
     expect(r2.worst).toBe('CLEAN');
   });
 
+  test('a known EXACT_DUP survives a re-check that did not run, with its hits', () => {
+    const first = listAuditCommits(defaultGit, repo, base, null);
+    const hit = { ref: '#1358', title: 't', state: 'OPEN', score: 0.8 };
+    const r1 = stampReport({ summary: 's', commits: [{ sha: sha.c1, bucket: 'EXACT_DUP', topScore: 0.8, hits: [hit] }, { sha: sha.c4, bucket: 'CLEAN' }] }, first, now);
+    const l = listAuditCommits(defaultGit, repo, base, r1 as PriorReport);
+    expect(l.audit[0].mode).toBe('RECHECK');
+    // The full search hit the secondary limit (UNVERIFIED), mixed a failed and a clean row, or the agent left the commit out.
+    const failed = [
+      [{ sha: sha.c1, bucket: 'UNVERIFIED' }, { sha: sha.c4, bucket: 'CLEAN' }],
+      [{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c1, bucket: 'UNVERIFIED' }, { sha: sha.c4, bucket: 'CLEAN' }],
+      [{ sha: sha.c4, bucket: 'CLEAN' }],
+    ];
+    for (const rows of failed) {
+      const r = stampReport({ summary: 's', commits: rows }, l, now) as Record<string, any>;
+      expect([r.worst, r.commits[0].bucket, r.commits[0].topScore]).toEqual(['EXACT_DUP', 'EXACT_DUP', 0.8]);
+      expect(r.commits[0].hits.map((h: { ref: string }) => h.ref)).toEqual(['#1358']);
+    }
+  });
+
   test('a carried commit lists each upstream hit once and keeps its highest score', () => {
     const first = listAuditCommits(defaultGit, repo, base, null);
     const hit = (score: number) => ({ ref: '#3000', title: 't', state: 'OPEN', score });
