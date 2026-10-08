@@ -16,8 +16,10 @@
  *
  * A draft is written ONLY for a CRASH whose signature, exit code, empty
  * failingFiles and clean log all agree, or a HANG whose shard passed on an
- * earlier run of the identical tree, and in both cases only when the
- * runner's own count says the missing summary was the only failure. A
+ * earlier run that tested the identical tree (the revision each result
+ * artifact records: the head merged into the base of the day) with the
+ * same planned files, and in both cases only when the runner's own count
+ * says the missing summary was the only failure. A
  * failure that names a test is REAL and gets the blame protocol instead.
  * The onset scan is disclosure only: these flakes appear on other branches
  * at a background rate, so "it also happened elsewhere" never clears a run.
@@ -51,12 +53,14 @@ export const TRIAGE_USAGE = `gstack-pr-ci-triage <run|onset> [options]
 
 A ci: commit message is drafted only for a CRASH whose signature, exit
 code (3 or 9), empty failingFiles and log (no "(fail)" or "✗" line, no
-unhandled error) agree, or a HANG whose shard passed on an earlier run of
-the same tree; in both, the runner must count the missing summary as the
-only unattributed failure. And only when the run has finished, is for the
-PR's current head (cross-checked against the head remote when this
-checkout has one) and has no newer run; a stale run's artifacts are never
-downloaded.
+unhandled error) agree, or a HANG whose shard passed on an earlier run
+that tested the same tree with the same files (each result's recorded
+revision, resolved by a read-only gh api GET: for a pull_request run, the
+head merged into the base as it stood); in both, the runner must count the
+missing summary as the only unattributed failure. And only when the run
+has finished, is for the PR's current head (cross-checked against the head
+remote when this checkout has one) and has no newer run; a stale run's
+artifacts are never downloaded.
 
 Exit codes: 0 drafted, 1 error, 2 usage, 10 triaged without a draft
 (REAL, UNKNOWN, a stale run, or evidence missing), 11 nothing failed,
@@ -90,7 +94,36 @@ export interface ShardTriage {
   shard: number; klass: ShardClass; signature: 'IOCP' | 'GLib' | null; inFlight: string | null;
   /** Test failure lines (`(fail)` or `✗`) and `# Unhandled error between tests` lines in the log. */
   failLines: number; unhandled: number; logRead: boolean;
-  outcome: ShardOutcome | null; why: string; sameTreeGreen: string | null;
+  outcome: ShardOutcome | null; why: string;
+  /** The earlier run that passed this shard on the same tested tree and files (HANG only), and, when there is none, why. */
+  sameTreeGreen: string | null; sameTreeWhy?: string;
+}
+
+/**
+ * What a windows-result-<n> artifact says CI tested: `revision` is the
+ * commit the runner checked out (`git rev-parse HEAD`; for a pull_request
+ * run that is refs/pull/N/merge, the PR head merged into the base as it
+ * stood when the run started), `files` the test files the plan gave the
+ * shard. Either is null when the artifact does not carry it.
+ */
+export interface TestedIdentity { revision: string | null; files: string[] | null }
+
+const OBJECT_ID_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+
+export function parseTestedIdentity(text: string): TestedIdentity {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { revision: null, files: null };
+  }
+  const r = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const o = r.outcome && typeof r.outcome === 'object' ? (r.outcome as Record<string, unknown>) : {};
+  const files = o.files;
+  return {
+    revision: typeof r.revision === 'string' && OBJECT_ID_RE.test(r.revision) ? r.revision : null,
+    files: Array.isArray(files) && files.length > 0 && files.every(f => typeof f === 'string') ? (files as string[]) : null,
+  };
 }
 
 /** Failure evidence in a shard log, read with the free runner's own line classifier. */
@@ -229,7 +262,7 @@ export function noDraftReason(t: ShardTriage): string {
   if (o?.unattributedFailures !== 1 || o.summary?.sawTerminalSummary !== false) {
     return `the runner counted ${exitWord(o?.unattributedFailures)} unattributed failure(s), not only the missing terminal summary`;
   }
-  if (t.klass === 'HANG' && !t.sameTreeGreen) return 'no earlier run of this tree passed the shard';
+  if (t.klass === 'HANG' && !t.sameTreeGreen) return t.sameTreeWhy ?? 'no earlier run that tested the same tree passed the shard';
   return t.why;
 }
 
@@ -248,7 +281,7 @@ export function draftMessage(x: { run: number; head: string; shards: ShardTriage
   const lines = [subject, '', `Windows Free Tests run ${x.run} on ${x.head.slice(0, 9)} failed with no failing test:`, ''];
   for (const t of x.shards) {
     const reason = t.klass === 'HANG' ? `hang, ${t.why}` : t.why;
-    const passed = t.klass === 'HANG' ? `; the same tree passed this shard in run ${t.sameTreeGreen}` : '';
+    const passed = t.klass === 'HANG' ? `; the same tested tree passed this shard in run ${t.sameTreeGreen}` : '';
     lines.push(`- shard ${t.shard}: ${reason}${t.inFlight ? `, in ${t.inFlight}` : ''}${passed}.`);
   }
   lines.push('', 'A fork contributor cannot re-run the job, so this empty commit triggers', 'a fresh run.', '');
@@ -380,18 +413,43 @@ function treeOf(d: TriageDeps, cwd: string, sha: string): string | null {
   return r.status === 0 ? r.stdout.trim() : null;
 }
 
-/** An earlier run, on a commit with the identical tree, whose same shard passed. */
-function sameTreeGreen(d: TriageDeps, cwd: string, repo: string, pr: PrInfo, run: RunInfo, shard: number): string | null {
-  const tree = treeOf(d, cwd, run.headSha);
-  if (!tree) return null;
+/** The tree of a commit CI tested, by a read-only GET (a pull_request merge commit exists only on GitHub), or null. */
+function testedTree(d: TriageDeps, repo: string, revision: string): string | null {
+  const r = d.gh(['api', `repos/${repo}/commits/${revision}`, '--jq', '.commit.tree.sha']);
+  const tree = r.status === 0 ? r.stdout.trim() : '';
+  return OBJECT_ID_RE.test(tree) ? tree : null;
+}
+
+const sameFiles = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((f, i) => f === b[i]);
+
+/**
+ * An earlier run whose same shard passed on the tree this hang tested, with
+ * the same planned files. A pull_request run tests refs/pull/N/merge, the
+ * head merged into the base as it stood then, so two runs of one head
+ * commit test different code once the base moves, and the plan packs the
+ * shard from that merged tree. The comparison is therefore between the
+ * revisions each windows-result-<n> records, resolved to trees. Anything
+ * missing or unreadable is no evidence.
+ */
+async function sameTreeGreen(d: TriageDeps, repo: string, pr: PrInfo, run: RunInfo, shard: number, hung: TestedIdentity): Promise<{ green: string | null; why: string }> {
+  if (!hung.revision || !hung.files) return { green: null, why: 'the shard result records no tested revision or planned files' };
+  const tree = testedTree(d, repo, hung.revision);
+  if (!tree) return { green: null, why: `the tested revision ${hung.revision.slice(0, 12)} could not be read from GitHub` };
   const runs = ghJson<RunInfo[]>(d, ['run', 'list', '-R', repo, '--workflow', 'windows-free-tests.yml', '--branch', pr.headRef, '--limit', '30', '--json', RUN_FIELDS], 'gh run list');
   for (const r of runs) {
-    if (r.databaseId === run.databaseId || r.headSha === run.headSha || treeOf(d, cwd, r.headSha) !== tree) continue;
+    // Only an earlier run is evidence; any run of the same commit included, since the tested tree decides.
+    if (!(r.databaseId < run.databaseId)) continue;
     const view = ghJson<RunInfo>(d, ['run', 'view', String(r.databaseId), '-R', repo, '--json', 'databaseId,headSha,jobs'], 'gh run view');
-    const job = (view.jobs ?? []).find(j => SHARD_JOB_RE.exec(j.name)?.[1] === String(shard));
-    if (job?.conclusion === 'success') return String(r.databaseId);
+    const jobs = (view.jobs ?? []).filter(j => SHARD_JOB_RE.exec(j.name)?.[1] === String(shard));
+    if (!jobs.length || jobs.some(j => j.conclusion !== 'success')) continue;
+    const file = await download(d, repo, r.databaseId, `windows-result-${shard}`);
+    const text = file ? fs.readFileSync(file, 'utf8') : '';
+    if (parseOutcome(text)?.status !== 'passed') continue;
+    const id = parseTestedIdentity(text);
+    if (!id.revision || !id.files || !sameFiles(id.files, hung.files)) continue;
+    if (id.revision === hung.revision || testedTree(d, repo, id.revision) === tree) return { green: String(r.databaseId), why: '' };
   }
-  return null;
+  return { green: null, why: 'no earlier run that tested the same tree and files passed the shard' };
 }
 
 async function cmdRun(d: TriageDeps, f: Flags): Promise<number> {
@@ -441,12 +499,17 @@ async function cmdRun(d: TriageDeps, f: Flags): Promise<number> {
   const triaged: ShardTriage[] = [];
   for (const n of shards) {
     const resFile = await download(d, repo, runId, `windows-result-${n}`);
-    const outcome = resFile ? parseOutcome(fs.readFileSync(resFile, 'utf8')) : null;
+    const resText = resFile ? fs.readFileSync(resFile, 'utf8') : null;
+    const outcome = resText !== null ? parseOutcome(resText) : null;
     const needsLog = outcome && outcome.status !== 'passed' && (outcome.failingFiles ?? []).length === 0;
     const logFile = needsLog ? await download(d, repo, runId, `windows-free-test-shard-logs-${n}`) : null;
     const log = logFile ? fs.readFileSync(logFile, 'utf8') : null;
     const t = classifyShard(n, outcome, log);
-    if (t.klass === 'HANG') t.sameTreeGreen = sameTreeGreen(d, f.cwd, repo, pr, run, n);
+    if (t.klass === 'HANG') {
+      const evidence = await sameTreeGreen(d, repo, pr, run, n, parseTestedIdentity(resText ?? ''));
+      t.sameTreeGreen = evidence.green;
+      if (!evidence.green) t.sameTreeWhy = evidence.why;
+    }
     triaged.push(t);
     detail.push(`SHARD\t${n}\t${t.klass}${t.signature ? `(${t.signature})` : ''}\t${t.why}${t.inFlight ? `\tin-flight ${t.inFlight}` : ''}${t.klass === 'HANG' ? `\tsame-tree-green ${t.sameTreeGreen ?? 'none'}` : ''}`);
     const hidden = unprintableFailing(t.outcome);
