@@ -169,6 +169,13 @@ describe("pii.ip_public: a four-part version needs a version declaration (#2784)
       "`VERSION` endpoint at 8.8.8.8",
       "Version → bump; resolver 8.8.4.4",
       "the server's 8.8.8.8",
+      // An arrow or a backtick counts only after a standalone version word: a
+      // route, a DNS label or a field whose name ends in "version" maps to an
+      // address.
+      "Routes: `/healthz` → 10.0.0.5, `/version` → 34.120.5.6",
+      "GET /version -> 34.120.5.6",
+      "DNS: `api-version` → 8.8.8.8",
+      "proxyVersion → 8.8.8.8",
     ],
   );
 });
