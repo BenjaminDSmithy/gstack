@@ -521,45 +521,9 @@ and `gh pr create` in the open mode. For each one:
    or have only the commits-being-audited. Abort cleanly if the
    working tree has unrelated mid-edit state.
 
-2. Determine the base branch (already set by `## Step 0: Detect platform and base branch
-
-First, detect the git hosting platform from the remote URL:
-
-```bash
-git remote get-url origin 2>/dev/null
-```
-
-- If the URL contains "github.com" → platform is **GitHub**
-- If the URL contains "gitlab" → platform is **GitLab**
-- Otherwise, check CLI availability:
-  - `gh auth status 2>/dev/null` succeeds → platform is **GitHub** (covers GitHub Enterprise)
-  - `glab auth status 2>/dev/null` succeeds → platform is **GitLab** (covers self-hosted)
-  - Neither → **unknown** (use git-native commands only)
-
-Determine which branch this PR/MR targets, or the repo's default branch if no
-PR/MR exists. Use the result as "the base branch" in all subsequent steps.
-
-**If GitHub:**
-1. `gh pr view --json baseRefName -q .baseRefName` — if succeeds, use it
-2. `gh repo view --json defaultBranchRef -q .defaultBranchRef.name` — if succeeds, use it
-
-**If GitLab:**
-1. `glab mr view -F json 2>/dev/null` and extract the `target_branch` field — if succeeds, use it
-2. `glab repo view -F json 2>/dev/null` and extract the `default_branch` field — if succeeds, use it
-
-**Git-native fallback (if unknown platform, or CLI commands fail):**
-1. `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||'`
-2. If that fails: `git rev-parse --verify origin/main 2>/dev/null` → use `main`
-3. If that fails: `git rev-parse --verify origin/master 2>/dev/null` → use `master`
-
-If all fail, fall back to `main`.
-
-Print the detected base branch name. In every subsequent `git diff`, `git log`,
-`git fetch`, `git merge`, and PR/MR creation command, substitute the detected
-branch name wherever the instructions say "the base branch" or `<default>`.
-
----`
-   into `$BASE_BRANCH`). Honor `--base <name>` flag override.
+2. The base is the upstream repo's default branch, which the block below
+   reads from `gh` (no block sets `$BASE_BRANCH`). With `--base <name>`,
+   write that name into the block's `BASE=` line instead.
 
 3. Resolve the upstream repo via `gh repo view --json nameWithOwner -q .nameWithOwner`
    (override via `--repo owner/name`), then the git remote whose fetch URL
@@ -605,11 +569,11 @@ branch name wherever the instructions say "the base branch" or `<default>`.
    zero, abort with "no commits to audit".
 
 ```bash
-BASE="${BASE_BRANCH:-main}"
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+BASE=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null)
 UP_REMOTE=$(git remote | while IFS= read -r r; do u=$(git remote get-url "$r" 2>/dev/null); case "$u" in (*/"$REPO"|*:"$REPO"|*/"$REPO".git|*:"$REPO".git) printf '%s\n' "$r" ;; esac; done | head -n 1)
-if [ -z "$REPO" ] || [ -z "$UP_REMOTE" ]; then
-  echo "PR_PREP_BASE: unresolved (repo '${REPO:-?}', no git remote names it) - the audit is UNVERIFIED"
+if [ -z "$REPO" ] || [ -z "$BASE" ] || [ -z "$UP_REMOTE" ]; then
+  echo "PR_PREP_BASE: unresolved (repo '${REPO:-?}', base '${BASE:-?}', remote '${UP_REMOTE:-none}') - the audit is UNVERIFIED"
   exit 0
 fi
 git fetch -q --no-tags "$UP_REMOTE" "+refs/heads/${BASE}:refs/pr-prep/${UP_REMOTE}/${BASE}" || { echo "PR_PREP_BASE: fetch failed - the audit is UNVERIFIED"; exit 0; }
@@ -1111,7 +1075,7 @@ with no arguments, which is the audit. When invoked by `/ship` (or with `GSTACK_
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--base <name>` | the detected base | Upstream base branch, pinned by SHA |
+| `--base <name>` | upstream's default branch | Upstream base branch, pinned by SHA |
 | `--repo owner/name` | from `gh repo view` | Upstream repo for queries |
 | `--force` | off | Proceed past EXACT_DUP (still print report) |
 
