@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { classifyShard, inFlightFile, draftable, triageMain, SHARD_JOB_RE } from '../lib/pr-ci-triage';
-import { prStateDir, topicFor, type GhRunner } from '../lib/pr-context';
+import { isRemoteWrite, prStateDir, topicFor, type GhRunner } from '../lib/pr-context';
 import { TRACKER_ENVELOPE_BEGIN, TRACKER_ENVELOPE_END } from '../lib/tracker-guard';
 
 setDefaultTimeout(60_000);
@@ -121,6 +121,8 @@ interface FakeRun {
   id: number; sha: string; shard?: number; fixture?: string; result?: Record<string, unknown>;
   shards?: Record<number, ShardFx>; conclusion?: string; status?: string; createdAt?: string;
   jobs?: { databaseId?: number; name: string; conclusion: string }[];
+  /** Job log text by job databaseId (the default jobs are 10, 11, ... per shard, 2 for windows-free-tests). */
+  jobLogs?: Record<number, string>;
 }
 const shardsOf = (r: FakeRun): Record<number, ShardFx> => r.shards ?? (r.shard ? { [r.shard]: { fixture: r.fixture, result: r.result } } : {});
 
@@ -165,6 +167,11 @@ function fakeGh(runs: FakeRun[], calls: string[][], headOid = B): GhRunner {
         return ok('');
       }
       return { status: 1, stdout: '', stderr: 'no artifact' };
+    }
+    const jobLog = /^repos\/acme\/gt\/actions\/jobs\/(\d+)\/logs$/.exec(args.at(-1) ?? '');
+    if (args[0] === 'api' && jobLog) {
+      const text = runs.map(r => r.jobLogs?.[Number(jobLog[1])]).find(t => t !== undefined);
+      return text === undefined ? { status: 1, stdout: '', stderr: 'HTTP 404' } : { status: 0, stdout: text, stderr: '' };
     }
     return { status: 1, stdout: '', stderr: `unexpected gh ${args.join(' ')}` };
   }) as GhRunner;
@@ -277,6 +284,31 @@ describe('run', () => {
     expect(await triageMain(['--help'], { out: l => help.push(l) })).toBe(0);
     const codes = help.join('\n').slice(help.join('\n').indexOf('Exit codes'));
     for (const c of ['0', '1', '2', '10', '11', '40']) expect(codes).toMatch(new RegExp(`(^|[\\s,(])${c} `));
+  });
+
+  test('when no shard log explains a failure, the job log tail is shown as untrusted data, read-only', async () => {
+    const between = (out: string[], marker: string) => {
+      const text = out.join('\n');
+      const at = text.indexOf(marker);
+      const begin = at < 0 ? -1 : text.lastIndexOf(TRACKER_ENVELOPE_BEGIN, at);
+      return begin >= 0 && begin > text.lastIndexOf(TRACKER_ENVELOPE_END, at) && text.indexOf(TRACKER_ENVELOPE_END, at) > at;
+    };
+    const setupLog = Array.from({ length: 60 }, (_, i) => `2026-10-06T00:00:${String(i).padStart(2, '0')}Z step ${i}`).concat('##[error]Process completed with exit code 1: setup-bun failed').join('\n');
+    // INFRA: the shard passed but its job failed
+    const infra = await triage([{ id: 630, sha: B, shards: { 3: { result: { status: 'passed', exitCode: 0, failingFiles: [] } } }, jobLogs: { 10: setupLog } }]);
+    expect(infra.code).toBe(10);
+    expect(between(infra.out, 'setup-bun failed')).toBe(true);
+    expect(infra.out.join('\n')).not.toContain('step 5\n');
+    // no windows-result artifact at all
+    const missing = await triage([{ id: 631, sha: B, shards: { 3: {} }, jobLogs: { 10: 'runner lost communication with the server' } }]);
+    expect(missing.code).toBe(10);
+    expect(between(missing.out, 'runner lost communication')).toBe(true);
+    // AGGREGATE: only windows-free-tests failed
+    const aggregate = await triage([{ id: 632, sha: B, jobs: [{ databaseId: 2, name: 'windows-free-tests', conclusion: 'failure' }], jobLogs: { 2: 'verify: shard 6 result missing' } }]);
+    expect(aggregate.out[0]).toMatch(/^RESULT AGGREGATE/);
+    expect(between(aggregate.out, 'shard 6 result missing')).toBe(true);
+    for (const r of [infra, missing, aggregate]) expect(r.calls.filter(c => isRemoteWrite('gh', c))).toEqual([]);
+    expect(aggregate.calls.some(c => c[0] === 'api' && c.includes('--allow-escape-sequences'))).toBe(true);
   });
 
   test('a two-dimension matrix job set triages each shard once', async () => {
