@@ -184,6 +184,19 @@ describe('poll, ack and the write gate', () => {
     expect(readStateFor(dir, { repo: 'acme/gw', headRef: 'pr/w' })!.signals).toMatchObject({ acked: ['comment:11'] });
   });
 
+  test('the owner still sees the enveloped comment after the LaunchAgent or a write gate latched it first', async () => {
+    const t = topology('relatch', null);
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') };
+    const gh = fakeGh(t, { comments: warning });
+    const argv = ['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone];
+    expect(await watchMain(argv, { gh, env, out: () => {} })).toBe(10);
+    const out: string[] = [];
+    expect(await watchMain(argv, { gh, env, out: l => out.push(l) })).toBe(10);
+    expect(out[0]).toContain('new=0 unacknowledged=1');
+    expect(out.join('\n')).toContain('BEGIN UNTRUSTED TRACKER CONTENT');
+    expect(out.join('\n')).toContain('fix wave rewrote the fix');
+  });
+
   test('our trailer on upstream\'s base branch is ABSORBED-WITH-CREDIT', async () => {
     const t = topology('absorbed', 'fix: wave (#99)\n\nCo-authored-by: me <me@example.com>');
     const out: string[] = [];
