@@ -3,8 +3,8 @@
  * which commits to audit, which earlier verdicts carry forward, which open
  * PR is this branch's own, and the stamped machine report /ship gates on.
  *
- *   gstack-pr-prep-commits list   --base <sha|ref> [--prior <report.json>] [--cwd <dir>]
- *   gstack-pr-prep-commits stamp  --base <sha|ref> --report <agent.json> --out <path>
+ *   gstack-pr-prep-commits list   --base <sha|ref> --repo <owner/name> [--prior <report.json>] [--cwd <dir>]
+ *   gstack-pr-prep-commits stamp  --base <sha|ref> --repo <owner/name> --report <agent.json> --out <path>
  *                                 [--prior <report.json>] [--persist <path>] [--cwd <dir>]
  *   gstack-pr-prep-commits self   --head-ref <ref> --head-owner <login> [--pr <n>] < candidates.json
  *   gstack-pr-prep-commits paths  [--cwd <dir>]
@@ -48,7 +48,21 @@ export function worstOf(buckets: readonly unknown[]): Bucket {
 }
 
 export interface PriorEntry { sha: string; patchId?: string; subject?: string; bucket: string; topScore?: number; hits?: unknown[] }
-export interface PriorReport { generated_at?: string; base_sha?: string; head?: string; commits?: PriorEntry[]; audited?: { patchId: string; sha: string; bucket: string }[] }
+export interface PriorReport { repo?: string | null; generated_at?: string; base_sha?: string; head?: string; commits?: PriorEntry[]; audited?: { patchId: string; sha: string; bucket: string }[] }
+
+const REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+
+/**
+ * The persistent copy is keyed by the branch topic alone, and a verdict is
+ * only true of the repo it searched: a CLEAN against the fork itself, or
+ * against another `--repo`, carried with a delta search would never look at
+ * the real upstream's older open duplicates. A prior carries only to an
+ * audit of the same upstream repo (GitHub names are case-insensitive).
+ */
+export function priorForRepo(prior: PriorReport | null, repo: string): PriorReport | null {
+  if (!prior || typeof prior !== 'object' || typeof prior.repo !== 'string') return null;
+  return prior.repo.toLowerCase() === repo.toLowerCase() ? prior : null;
+}
 
 export type Mode = 'NEW' | 'CARRY' | 'RECHECK';
 /**
@@ -200,7 +214,7 @@ const SHA_PREFIX_RE = /^[0-9a-f]{7,64}$/i;
  * agent did not report is UNVERIFIED, except that a RECHECK of a known
  * EXACT_DUP keeps it (and its hits) until a full search returns a verdict.
  */
-export function stampReport(agent: unknown, list: CommitList, now: Date): Record<string, unknown> {
+export function stampReport(agent: unknown, list: CommitList, now: Date, opts: { repo?: string | null } = {}): Record<string, unknown> {
   const a = agent as AgentReport;
   if (!a || typeof a !== 'object' || typeof a.summary !== 'string' || !Array.isArray(a.commits)) {
     throw new PrContextError('the report needs {summary: string, commits: [...]}', 2);
@@ -243,7 +257,7 @@ export function stampReport(agent: unknown, list: CommitList, now: Date): Record
   return {
     summary: a.summary, worst, commits,
     skipped,
-    head: list.head, base_sha: list.base, generated_at: now.toISOString(),
+    repo: opts.repo ?? null, head: list.head, base_sha: list.base, generated_at: now.toISOString(),
     audited: list.audit.map((c, i) => ({ patchId: c.patchId, sha: c.sha, bucket: commits[i].bucket })),
   };
 }
@@ -292,18 +306,20 @@ export const COMMITS_USAGE = `gstack-pr-prep-commits <list|stamp|self|paths> [op
           commit keeps its verified one); release-only commits
           (only VERSION, CHANGELOG.md, the agents digest, and package.json
           with nothing but its version changed) and empty commits are
-          skipped and listed
+          skipped and listed. Only a prior stamped for the same --repo
+          (the upstream the searches run against) carries anything
   stamp   validate the agent's report (JSON file), fold CARRY verdicts in
           (worst never drops), take a commit's worst row, count rows for
           skipped commits and the report's own worst, mark unreported
           commits UNVERIFIED, refuse a row that names no listed or skipped
-          commit by 7+ hex characters; stamp head, base_sha, generated_at
-          and audited patch-ids; write --out, then --persist (the next
+          commit by 7+ hex characters; stamp repo, head, base_sha,
+          generated_at and audited patch-ids; write --out, then --persist (the next
           list's prior), atomically; a failed --persist is a WARN line,
           never a failed stamp
   self    drop this branch's own open PR from a candidate list on stdin
   paths   print the default persistent report path for this branch
 
+list and stamp need --base and --repo <owner/name>, the same on both.
 list prints \`RESULT OK <n> to audit, <m> skipped\` and then the JSON;
 stamp prints \`RESULT OK <worst> <out>\` and then the \`PR_PREP_REPORT:\`
 line. self and paths print only their data (it is redirected to a file
@@ -350,7 +366,9 @@ export async function commitsMain(argv: string[], deps: { git?: GitRunner; out?:
       return 0;
     }
     if (!flags.base) throw new PrContextError('--base is required', 2);
-    const prior = readJson<PriorReport>(flags.prior ?? (fs.existsSync(persistDefault()) ? persistDefault() : null));
+    // list and stamp must agree on the prior, so both need the repo.
+    if (!flags.repo || !REPO_RE.test(flags.repo)) throw new PrContextError('--repo <owner/name> (the upstream repo the audit searches) is required', 2);
+    const prior = priorForRepo(readJson<PriorReport>(flags.prior ?? (fs.existsSync(persistDefault()) ? persistDefault() : null)), flags.repo);
     const list = listAuditCommits(g, cwd, flags.base, prior);
     if (sub === 'list') {
       // The prior's hits hold upstream-authored titles; the model needs only
@@ -365,7 +383,7 @@ export async function commitsMain(argv: string[], deps: { git?: GitRunner; out?:
     }
     if (sub === 'stamp') {
       if (!flags.report || !flags.out) throw new PrContextError('stamp needs --report and --out', 2);
-      const report = stampReport(readJson(flags.report), list, (deps.now ?? (() => new Date()))());
+      const report = stampReport(readJson(flags.report), list, (deps.now ?? (() => new Date()))(), { repo: flags.repo });
       const text = JSON.stringify(report) + '\n';
       // The /ship report first: it is what the gate reads. The persistent
       // copy only feeds the next run's carry, so its failure must not make
