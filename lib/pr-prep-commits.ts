@@ -290,7 +290,13 @@ export async function commitsMain(argv: string[], deps: { git?: GitRunner; out?:
     const prior = readJson<PriorReport>(flags.prior ?? (fs.existsSync(persistDefault()) ? persistDefault() : null));
     const list = listAuditCommits(g, cwd, flags.base, prior);
     if (sub === 'list') {
-      out(JSON.stringify({ ...list, audit: list.audit.map(c => ({ ...c, qualifier: searchQualifier(c) })) }, null, 2));
+      // The prior's hits hold upstream-authored titles; the model needs only
+      // the carried bucket, so no tracker text is printed here at all.
+      const audit = list.audit.map(c => ({
+        sha: c.sha, subject: c.subject, files: c.files, patchId: c.patchId, mode: c.mode, since: c.since,
+        qualifier: searchQualifier(c), prior: c.prior ? { bucket: worstOf([c.prior.bucket]) } : null,
+      }));
+      out(JSON.stringify({ ...list, audit }, null, 2));
       return 0;
     }
     if (sub === 'stamp') {
