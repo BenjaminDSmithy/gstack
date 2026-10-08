@@ -249,6 +249,20 @@ describe('run', () => {
     expect(r.out.some(l => l.includes('same-tree-green 150'))).toBe(true);
   });
 
+  test('a refused hang or crash says which evidence blocked the draft', async () => {
+    const passed = { id: 405, sha: A, conclusion: 'success', jobs: [{ name: 'windows-free-shard (5)', conclusion: 'success' }] };
+    const hangLog = `(fail) suite > a real assertion failed [3.00ms]\n${read('37347305098-shard.log.txt')}`;
+    const hang = await triage([{ id: 610, sha: B, shards: { 5: { fixture: '37347305098', log: hangLog } } }, passed]);
+    expect(hang.code).toBe(10);
+    const hangWhy = hang.out.find(l => l.startsWith('NO_DRAFT shard 5')) ?? '';
+    expect(hangWhy).toMatch(/1 failed-test line/);
+    expect(hangWhy).not.toMatch(/no earlier run/);
+    const counted = await triage([{ id: 611, sha: B, shards: { 4: { fixture: '37346036310', result: { ...result('37346036310'), unattributedFailures: 2 } } } }]);
+    expect(counted.out.find(l => l.startsWith('NO_DRAFT shard 4'))).toMatch(/unattributed/);
+    const lone = await triage([{ id: 612, sha: B, shard: 5, fixture: '37347305098' }]);
+    expect(lone.out.find(l => l.startsWith('NO_DRAFT shard 5'))).toMatch(/no earlier run of this tree passed/);
+  });
+
   test('the machine-readable RESULT line comes first, whatever the verdict', async () => {
     const verdicts = [
       await triage([{ id: 600, sha: B, shard: 4, fixture: '37346036310' }]),
