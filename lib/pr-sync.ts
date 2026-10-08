@@ -13,13 +13,16 @@
  *
  * Every merge happens in a detached scratch worktree at H0 (the PR head as
  * the remote has it), `<root>/<topic>-sync`, so the owner's PR worktree is
- * never left mid-merge. Any failure after the scratch worktree exists
- * removes it. Only a scratch merge made (a detached worktree of this
- * repository whose admin dir carries merge's marker) is ever removed, and
- * only through `git worktree remove`; anything else at that path is left
- * alone and named. A signal ends a merge where it stands (no handler could
- * run inside its synchronous steps); `abort` then removes the scratch. `merge` leaves a committed sync in the scratch worktree and a
- * `sync.json` beside the PR state; `push` publishes exactly that commit.
+ * never left mid-merge. `merge` leaves a committed sync in the scratch
+ * worktree and a `sync.json` beside the PR state; `push` publishes exactly
+ * that commit.
+ *
+ * Any failure after the scratch worktree exists removes it. A signal ends
+ * a merge where it stands (no handler could run inside its synchronous
+ * steps); `abort` then removes the scratch. Only a scratch merge made (a
+ * detached worktree of this repository whose admin dir carries merge's
+ * marker) is ever removed, and only through `git worktree remove`;
+ * anything else at that path is left alone and named.
  *
  * gstack-shaped trees only: the merged tree must carry bin/gstack-next-version,
  * bin/gstack-version-bump, scripts/detect-bump.ts and scripts/gen-agents-digest.ts.
