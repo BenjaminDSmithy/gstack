@@ -629,7 +629,12 @@ re-runs, and carries forward verdicts from this branch's last audit:
 
 Each listed commit has a `mode`:
 - `NEW`: audit it in full (Steps 2-4).
-- `RECHECK`: audited before but UNVERIFIED; audit it in full.
+- `RECHECK`: audited before, but the old verdict cannot ride on a delta
+  search: it was UNVERIFIED or EXACT_DUP, the subject changed (new
+  keywords), or the last report's `worst` came from a row no audited commit
+  carries (the list's `floor`). Audit it in full. A known EXACT_DUP keeps
+  blocking until this full search returns a verdict; a failed search
+  clears nothing.
 - `CARRY`: audited before with a verdict. Search only items updated since
   then: append its `qualifier` (`updated:>=YYYY-MM-DD`) to the query. Its old
   verdict carries forward in Step 5b, so `worst` never drops because a
