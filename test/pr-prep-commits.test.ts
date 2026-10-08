@@ -245,19 +245,23 @@ describe('CLI', () => {
     expect(listed.audit[0]).toMatchObject({ mode: 'CARRY', prior: { bucket: 'OVERLAP' } });
   });
 
-  test('stamp writes the /ship report and the persistent copy; the next list carries from it', async () => {
+  test('stamp writes the /ship report and the persistent copy; the next list carries from it; each prints RESULT first', async () => {
     const env = { ...process.env, GSTACK_STATE_ROOT: path.join(ROOT, 'home') };
-    const out: string[] = [];
-    const run = (argv: string[]) => commitsMain([...argv, '--cwd', repo], { out: l => out.push(l), env, now: () => new Date('2026-10-08T00:00:00Z') });
+    let out: string[] = [];
+    const run = (argv: string[]) => {
+      out = [];
+      return commitsMain([...argv, '--cwd', repo], { out: l => out.push(l), env, now: () => new Date('2026-10-08T00:00:00Z') });
+    };
     const agent = path.join(ROOT, 'agent.json');
     fs.writeFileSync(agent, JSON.stringify({ summary: '2 CLEAN', commits: [{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4, bucket: 'SIBLING' }] }));
     const ship = path.join(ROOT, 'ship-report.json');
     expect(await run(['stamp', '--base', base, '--report', agent, '--out', ship])).toBe(0);
-    expect(out.at(-1)).toBe(`PR_PREP_REPORT: ${ship} (SIBLING)`);
+    expect(out).toEqual([`RESULT OK SIBLING ${ship}`, `PR_PREP_REPORT: ${ship} (SIBLING)`]);
     expect(await run(['paths'])).toBe(0);
     const persisted = out.at(-1)!;
     expect(JSON.parse(fs.readFileSync(persisted, 'utf8')).worst).toBe('SIBLING');
     expect(await run(['list', '--base', base])).toBe(0);
+    expect(out[0]).toBe('RESULT OK 2 to audit, 2 skipped');
     const listed = JSON.parse(out.at(-1)!);
     expect(listed.audit.map((c: { mode: string }) => c.mode)).toEqual(['CARRY', 'CARRY']);
     fs.writeFileSync(agent, '{"nope": 1}');
