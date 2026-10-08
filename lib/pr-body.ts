@@ -349,25 +349,30 @@ export function publishedVersions(texts: string[]): string[] {
 /**
  * The redaction scan of the exact outgoing bytes, with the versions the repo
  * already published allowlisted. A finding that starts inside a git object
- * id the facts block printed (a backticked hex token) is dropped by
+ * id the facts block printed (a backticked hex token that is a prefix of
+ * one of `ids`, the facts' commit ids and patch-id) is dropped by
  * POSITION: an all-digit 12-hex prefix reads as a phone number to
  * pii.phone.e164 (39 of 2000 random facts blocks), which would ask the owner
- * to confirm a commit id. The same digits anywhere else are still findings.
+ * to confirm a commit id. The same digits anywhere else, and a backticked
+ * number in the block that is none of those ids (a card or phone number in
+ * a validation summary), are still findings.
  */
-export function scanOutgoing(body: string, published: string[]): ReturnType<typeof scan> {
+export function scanOutgoing(body: string, published: string[], ids: string[]): ReturnType<typeof scan> {
   const result = scan(body, { repoVisibility: 'public', allowlist: published });
-  const ids: [number, number][] = [];
+  const known = ids.map(i => i.toLowerCase()).filter(Boolean);
+  const spans: [number, number][] = [];
   for (const block of body.matchAll(FACTS_BLOCK_RE)) {
     for (const m of block[0].matchAll(/`([0-9a-f]{7,40})`/g)) {
+      if (!known.some(id => id.startsWith(m[1]))) continue;
       const start = block.index! + m.index! + 1;
-      ids.push([start, start + m[1].length]);
+      spans.push([start, start + m[1].length]);
     }
   }
   const lineStart = [0];
   for (let i = 0; i < body.length; i++) if (body[i] === '\n') lineStart.push(i + 1);
   const findings = result.findings.filter(f => {
     const at = (lineStart[f.line - 1] ?? 0) + f.col - 1;
-    return !ids.some(([a, b]) => at >= a && at < b);
+    return !spans.some(([a, b]) => at >= a && at < b);
   });
   const counts = { HIGH: 0, MEDIUM: 0, LOW: 0, WARN: 0 };
   for (const f of findings) counts[f.severity] += 1;
@@ -804,6 +809,11 @@ function readPublishedFacts(dir: string): PublishedFacts | null {
   }
 }
 
+/** Every git object id and the patch-id a facts block prints. */
+function factIds(f: Facts): string[] {
+  return [f.head, f.codeSha, ...f.emptyCi, f.baseSha, ...f.merges.map(m => m.upstream), f.validation?.sha ?? '', f.diff.patchId];
+}
+
 /** The facts facts/render last wrote (<state>/facts.json), or null when absent or unreadable. */
 function readGeneratedFacts(dir: string): Facts | null {
   try {
@@ -882,7 +892,7 @@ function cmdPublish(c: Ctx): number {
     return BODY_EXIT.REFUSED;
   }
   // Scan exactly the bytes that will be sent, before anything prints them.
-  const result = scanOutgoing(body, publishedVersions(gitTexts(c, revs)));
+  const result = scanOutgoing(body, publishedVersions(gitTexts(c, revs)), factIds(generated));
   const high = result.findings.filter(f => f.severity === 'HIGH');
   const medium = result.findings.filter(f => f.severity === 'MEDIUM');
   if (high.length || result.oversize) {
