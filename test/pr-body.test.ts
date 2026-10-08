@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  normalizeBody, renderFactsBlock, spliceFacts, carryLiveness, lostOwnerContent, lintBody, livenessOf,
+  normalizeBody, renderFactsBlock, spliceFacts, stripFacts, carryLiveness, lostOwnerContent, lintBody, livenessOf,
   publishedVersions, bodyMain, FACTS_BEGIN, FACTS_END, sha256, type Facts,
 } from '../lib/pr-body';
 import { prStateDir, topicFor, readStateFor, type GhRunner } from '../lib/pr-context';
@@ -62,6 +62,21 @@ describe('pure helpers', () => {
     expect(again).toContain('Commits: 9');
     expect(again.split(FACTS_BEGIN)).toHaveLength(2);
     expect(() => spliceFacts('no marker\n', 'x')).toThrow();
+  });
+
+  test('spliceFacts inserts the block literally: a `$\'` in a fact copies no template text', () => {
+    const block = renderFactsBlock({ ...FACTS, ci: { ...FACTS.ci, error: 'gh: price is $\' high' } });
+    const body = spliceFacts(TEMPLATE, block);
+    expect(body.split('## Checklist')).toHaveLength(2);
+    expect(body).toContain('price is $\' high');
+  });
+
+  test('a body holds exactly one facts slot; stripFacts drops every block', () => {
+    const block = renderFactsBlock(FACTS);
+    const old = renderFactsBlock({ ...FACTS, head: '0'.repeat(40) });
+    expect(() => spliceFacts(`${old}\n\n${TEMPLATE}`, block)).toThrow(/exactly one/);
+    expect(() => spliceFacts(`${old}\n\n${old}\n`, block)).toThrow(/exactly one/);
+    expect(stripFacts(`a\n${old}\nb\n${old}\nc\n`)).not.toContain(FACTS_BEGIN);
   });
 
   test('carryLiveness keeps the owner\'s attached section and ticked box (#3066 shape)', () => {
@@ -210,6 +225,20 @@ describe('facts and render', () => {
     expect(await g.call(['render'])).toBe(20);
     expect(g.out.some(l => l.startsWith('LOST attachment') && l.includes('f509953c'))).toBe(true);
   });
+
+  test('render keeps the fresh facts when the slot sits in the carried Liveness section', async () => {
+    const tmpl = `## Why\n\nBecause.\n\n${LIVENESS('Screenshot to follow from @me.\n\n<!-- pr-prep:facts -->')}${CHECKLIST(BOX1_OPEN)}`;
+    const live = spliceFacts(tmpl.replace('Screenshot to follow from @me.', IMG66), renderFactsBlock(FACTS));
+    const f = fixture('render-slot', live);
+    fs.mkdirSync(f.dir, { recursive: true });
+    fs.writeFileSync(path.join(f.dir, 'body.tmpl.md'), tmpl);
+    expect(await f.call(['render'])).toBe(0);
+    const body = fs.readFileSync(f.out[0].match(/body=(\S+)/)![1], 'utf8');
+    expect(body).toContain(IMG66);
+    expect(body).toContain(`Head \`${git(f.clone, 'rev-parse', 'HEAD').slice(0, 12)}\``);
+    expect(body).not.toContain('cccccccccccc');
+    expect(body.split(FACTS_BEGIN)).toHaveLength(2);
+  });
 });
 
 describe('publish', () => {
@@ -265,6 +294,12 @@ describe('publish', () => {
     const bad = path.join(f.base, 'bad.md');
     fs.writeFileSync(bad, normalizeBody(spliceFacts(TEMPLATE.replace('Because.', 'Because 1.0.2.0 is claimed by #12.'), renderFactsBlock(FACTS))));
     expect(await f.call(['publish', '--body', bad, '--yes', '--accept-live-diff'])).toBe(20);
+    expect(f.edits).toHaveLength(0);
+    const two = path.join(f.base, 'two.md');
+    fs.writeFileSync(two, normalizeBody(`${renderFactsBlock({ ...FACTS, head: '0'.repeat(40) })}\n\n${spliceFacts(TEMPLATE, renderFactsBlock(FACTS))}`));
+    f.out.length = 0;
+    expect(await f.call(['publish', '--body', two, '--yes', '--accept-live-diff'])).toBe(20);
+    expect(f.out[0]).toMatch(/^RESULT REFUSED .*exactly one facts block/);
     expect(f.edits).toHaveLength(0);
 
     const closed = fixture('closed', TEMPLATE, { state: 'CLOSED' });
