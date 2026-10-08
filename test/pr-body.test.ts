@@ -616,5 +616,20 @@ describe('check (liveness)', () => {
     expect(await fixture('c3', done.replace('a3f4ccb0-1111', 'deadbeef-dead')).call(['check'])).toBe(40);
     expect(await fixture('c4', TEMPLATE, { viewer: 'garrytan' }).call(['check'])).toBe(0);
   });
+
+  test('each asset GET is receipted before it is sent, and its status recorded after', async () => {
+    const done = `${TEMPLATE.replace('Screenshot to follow from @me.', IMG66).replace(BOX1_OPEN, BOX1_DONE)}\n${IMG32.replace('f509953c-6960', 'deadbeef-6960')}\n`;
+    const f = fixture('c-receipts', done);
+    const home = path.join(f.base, 'home');
+    const seen: number[] = [];
+    f.deps.http = async url => {
+      seen.push(listReceipts(home).filter(r => r.sink === 'pr-prep').length);
+      return url.includes('dead') ? 404 : 200;
+    };
+    expect(await f.call(['check'])).toBe(40);
+    expect(seen).toEqual([1, 2]);
+    const receipts = listReceipts(home).filter(r => r.sink === 'pr-prep');
+    expect(receipts.map(r => [r.payload_class, r.host, r.bytes, r.status])).toEqual([['pr-asset-get', 'github.com', 0, '200'], ['pr-asset-get', 'github.com', 0, '404']]);
+  });
 });
 
