@@ -43,16 +43,45 @@ login is the repo owner (owner exemption).
 
 ### 4. Open as a draft (only on the owner's explicit instruction)
 
-Render the first body (`gstack-pr-body render` needs the PR number, so for
-the first open copy the template and replace `<!-- pr-prep:facts -->` with a short
-"facts follow after the first push" line). Then, in the turn the owner
-gives that instruction, ask with AskUserQuestion, with
-`<gstack-qid:pr-prep-open-pr>` in the question, naming the upstream repo,
-`<your login>:<branch>`, the base and the title. On yes:
+The first body is the template with `<!-- pr-prep:facts -->` replaced by a
+short "facts follow after the first push" line (`gstack-pr-body render`
+needs the PR number). The title and body are free text, so they go into
+files, never into a shell command:
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-egress-receipt write --sink pr-prep --host github.com --class pr-create --payload-file <body file> --consent "user ran /pr-prep"
-gh pr create --draft --repo <upstream owner/name> --head <your login>:<branch> --base <base> --title "<title>" --body-file <body file>
+_GT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp"
+mkdir -p "$_GT" && chmod 700 "$_GT" || { echo "Not sent: cannot create $_GT for the text file." >&2; exit 1; }
+_EX=$(git rev-parse --git-path info/exclude 2>/dev/null) && mkdir -p "$(dirname "$_EX")" && { grep -qxF '/.gstack/tmp/' "$_EX" 2>/dev/null || echo '/.gstack/tmp/' >> "$_EX"; }
+TITLE_FILE=$(mktemp "${_GT:?}/pr-title.XXXXXX") || { echo "Not sent: mktemp failed in $_GT." >&2; exit 1; }; echo "TITLE_FILE: $TITLE_FILE (name: ${TITLE_FILE##*/})"
+BODY_FILE=$(mktemp "${_GT:?}/pr-body.XXXXXX") || { echo "Not sent: mktemp failed in $_GT." >&2; exit 1; }; echo "BODY_FILE: $BODY_FILE (name: ${BODY_FILE##*/})"
+```
+
+Write the text into each printed file with your file-write tool (Claude Code's Write tool needs a Read of the empty file first), exactly as it should appear. The text never goes into a shell command, heredoc or quoted argument. If a write fails or is refused, do not send: print the cause, the file path and the command below for sending by hand.
+
+Scan the exact bytes that will be sent (substitute the printed names):
+
+```bash
+TITLE_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<title-file-name>"
+BODY_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<body-file-name>"
+[ -s "$TITLE_FILE" ] && [ -s "$BODY_FILE" ] || { echo "Not sent: write the title and body files first." >&2; exit 1; }
+~/.claude/skills/gstack/bin/gstack-redact --from-file "$BODY_FILE" --repo-visibility public --json; echo "BODY_SCAN: exit $?"
+~/.claude/skills/gstack/bin/gstack-redact --from-file "$TITLE_FILE" --repo-visibility public --json; echo "TITLE_SCAN: exit $?"
+```
+
+Exit 0 on both: go on. Exit 2: show the owner each MEDIUM finding and
+continue only on their yes to each. Exit 3 (HIGH), or anything else: never
+send; fix the file and scan again. Never edit a file after its scan.
+
+Then, in the turn the owner gives the open instruction, ask with
+AskUserQuestion, with `<gstack-qid:pr-prep-open-pr>` in the question,
+naming the upstream repo, `<github-username>:<branch-name>`, the base and
+the title. On yes, send the scanned files:
+
+```bash
+TITLE_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<title-file-name>"
+BODY_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<body-file-name>"
+~/.claude/skills/gstack/bin/gstack-egress-receipt write --sink pr-prep --host github.com --class pr-create --payload-file "$BODY_FILE" --consent "user ran /pr-prep"
+gh pr create --draft --repo <upstream owner/name> --head <github-username>:<branch-name> --base <base> --title "$(cat "$TITLE_FILE")" --body-file "$BODY_FILE"
 ```
 
 ### 5. Hand the liveness step to the owner

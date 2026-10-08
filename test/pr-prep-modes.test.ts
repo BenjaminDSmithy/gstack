@@ -95,6 +95,16 @@ describe('mode sections', () => {
     });
   }
 
+  test('open scans the exact title and body bytes it sends, and the title never enters the shell', () => {
+    // Every other public write is redaction-scanned; `--title "<title>"` also
+    // ran a subject's backticks as a command (CEO-12, free text never enters a shell).
+    const open = section('open');
+    expectTokens(open, ['gstack-redact --from-file "$BODY_FILE"', 'gstack-redact --from-file "$TITLE_FILE"', '--title "$(cat "$TITLE_FILE")"', '--body-file "$BODY_FILE"'], 'open section');
+    expectAbsent(open, ['--title "<title>"', '<body file>'], 'open section');
+    expectOrdered(open, ['gstack-redact --from-file', 'gstack-egress-receipt write', 'gh pr create --draft'], 'open section');
+    expectMentions(open, [['exit 3', 'never']], 'open section');
+  });
+
   test('the screenshot and ready-for-review stay with the owner', () => {
     for (const mode of ['open', 'liveness']) expectMentions(section(mode), [['never', 'gh pr ready']], `${mode} section`);
     expectMentions(section('liveness'), [['never', 'attach']], 'liveness section');
