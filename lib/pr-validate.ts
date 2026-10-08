@@ -52,7 +52,8 @@ freshness check, vendor:xterm, the browse node-server build, build:gates,
 build:cso; GSTACK_EXPECT_BINARIES=1 for the tests when build:gates ran),
 one bun process per file,
 with agent markers (CLAUDECODE, AI_AGENT, AGENT, REPL_ID, CLAUDE*)
-stripped, every credential-shaped variable unset and a real-path
+stripped, every credential-shaped variable unset, CI=true (as GitHub
+Actions sets it: a committed test.only fails) and a real-path
 TMPDIR; git reads CI's global config (identity, init.defaultBranch main,
 safe.directory) instead of yours. Records the verdict for the exact
 commit in the PR state.
@@ -137,6 +138,10 @@ export function validationEnv(base: NodeJS.ProcessEnv, tmpdir: string, seedBase:
     if (!STRIP_RE.test(k) && !credentialShaped(k) && !GIT_CONFIG_ENV_RE.test(k) && v !== undefined) env[k] = v;
   }
   if (gitConfig) env.GIT_CONFIG_GLOBAL = gitConfig;
+  // GitHub Actions sets CI=true for every step. Bun then refuses a committed
+  // test.only (without it, bun runs only that test and skips its failing
+  // siblings), and tests that branch on CI take CI's branch.
+  env.CI = 'true';
   env.TMPDIR = tmpdir.endsWith('/') ? tmpdir : `${tmpdir}/`;
   if (seedBase) env.GSTACK_FREE_SEED_BASE = seedBase;
   return env;

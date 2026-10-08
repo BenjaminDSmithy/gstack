@@ -44,7 +44,7 @@ describe('validationEnv', () => {
       'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_PARAMETERS']) {
       expect(env[gone], gone).toBeUndefined();
     }
-    expect(env).toMatchObject({ PATH: '/usr/bin', HOME: '/h', TMPDIR: '/real/tmp/', GSTACK_FREE_SEED_BASE: 'abc', GIT_CONFIG_GLOBAL: '/state/ci.gitconfig' });
+    expect(env).toMatchObject({ PATH: '/usr/bin', HOME: '/h', TMPDIR: '/real/tmp/', GSTACK_FREE_SEED_BASE: 'abc', GIT_CONFIG_GLOBAL: '/state/ci.gitconfig', CI: 'true' });
   });
 
   test('git reads CI\'s global config instead of the caller\'s, and a test\'s own isolation hides it, as in CI', () => {
@@ -169,6 +169,12 @@ describe('judgeBunRun on real bun runs', () => {
     const v = run('fake-summary', "test('e', () => { console.log('Ran 3 tests across 1 file. [4.00ms]'); process.exit(0); });\ntest('f', () => expect(1).toBe(2));");
     expect(v).toMatchObject({ rc: 0, ok: false, ran: false });
     expect(v.why).toContain('cut short');
+  });
+  test('a committed test.only is red under the validation env, as it is in CI (CI=true)', () => {
+    // Without CI bun runs only the .only test and silently skips its failing sibling.
+    const v = run('only', "test.only('j', () => expect(1).toBe(1));\ntest('k', () => expect(1).toBe(2));");
+    expect(v.ok).toBe(false);
+    expect(v.unverified).toBe(false);
   });
   test('a file whose every test skipped verified nothing: unverified, not ok', () => {
     const v = run('all-skip', "test.skipIf(true)('g', () => expect(1).toBe(2));\ntest.skip('h', () => {});\ntest.todo('i');");
