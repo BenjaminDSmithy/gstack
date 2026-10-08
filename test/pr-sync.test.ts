@@ -670,6 +670,32 @@ describe('push', () => {
     expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
   });
 
+  test('a send more than 60 s after the pre-write gate is refused, for push and retrigger', async () => {
+    const t = topology('p12', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    recordValidation(t, s.sha, 0);
+    // Once the gate has run, the clock reads 61 s later (a slow lock wait or fetch before the send).
+    const slow = () => {
+      let answered = false;
+      return {
+        preWriteGate: () => { answered = true; return { ok: true, reason: 'ok' }; },
+        now: () => (answered ? new Date(NOW.getTime() + 61_000) : NOW),
+      };
+    };
+    const r = await run(t, ['push', '--yes'], slow());
+    expect(r.code, r.out.join('\n')).toBe(30);
+    expect(r.out[0]).toContain('60 s');
+    expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
+    expect((await run(t, ['abort'])).code).toBe(0);
+    const msg = path.join(t.base, 'ci-msg.txt');
+    fs.writeFileSync(msg, 'ci: re-run CI\n');
+    const rt = await run(t, ['retrigger', '--message', msg, '--yes'], slow());
+    expect(rt.code, rt.out.join('\n')).toBe(30);
+    expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
+  });
+
   test('a push URL that is not the PR head repo is refused before anything is sent', async () => {
     const t = topology('p10', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
     queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
