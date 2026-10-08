@@ -710,7 +710,7 @@ Two soft checks ride along, because they cost one more pass over commits you hav
 
 `/ship` never pushes to, edits or opens a PR on someone else's repo. When `origin` is your fork, it pushes a branch that has no PR yet and leaves opening it to `/pr-prep open`. Once that PR is open, `/ship` pushes nothing and edits nothing. It hands you the watch poll to clear before your own push, and `/pr-prep body` for the description.
 
-The audit is incremental. It walks the branch against upstream's base pinned by SHA, never a stale local branch. It skips merges, release-only commits and empty `ci:` re-runs. A commit it already judged only searches for what is new since then and keeps its old verdict, so a re-run is cheap and `worst` never drops. It never scores the branch's own open PR against itself.
+The audit is incremental. It walks the branch against upstream's base pinned by SHA, never a stale local branch. It skips merges, release-only commits and empty `ci:` re-runs. A commit it already cleared as OVERLAP, SIBLING or CLEAN searches only what is new since then and keeps the worse of its old and new verdicts, so a re-run is cheap and a skipped search never lowers `worst`. A reworded commit is searched in full and keeps its old verdict too. An EXACT_DUP or UNVERIFIED commit is searched in full again, because only a full search can confirm or clear it, and a known EXACT_DUP blocks until one returns a verdict. It never scores the branch's own open PR against itself.
 
 ### After it opens
 
