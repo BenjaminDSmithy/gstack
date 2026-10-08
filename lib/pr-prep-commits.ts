@@ -24,6 +24,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { atomicWriteSync } from './fs-atomic';
 import { PrContextError, RELEASE_FILES, defaultGit, prStateDir, topicFor, type GitRunner } from './pr-context';
 
 export const BUCKETS = ['CLEAN', 'SIBLING', 'OVERLAP', 'UNVERIFIED', 'EXACT_DUP'] as const;
@@ -242,11 +243,16 @@ export function dropSelf<T extends Candidate>(cands: T[], self: { number?: numbe
   });
 }
 
+/**
+ * The report lands through fs-atomic: a temp name with a random suffix (the
+ * /ship --out lives in a shared /tmp, where a predictable name could be a
+ * planted symlink), mode 0600, cleaned up on failure. A directory this
+ * creates is 0700, the state-dir mode writeState expects; the audit usually
+ * runs before any lifecycle mode, so it creates pr-drafts/<topic> first.
+ */
 function writeAtomic(file: string, text: string): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, text, { mode: 0o600 });
-  fs.renameSync(tmp, file);
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  atomicWriteSync(file, text, { mode: 0o600 });
 }
 
 function readJson<T>(file: string | null): T | null {

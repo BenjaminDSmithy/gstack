@@ -245,6 +245,28 @@ describe('CLI', () => {
     expect(listed.audit[0]).toMatchObject({ mode: 'CARRY', prior: { bucket: 'OVERLAP' } });
   });
 
+  test('stamp never follows a symlink planted at a predictable temp name, and keeps the state dir 0700', async () => {
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(ROOT, 'home-atomic') };
+    const lines: string[] = [];
+    const run = (argv: string[]) => commitsMain([...argv, '--cwd', repo], { out: l => lines.push(l), env });
+    const shared = path.join(ROOT, 'shared-tmp');
+    fs.mkdirSync(shared);
+    const ship = path.join(shared, 'ship-pr-prep-deadbeef.json');
+    const victim = path.join(ROOT, 'victim-rc');
+    fs.writeFileSync(victim, 'keep\n');
+    fs.symlinkSync(victim, `${ship}.${process.pid}.tmp`);
+    const agent = path.join(ROOT, 'agent-atomic.json');
+    fs.writeFileSync(agent, JSON.stringify({ summary: 's', commits: [{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4, bucket: 'CLEAN' }] }));
+    expect(await run(['stamp', '--base', base, '--report', agent, '--out', ship])).toBe(0);
+    expect(fs.readFileSync(victim, 'utf8')).toBe('keep\n');
+    expect(fs.lstatSync(ship).isSymbolicLink()).toBe(false);
+    expect(fs.statSync(ship).mode & 0o777).toBe(0o600);
+    expect(await run(['paths'])).toBe(0);
+    const persisted = lines.at(-1)!;
+    expect(fs.statSync(path.dirname(persisted)).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(persisted).mode & 0o777).toBe(0o600);
+  });
+
   test('stamp writes the /ship report and the persistent copy; the next list carries from it; each prints RESULT first', async () => {
     const env = { ...process.env, GSTACK_STATE_ROOT: path.join(ROOT, 'home') };
     let out: string[] = [];
