@@ -85,6 +85,27 @@ describe('pure classification', () => {
     expect(draftable({ ...classifyShard(5, { ...hang, unattributedFailures: 3 }, hangLog), sameTreeGreen: '150' })).toBe(false);
   });
 
+  test('the abort signature counts only as the log\'s last line: printed mid-run by a test, it is not the abort', () => {
+    // In every real crash log the signature is the final line (7 of 7 measured). Here a test prints it, and Bun later dies of something else.
+    const crash = result('37346036310');
+    const midRun = [
+      '::group::test\\iocp-messages.test.ts:',
+      'child stderr: GetQueuedCompletionStatusEx: (735) ERROR_ABANDONED_WAIT_0',
+      '(pass) prints the abort text [2.00ms]',
+      '::endgroup::',
+      '::group::test\\pr-native.test.ts:',
+      'panic(main thread): Segmentation fault at address 0x0',
+      'oh no: Bun has crashed. This indicates a bug in Bun, not your code.',
+      '',
+    ].join('\n');
+    const t = classifyShard(4, crash, midRun);
+    expect(t.klass).toBe('UNKNOWN');
+    expect(draftable(t)).toBe(false);
+    expect(classifyShard(2, result('37252003926'), `${read('37252003926-shard.log.txt')}panic(main thread): Segmentation fault\n`).klass).toBe('UNKNOWN');
+    // trailing blank lines, CRs and ANSI colour do not hide a real final signature
+    expect(classifyShard(4, crash, `${read('37346036310-shard.log.txt')}\r\n\n\x1b[0m\n`).klass).toBe('CRASH');
+  });
+
   test('inFlightFile ignores a group that was closed', () => {
     expect(inFlightFile('::group::a.test.ts:\n(pass) x\n::endgroup::\n')).toBeNull();
     expect(inFlightFile('::group::a.test.ts:\n::endgroup::\n::group::b\\c.test.ts:\nboom\n')).toBe('b/c.test.ts');
