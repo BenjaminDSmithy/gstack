@@ -252,7 +252,7 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
   const http = async (url: string) => (url.includes('dead') ? 404 : 200);
   // Per-test overrides of the injected deps (clock, gate, git).
   const deps: Partial<BodyDeps> = { git: (args, o) => { log.push(`git ${args[0]}`); return defaultGit(args, o); } };
-  const call = (argv: string[]) => bodyMain([...argv, '--pr', '9', '--repo', 'acme/gx', '--cwd', clone], { gh, env, out: l => out.push(l), now: () => new Date('2026-10-08T01:00:00Z'), http, ...deps });
+  const call = (argv: string[], cwd = clone) => bodyMain([...argv, '--pr', '9', '--repo', 'acme/gx', '--cwd', cwd], { gh, env, out: l => out.push(l), now: () => new Date('2026-10-08T01:00:00Z'), http, ...deps });
   const dir = prStateDir({ cwd: clone, topic: topicFor('pr/b'), env });
   const shaOf = (file: string) => sha256(fs.readFileSync(file, 'utf8')).slice(0, 12);
   // publish as the skill runs it: the owner's yes bound to the body's sha256.
@@ -260,13 +260,15 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
   // The owner accepted the live body as it is right now.
   const acceptLive = () => ['--accept-live-diff', sha256(normalizeBody(live)).slice(0, 12)];
   // A code commit pushed to the fork's pr/b, the way a sync push or another push lands; returns its sha.
-  const pushCommit = (text: string) => {
-    write(seed, 'lib/x.ts', `export const x = ${JSON.stringify(text)};\n`);
-    git(seed, 'add', '-A'); git(seed, 'commit', '-q', '-m', `fix: ${text}`);
+  // Any files, committed and pushed to the fork's pr/b; returns the commit's sha.
+  const pushFiles = (files: Record<string, string>, subject: string) => {
+    for (const [rel, text] of Object.entries(files)) write(seed, rel, text);
+    git(seed, 'add', '-A'); git(seed, 'commit', '-q', '-m', subject);
     git(seed, 'push', '-q', fork, 'pr/b');
     return git(seed, 'rev-parse', 'HEAD');
   };
-  return { base, clone, out, call, publish, acceptLive, shaOf, pushCommit, dir, edits, log, deps, getLive: () => live, setLive: (text: string) => { live = text; }, env };
+  const pushCommit = (text: string) => pushFiles({ 'lib/x.ts': `export const x = ${JSON.stringify(text)};\n` }, `fix: ${text}`);
+  return { base, clone, out, call, publish, acceptLive, shaOf, pushCommit, pushFiles, dir, edits, log, deps, getLive: () => live, setLive: (text: string) => { live = text; }, env };
 }
 const prRef = { repo: 'acme/gx', number: 9, headRef: 'pr/b', headOwner: 'me' };
 
@@ -282,6 +284,18 @@ describe('facts and render', () => {
     expect(facts).toMatchObject({ version: '1.0.1.0', baseVersion: '1.0.0.0', basePr: '#2', commits: 2 });
     expect(facts.diff.files).toBe(1);
     expect(facts.ci).toEqual({ pass: 1, fail: 1, pending: 0, skipping: 1, error: null });
+  });
+
+  test('the diff fingerprint covers the whole PR from any --cwd inside the worktree', async () => {
+    const f = fixture('facts-subdir', TEMPLATE);
+    f.pushFiles({ 'docs/notes.md': 'notes\n' }, 'docs: notes');
+    const diffLine = () => f.out.join('\n').split('\n').find(l => l.startsWith('- PR diff'));
+    expect(await f.call(['facts'])).toBe(0);
+    const top = diffLine();
+    expect(top).toContain(': 2 files, ');
+    f.out.length = 0;
+    expect(await f.call(['facts'], path.join(f.clone, 'lib'))).toBe(0);
+    expect(diffLine()).toBe(top);
   });
 
   test('a ci: commit that changes the tree is code, not an empty re-run', async () => {
