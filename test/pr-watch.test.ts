@@ -132,20 +132,35 @@ function topology(name: string, mainMsg: string | null) {
   return { base, clone, fork };
 }
 
-function fakeGh(t: { fork: string }, data: { comments: unknown[]; failComments?: boolean }): GhRunner {
-  return (args => {
+interface FakeData { comments?: unknown[]; reviews?: unknown[]; timeline?: unknown[]; pull?: Record<string, unknown>; failComments?: boolean }
+
+/** Answers list endpoints the way GitHub does: one page per call (per_page capped at 100, default 30), oldest first. */
+function fakeGh(t: { fork: string }, data: FakeData): GhRunner & { calls: string[][] } {
+  const calls: string[][] = [];
+  const gh = (args => {
+    calls.push(args);
     const ok = (v: unknown) => ({ status: 0, stdout: typeof v === 'string' ? v : JSON.stringify(v), stderr: '' });
+    const ep = args.find(a => a.startsWith('repos/')) ?? '';
+    const [route, query = ''] = ep.split('?');
+    const page = (items: unknown[] = []) => {
+      const q = new URLSearchParams(query);
+      const per = Math.min(Number(q.get('per_page') ?? 30), 100);
+      const p = Number(q.get('page') ?? 1);
+      return ok(items.slice((p - 1) * per, p * per));
+    };
     if (args[0] === 'pr' && args[1] === 'view') {
       return ok({ number: 7, state: 'OPEN', isDraft: false, headRefOid: git(t.fork, 'rev-parse', 'refs/heads/pr/w'), url: 'https://github.com/acme/gw/pull/7', headRepositoryOwner: { login: 'me' }, headRepository: { name: 'gw' }, headRefName: 'pr/w', baseRefName: 'main' });
     }
     if (args[0] === 'api' && args[1] === 'user') return ok('me\n');
-    if (args[0] === 'api' && args[1] === 'repos/acme/gw/pulls/7') return ok({ state: 'open', merged: false, mergeable_state: 'clean', head: { sha: 'x' } });
-    if (args[0] === 'api' && args[1] === 'repos/acme/gw/issues/7/comments?per_page=100') return data.failComments ? { status: 1, stdout: '', stderr: 'HTTP 502' } : ok(data.comments);
-    if (args[0] === 'api' && args[1] === 'repos/acme/gw/pulls/7/reviews?per_page=100') return ok([]);
-    if (args[0] === 'api' && args.includes('repos/acme/gw/issues/7/timeline?per_page=100')) return ok([]);
+    if (args[0] === 'api' && route === 'repos/acme/gw/pulls/7') return ok({ state: 'open', merged: false, mergeable_state: 'clean', head: { sha: 'x' }, ...data.pull });
+    if (args[0] === 'api' && route === 'repos/acme/gw/issues/7/comments') return data.failComments ? { status: 1, stdout: '', stderr: 'HTTP 502' } : page(data.comments);
+    if (args[0] === 'api' && route === 'repos/acme/gw/pulls/7/reviews') return page(data.reviews);
+    if (args[0] === 'api' && route === 'repos/acme/gw/issues/7/timeline') return page(data.timeline);
     if (args[0] === 'pr' && args[1] === 'list') return ok([{ mergedBy: { login: 'capy-ai' } }]);
     return { status: 1, stdout: '', stderr: `unexpected gh ${args.join(' ')}` };
-  }) as GhRunner;
+  }) as GhRunner & { calls: string[][] };
+  gh.calls = calls;
+  return gh;
 }
 
 describe('poll, ack and the write gate', () => {
@@ -183,6 +198,22 @@ describe('poll, ack and the write gate', () => {
     const code = await watchMain(['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone], { gh: fakeGh(t, { comments: [], failComments: true }), env: { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') }, out: l => out.push(l) });
     expect(code).toBe(12);
     expect(out[0]).toContain('RESULT UNVERIFIED');
+  });
+
+  test('a signal past the first hundred comments or timeline events is still read (GitHub lists oldest first)', async () => {
+    // #3032 reached 91 timeline events (74 commits); its P0 cross-reference was event 87.
+    const t = topology('paged', null);
+    const chatter = Array.from({ length: 100 }, (_, i) => ({ id: 1000 + i, user: { login: 'rando' }, author_association: 'NONE', created_at: '2026-10-01T00:00:00Z', body: 'nice' }));
+    const commits = Array.from({ length: 100 }, (_, i) => ({ event: 'committed', created_at: '2026-10-01T00:00:00Z', sha: String(i).padStart(40, '0') }));
+    const xref = { event: 'cross-referenced', actor: { login: 'acme', type: 'User' }, created_at: '2026-10-02T00:00:00Z', source: { issue: { number: 99, user: { login: 'acme' }, author_association: 'OWNER', pull_request: { url: 'https://api.github.com/repos/acme/gw/pulls/99' } } } };
+    const gh = fakeGh(t, { comments: [...chatter, ...warning], timeline: [...commits, xref] });
+    const out: string[] = [];
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') };
+    const code = await watchMain(['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone], { gh, env, out: l => out.push(l) });
+    expect(code, out.join('\n')).toBe(10);
+    expect(out.join('\n')).toContain('SIGNAL\tP0\tcomment:11\tsuperseded-comment');
+    expect(out.join('\n')).toContain('SIGNAL\tP0\txref:99\tmaintainer-cross-reference');
+    expect(gh.calls.some(a => a.some(x => /issues\/7\/timeline\?.*page=2/.test(x)))).toBe(true);
   });
 });
 
