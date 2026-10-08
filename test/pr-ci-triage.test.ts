@@ -9,7 +9,7 @@
  * PR's current head. The helper never commits or pushes.
  */
 import { describe, test, expect, beforeAll, afterAll, setDefaultTimeout } from 'bun:test';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -373,5 +373,73 @@ describe('onset', () => {
     expect(r.calls.filter(c => c[1] === 'download' && c[2] === '800')).toHaveLength(2);
     expect(r.calls.some(c => c[1] === 'download' && (c[2] === '804' || c[2] === '805'))).toBe(false);
     expect(fs.existsSync(r.stateRoot)).toBe(false);
+  });
+});
+
+describe('scratch cleanup', () => {
+  const BIN = path.join(import.meta.dir, '..', 'bin', 'gstack-pr-ci-triage');
+  const leftovers = (dir: string) => (fs.existsSync(dir) ? fs.readdirSync(dir).filter(e => e.startsWith('gstack-ci-triage-')) : []);
+
+  test('a run that returns leaves no artifact scratch behind', async () => {
+    const parent = path.join(ROOT, 'scratch-returns');
+    fs.mkdirSync(parent);
+    const out: string[] = [];
+    const calls: string[][] = [];
+    const runs = [{ id: 930, sha: B, shard: 4, fixture: '37346036310' }];
+    const code = await triageMain(['run', '--pr', '3', '--repo', 'acme/gt', '--cwd', repoDir], { gh: fakeGh(runs, calls), env: { ...process.env, GSTACK_STATE_ROOT: path.join(ROOT, 'scratch-returns-state') }, out: l => out.push(l), scratchParent: parent });
+    expect(code).toBe(0);
+    // the artifacts were downloaded under this parent, and the root is gone afterwards
+    expect(calls.filter(c => c[1] === 'download').every(c => c[c.indexOf('-D') + 1].startsWith(`${parent}/gstack-ci-triage-`))).toBe(true);
+    expect(calls.some(c => c[1] === 'download')).toBe(true);
+    expect(leftovers(parent)).toEqual([]);
+  });
+
+  test('SIGTERM during an artifact download removes the scratch root, and a dead run\'s root is swept at the next start', async () => {
+    const tmp = path.join(ROOT, 'sigtmp');
+    const fakebin = path.join(ROOT, 'fakebin');
+    fs.mkdirSync(tmp);
+    fs.mkdirSync(fakebin);
+    const started = path.join(ROOT, 'download-started');
+    const pr = JSON.stringify({ number: 3, state: 'OPEN', isDraft: false, headRefOid: B, url: 'https://github.com/acme/gt/pull/3', headRepositoryOwner: { login: 'me' }, headRepository: { name: 'gt' }, headRefName: 'pr/t', baseRefName: 'main' });
+    const run = { databaseId: 950, headSha: B, headBranch: 'pr/t', event: 'pull_request', conclusion: 'failure', status: 'completed', createdAt: '2026-10-06T00:00:00Z' };
+    const view = JSON.stringify({ ...run, jobs: [{ databaseId: 1, name: 'windows-free-shard (4)', conclusion: 'failure' }] });
+    fs.writeFileSync(path.join(fakebin, 'gh'), [
+      '#!/bin/bash',
+      'case "$1 $2" in',
+      `  "pr view") echo '${pr}' ;;`,
+      `  "run list") echo '[${JSON.stringify(run)}]' ;;`,
+      `  "run view") echo '${view}' ;;`,
+      '  "run download")',
+      '    while [ $# -gt 0 ]; do if [ "$1" = "-D" ]; then D="$2"; fi; shift; done',
+      '    mkdir -p "$D" && head -c 65536 /dev/zero > "$D/partial.bin"',
+      `    : > '${started}'`,
+      '    sleep 3; exit 1 ;;',
+      '  *) exit 1 ;;',
+      'esac',
+      '',
+    ].join('\n'), { mode: 0o755 });
+    const env = { ...process.env, PATH: `${fakebin}:${process.env.PATH}`, TMPDIR: `${tmp}/`, GSTACK_STATE_ROOT: path.join(ROOT, 'sig-state') };
+    const child = spawn(process.execPath, [BIN, 'run', '--pr', '3', '--repo', 'acme/gt', '--cwd', repoDir], { env, stdio: 'ignore' });
+    const exited = new Promise<number | null>(resolve => child.on('exit', code => resolve(code)));
+    const guard = setTimeout(() => child.kill('SIGKILL'), 60_000);
+    for (let i = 0; i < 600 && !fs.existsSync(started); i++) await Bun.sleep(100);
+    expect(fs.existsSync(started)).toBe(true);
+    expect(leftovers(tmp)).toHaveLength(1);
+    child.kill('SIGTERM');
+    const code = await exited;
+    clearTimeout(guard);
+    expect(code).toBe(143);
+    expect(leftovers(tmp)).toEqual([]);
+
+    // A root whose owner died without cleanup (SIGKILL) is swept by the next run; a live owner's root stays.
+    const dead = spawnSync('true', [], { timeout: 10_000 }).pid;
+    const orphan = path.join(tmp, 'gstack-ci-triage-orphan');
+    const live = path.join(tmp, 'gstack-ci-triage-live');
+    for (const [dir, pid] of [[orphan, dead], [live, process.pid]] as const) {
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, '.owner'), `${pid}\n`);
+    }
+    await triageMain(['--help'], { out: () => {}, scratchParent: tmp });
+    expect(leftovers(tmp)).toEqual(['gstack-ci-triage-live']);
   });
 });
