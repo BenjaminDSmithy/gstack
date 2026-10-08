@@ -1,12 +1,14 @@
 /**
- * gstack-pr-ci-triage on the three Windows Free Tests failures #3032 hit:
- * run 37346036310 shard 4 and run 37504870219 shard 5 (Bun IOCP abort,
- * exit 3, no failing test) and run 37347305098 shard 5 (a hang to the
- * deadline). Fixtures are the trimmed windows-result-<n> artifacts and the
- * last 40 lines of each shard log, stored as `.log.txt` because the repo's
- * .gitignore drops `*.log`. A draft appears only for a fully evidenced
- * CRASH, or a HANG whose identical tree passed the shard earlier, on the
- * PR's current head. The helper never commits or pushes.
+ * gstack-pr-ci-triage on real upstream Windows Free Tests failures: runs
+ * 37346036310 shard 4 and 37504870219 shard 5 (Bun IOCP abort, error 735),
+ * 37265273040 shard 1 (IOCP error 6), 37252003926 shard 2 (GLib abort,
+ * exit 9) and 37347305098 shard 5 (a hang to the deadline). Fixtures are
+ * the trimmed windows-result-<n> artifacts, the tails of the shard logs
+ * (stored as `.log.txt` because the repo's .gitignore drops `*.log`) and
+ * three real `gh run view --json ...,jobs` payloads (run-<id>.json). A
+ * draft appears only for a fully evidenced CRASH, or a HANG whose
+ * identical tree passed the shard earlier, on a finished run of the PR's
+ * current head. The helper never commits or pushes.
  */
 import { describe, test, expect, beforeAll, afterAll, setDefaultTimeout } from 'bun:test';
 import { spawn, spawnSync } from 'node:child_process';
@@ -14,7 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { classifyShard, inFlightFile, draftable, triageMain, SHARD_JOB_RE } from '../lib/pr-ci-triage';
-import { isRemoteWrite, prStateDir, topicFor, type GhRunner } from '../lib/pr-context';
+import { PrContextError, isRemoteWrite, prStateDir, topicFor, type GhRunner } from '../lib/pr-context';
 import { TRACKER_ENVELOPE_BEGIN, TRACKER_ENVELOPE_END } from '../lib/tracker-guard';
 
 setDefaultTimeout(60_000);
@@ -186,6 +188,22 @@ async function triage(runs: FakeRun[], extra: string[] = [], opts: { headOid?: s
   return { code, out, calls, env };
 }
 const downloads = (calls: string[][]) => calls.filter(c => c[0] === 'run' && c[1] === 'download').length;
+/** Does the first occurrence of `marker` in the output sit inside a BEGIN/END UNTRUSTED envelope? */
+const between = (out: string[], marker: string) => {
+  const text = out.join('\n');
+  const at = text.indexOf(marker);
+  const begin = at < 0 ? -1 : text.lastIndexOf(TRACKER_ENVELOPE_BEGIN, at);
+  return begin >= 0 && begin > text.lastIndexOf(TRACKER_ENVELOPE_END, at) && text.indexOf(TRACKER_ENVELOPE_END, at) > at;
+};
+const draftFiles = (r: { env: NodeJS.ProcessEnv }) => {
+  const dir = prStateDir({ cwd: repoDir, topic: topicFor('pr/t'), env: r.env });
+  return fs.existsSync(dir) ? fs.readdirSync(dir).filter(e => e.startsWith('ci-retrigger-')) : [];
+};
+/** A real `gh run view --json ...,jobs` payload from upstream, re-pointed at a fake head. */
+const realRun = (id: string, sha: string) => {
+  const v = JSON.parse(read(`run-${id}.json`)) as { databaseId: number; jobs: { databaseId: number; name: string; conclusion: string }[] };
+  return { id: v.databaseId, sha, jobs: v.jobs };
+};
 
 describe('run', () => {
   test('an IOCP crash on the current head drafts the ci: message, and nothing is committed or pushed', async () => {
@@ -222,6 +240,39 @@ describe('run', () => {
     expect(fs.existsSync(msg)).toBe(false);
     expect(fs.existsSync(msg.replace(/\.txt$/, '.json'))).toBe(false);
     expect(fs.readdirSync(path.dirname(msg)).filter(e => e.startsWith('ci-retrigger-'))).toEqual([]);
+  });
+
+  test('real upstream job lists (#3032 runs 37346036310 shard 4, 37504870219 shard 5): the abort drafts, its log tail stays inside the envelope', async () => {
+    for (const [id, shard] of [['37346036310', 4], ['37504870219', 5]] as const) {
+      const r = await triage([{ ...realRun(id, B), shards: { [shard]: { fixture: id } } }]);
+      expect(r.code).toBe(0);
+      expect(r.out.filter(l => l.startsWith('SHARD\t'))).toEqual([expect.stringMatching(new RegExp(`^SHARD\t${shard}\tCRASH\\(IOCP\\)\t`))]);
+      expect(between(r.out, 'GetQueuedCompletionStatusEx: (735)')).toBe(true);
+    }
+  });
+
+  test('one REAL shard beside a draftable crash blocks the whole draft', async () => {
+    const r = await triage([{ id: 651, sha: B, shards: { 2: { result: { status: 'failed', exitCode: 1, failingFiles: ['test/x.test.ts'] } }, 4: { fixture: '37346036310' } } }]);
+    expect(r.code).toBe(10);
+    expect(r.out[0]).toMatch(/^RESULT NO_DRAFT .*2:REAL.*4:CRASH|^RESULT NO_DRAFT .*4:CRASH.*2:REAL/);
+    expect(r.out.some(l => l.startsWith('BLAME shard 2'))).toBe(true);
+    expect(draftFiles(r)).toEqual([]);
+  });
+
+  test('a hang whose earlier green run was on a DIFFERENT tree gets no draft', async () => {
+    const other = gitIn(repoDir, 'commit-tree', '4b825dc642cb6eb9a060e54bf8d69288fbee4904', '-p', A, '-m', 'different tree');
+    const greenElsewhere = { id: 649, sha: other, conclusion: 'success', jobs: [{ name: 'windows-free-shard (5)', conclusion: 'success' }] };
+    const r = await triage([{ id: 650, sha: B, shard: 5, fixture: '37347305098' }, greenElsewhere]);
+    expect(r.code).toBe(10);
+    expect(r.out.some(l => l.startsWith('SHARD\t5\tHANG') && l.endsWith('same-tree-green none'))).toBe(true);
+    expect(draftFiles(r)).toEqual([]);
+  });
+
+  test('exit 3 with no failing test but no shard log artifact is UNKNOWN, never a draft', async () => {
+    const r = await triage([{ id: 652, sha: B, shards: { 4: { fixture: '37346036310', log: null } } }]);
+    expect(r.code).toBe(10);
+    expect(r.out.some(l => l.startsWith('SHARD\t4\tUNKNOWN\t'))).toBe(true);
+    expect(draftFiles(r)).toEqual([]);
   });
 
   test('a run on an older head, or one with a newer run on the head, gets no draft', async () => {
@@ -267,7 +318,8 @@ describe('run', () => {
     const lone = await triage([{ id: 200, sha: B, shard: 5, fixture: '37347305098' }]);
     expect(lone.code).toBe(10);
     const passedEarlier = { id: 150, sha: A, shard: 5, fixture: '37347305098', conclusion: 'success', jobs: [{ name: 'windows-free-shard (5)', conclusion: 'success' }] };
-    const r = await triage([{ id: 201, sha: B, shard: 5, fixture: '37347305098' }, passedEarlier]);
+    // the failed run carries #3032's real job list (run 37347305098: shard 5 and the aggregate failed)
+    const r = await triage([{ ...realRun('37347305098', B), shards: { 5: { fixture: '37347305098' } } }, passedEarlier]);
     expect(r.code).toBe(0);
     expect(r.out.some(l => l.includes('same-tree-green 150'))).toBe(true);
   });
@@ -300,15 +352,16 @@ describe('run', () => {
     expect(await triageMain(['--help'], { out: l => help.push(l) })).toBe(0);
     const codes = help.join('\n').slice(help.join('\n').indexOf('Exit codes'));
     for (const c of ['0', '1', '2', '10', '11', '40']) expect(codes).toMatch(new RegExp(`(^|[\\s,(])${c} `));
+    // an undocumented pr-context code (30 precondition, 45 lock) leaves as 1
+    for (const code of [30, 45]) {
+      const lines: string[] = [];
+      const gh = (() => { throw new PrContextError('boom', code); }) as GhRunner;
+      expect(await triageMain(['run', '--pr', '3', '--repo', 'acme/gt', '--cwd', repoDir], { gh, out: l => lines.push(l) })).toBe(1);
+      expect(lines[0]).toMatch(/^RESULT ERROR boom/);
+    }
   });
 
   test('when no shard log explains a failure, the job log tail is shown as untrusted data, read-only', async () => {
-    const between = (out: string[], marker: string) => {
-      const text = out.join('\n');
-      const at = text.indexOf(marker);
-      const begin = at < 0 ? -1 : text.lastIndexOf(TRACKER_ENVELOPE_BEGIN, at);
-      return begin >= 0 && begin > text.lastIndexOf(TRACKER_ENVELOPE_END, at) && text.indexOf(TRACKER_ENVELOPE_END, at) > at;
-    };
     const setupLog = Array.from({ length: 60 }, (_, i) => `2026-10-06T00:00:${String(i).padStart(2, '0')}Z step ${i}`).concat('##[error]Process completed with exit code 1: setup-bun failed').join('\n');
     // INFRA: the shard passed but its job failed
     const infra = await triage([{ id: 630, sha: B, shards: { 3: { result: { status: 'passed', exitCode: 0, failingFiles: [] } } }, jobLogs: { 10: setupLog } }]);
