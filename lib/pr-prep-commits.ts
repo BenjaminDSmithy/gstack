@@ -90,7 +90,23 @@ function foldPrior(entries: PriorEntry[]): PriorEntry | null {
     bySha.set(e.sha, had ? { ...had, bucket: worstOf([had.bucket, e.bucket]) } : e);
   }
   const all = [...bySha.values()];
-  return { ...all[0], bucket: worstOf(all.map(e => e.bucket)), hits: all.flatMap(e => (Array.isArray(e.hits) ? e.hits : [])) };
+  return { ...all[0], bucket: worstOf(all.map(e => e.bucket)), topScore: maxScore(all.map(e => e.topScore)), hits: dedupeHits(all.flatMap(e => (Array.isArray(e.hits) ? e.hits : []))) };
+}
+
+/** Hits once each, keyed by `ref` (or the whole hit when it has none); the first, i.e. newest, copy wins. */
+function dedupeHits(hits: unknown[]): unknown[] {
+  const seen = new Set<string>();
+  return hits.filter(h => {
+    const ref = h && typeof h === 'object' && typeof (h as { ref?: unknown }).ref === 'string' ? `r:${(h as { ref: string }).ref}` : `j:${JSON.stringify(h)}`;
+    if (seen.has(ref)) return false;
+    seen.add(ref);
+    return true;
+  });
+}
+
+function maxScore(scores: unknown[]): number {
+  const n = scores.filter((x): x is number => typeof x === 'number' && Number.isFinite(x));
+  return n.length ? Math.max(...n) : 0;
 }
 
 /** package.json at <rev> with `version` dropped, or null when it is absent or not a JSON object. */
@@ -195,8 +211,11 @@ export function stampReport(agent: unknown, list: CommitList, now: Date): Record
   const commits = list.audit.map(c => {
     const got = rowsFor(c.sha);
     let bucket: string = got.length ? worstOf(got.map(r => r.bucket)) : 'UNVERIFIED';
-    if (c.mode === 'CARRY' && c.prior) bucket = worstOf([bucket, c.prior.bucket]);
-    return { sha: c.sha, subject: c.subject, bucket, mode: c.mode, topScore: got[0]?.topScore ?? c.prior?.topScore ?? 0, hits: [...got.flatMap(r => (Array.isArray(r.hits) ? r.hits : [])), ...(c.mode === 'CARRY' ? (c.prior?.hits ?? []) : [])] };
+    const carried = c.mode === 'CARRY' && c.prior ? c.prior : null;
+    if (carried) bucket = worstOf([bucket, carried.bucket]);
+    // The delta search's hits come first, so a re-found item keeps its newest state.
+    const hits = dedupeHits([...got.flatMap(r => (Array.isArray(r.hits) ? r.hits : [])), ...(carried && Array.isArray(carried.hits) ? carried.hits : [])]);
+    return { sha: c.sha, subject: c.subject, bucket, mode: c.mode, topScore: maxScore([...got.map(r => r.topScore), carried?.topScore]), hits };
   });
   const skipped = list.skipped.map(s => {
     const got = rowsFor(s.sha);
