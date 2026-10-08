@@ -651,6 +651,42 @@ describe('state file', () => {
     expect(readStateFor(dir, ours)?.validation).toBeNull();
   });
 
+  test('a new PR from a closed PR\'s head branch never inherits its state: the number is identity too (code 30)', () => {
+    const env = { ...process.env, GSTACK_HOME: dirIn('home'), GSTACK_PROJECT_SLUG: 'acme-widgets' };
+    const dir = prStateDir({ cwd: tmp, topic: topicFor('pr/w'), env });
+    // #7 latched a maintainer's cross-reference and the owner acknowledged it there.
+    const seven: PrState = {
+      ...sample(), topic: topicFor('pr/w'), repo: 'acme/gstack', number: 7, headRef: 'pr/w',
+      signals: { latched: [{ id: 'xref:9', level: 'P0', kind: 'maintainer-cross-reference', at: '2026-10-07T00:00:00Z', ref: '#9' }], acked: ['xref:9'] },
+    };
+    writeState(dir, seven);
+    const eight = { repo: 'acme/gstack', number: 8, headRef: 'pr/w', headOwner: 'BenjaminDSmithy' };
+    expect(codeOf(() => readStateFor(dir, eight))).toBe(30);
+    expect(codeOf(() => assertStateFor(seven, eight))).toBe(30);
+    let message = '';
+    try {
+      readStateFor(dir, eight);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('#7');
+    expect(message).toContain('#8');
+    // #8's first write cannot replace #7's state either; #7 keeps reading its own.
+    expect(codeOf(() => writeState(dir, { ...seven, number: 8, signals: { latched: [], acked: [] } }))).toBe(30);
+    expect(readStateFor(dir, { ...eight, number: 7 })).toEqual(seven);
+    // A caller with no number (the head-ref identity alone) still reads it.
+    expect(readStateFor(dir, { repo: 'acme/gstack', headRef: 'pr/w' })).toEqual(seven);
+
+    // A state written before any PR number existed is adopted by the first PR that reads it, and records its number.
+    const early = prStateDir({ cwd: tmp, topic: topicFor('pr/early'), env });
+    writeState(early, { ...seven, topic: topicFor('pr/early'), headRef: 'pr/early', number: null });
+    const adopted = readStateFor(early, { ...eight, headRef: 'pr/early' })!;
+    expect(adopted.number).toBe(8);
+    writeState(early, adopted);
+    expect(readState(early)?.number).toBe(8);
+    expect(codeOf(() => readStateFor(early, { ...eight, headRef: 'pr/early', number: 9 }))).toBe(30);
+  });
+
   test('a write whose rename fails throws and leaves no temp file behind', () => {
     const dir = dirIn('state');
     // state.json as a non-empty directory: the temp file is written, the rename onto it fails.
