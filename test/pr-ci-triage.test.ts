@@ -263,6 +263,22 @@ describe('run', () => {
     expect(lone.out.find(l => l.startsWith('NO_DRAFT shard 5'))).toMatch(/no earlier run of this tree passed/);
   });
 
+  test('a head branch gone from the head remote exits 40, and --help documents every exit code', async () => {
+    const bare = path.join(ROOT, 'gone', 'me', 'gt.git');
+    fs.mkdirSync(bare, { recursive: true });
+    gitIn(bare, 'init', '-q', '--bare');
+    const clone = path.join(ROOT, 'clone-gone');
+    gitIn(ROOT, 'clone', '-q', repoDir, clone);
+    gitIn(clone, 'remote', 'add', 'fork', bare);
+    const r = await triage([{ id: 910, sha: B, shard: 4, fixture: '37346036310' }], [], { cwd: clone });
+    expect(r.code).toBe(40);
+    expect(r.out[0]).toMatch(/^RESULT ERROR .*gone from fork/);
+    const help: string[] = [];
+    expect(await triageMain(['--help'], { out: l => help.push(l) })).toBe(0);
+    const codes = help.join('\n').slice(help.join('\n').indexOf('Exit codes'));
+    for (const c of ['0', '1', '2', '10', '11', '40']) expect(codes).toMatch(new RegExp(`(^|[\\s,(])${c} `));
+  });
+
   test('a two-dimension matrix job set triages each shard once', async () => {
     const r = await triage([{ id: 620, sha: B, shards: { 4: { fixture: '37346036310' } }, jobs: [
       { name: 'windows-free-shard (4, 1)', conclusion: 'failure' }, { name: 'windows-free-shard (4, 2)', conclusion: 'failure' }, { name: 'windows-free-tests', conclusion: 'failure' },

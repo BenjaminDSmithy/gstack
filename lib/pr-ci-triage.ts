@@ -34,7 +34,7 @@ import {
 } from './pr-context';
 import { classifyBunTestOutputLine, stripAnsiLine } from '../scripts/lib/shard-engine';
 
-export const TRIAGE_EXIT = { DRAFTED: 0, ERROR: 1, USAGE: 2, NO_DRAFT: 10, NOTHING: 11 } as const;
+export const TRIAGE_EXIT = { DRAFTED: 0, ERROR: 1, USAGE: 2, NO_DRAFT: 10, NOTHING: 11, HEAD_MOVED: 40 } as const;
 
 export const TRIAGE_USAGE = `gstack-pr-ci-triage <run|onset> [options]
 
@@ -55,7 +55,9 @@ checkout has one) and has no newer run; a stale run's artifacts are never
 downloaded.
 
 Exit codes: 0 drafted, 1 error, 2 usage, 10 triaged without a draft
-(REAL, UNKNOWN, a stale run, or evidence missing), 11 nothing failed.`;
+(REAL, UNKNOWN, a stale run, or evidence missing), 11 nothing failed,
+40 the PR head branch is gone from the head remote or keeps moving
+(re-run once it settles).`;
 
 export const SHARD_JOB_RE = /^windows-free-shard \((\d+)(?:, \d+)?\)$/;
 /**
@@ -473,8 +475,10 @@ async function triage(argv: string[], d: TriageDeps): Promise<number> {
     throw new PrContextError(`unknown subcommand ${JSON.stringify(f.sub)}`, 2);
   } catch (error) {
     if (error instanceof PrContextError) {
-      d.out(`RESULT ${error.code === 2 ? 'USAGE' : 'ERROR'} ${error.message}`);
-      return error.code;
+      // Only the documented codes leave this helper; anything else from pr-context is an error.
+      const code = error.code === 2 ? TRIAGE_EXIT.USAGE : error.code === 40 ? TRIAGE_EXIT.HEAD_MOVED : TRIAGE_EXIT.ERROR;
+      d.out(`RESULT ${code === TRIAGE_EXIT.USAGE ? 'USAGE' : 'ERROR'} ${error.message}`);
+      return code;
     }
     d.out(`RESULT ERROR ${(error as Error).message}`);
     return TRIAGE_EXIT.ERROR;
