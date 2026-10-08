@@ -422,6 +422,47 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(readStateFor(f.dir, pr)).toBeNull();
   });
 
+  const freeTests = (pin: string) =>
+    `jobs:\n  free:\n    steps:\n      - uses: oven-sh/setup-bun@v2\n        with:\n          bun-version: ${pin}\n  macos-named-regressions:\n    steps:\n      - run: |\n          files=(test/x.test.ts)\n`;
+
+  test('a Bun other than CI\'s pin is red', async () => {
+    let tree = '';
+    const rec = recorder(() => tree, { bunVersion: '1.4.2' });
+    const f = fixture('bun-pin', "test('x', () => expect(y).toBe(2));", { base: { '.github/workflows/free-tests.yml': freeTests('1.4.1') }, deps: { tool: rec.tool } });
+    tree = f.tree;
+    expect(await f.call(['run'])).toBe(1);
+    expect(f.out).toContain('bun-pin want=1.4.1 have=1.4.2 rc=1');
+  });
+
+  test('gen:skill-docs output that is not committed is red', async () => {
+    let tree = '';
+    const rec = recorder(() => tree, { onCall: l => { if (l === 'bun run gen:skill-docs --host all') write(tree, 'drift/SKILL.md', 'stale\n'); } });
+    const f = fixture('gen-drift', "test('x', () => expect(y).toBe(2));", { base: CI_TREE, deps: { tool: rec.tool } });
+    tree = f.tree;
+    expect(await f.call(['run'])).toBe(1);
+    expect(f.out).toContain('precondition gen-skill-docs-all rc=0 drift=1 (drift/SKILL.md)');
+  });
+
+  test('tests get a real-path TMPDIR; CI\'s macOS named regressions re-run on the unresolved temp root', async () => {
+    const real = path.join(ROOT, 'tmp-real');
+    const link = path.join(ROOT, 'tmp-link');
+    fs.mkdirSync(real, { recursive: true });
+    fs.symlinkSync(real, link);
+    let tree = '';
+    const rec = recorder(() => tree);
+    const f = fixture('tmpdirs', "test('x', () => expect(y).toBe(2));", {
+      base: { '.github/workflows/free-tests.yml': freeTests('1.4.2') },
+      deps: { tool: rec.tool, tempRoot: () => link },
+    });
+    tree = f.tree;
+    expect(await f.call(['run'])).toBe(0);
+    const runs = rec.calls.filter(c => c.line.startsWith('bun test test/x.test.ts'));
+    expect(runs).toHaveLength(2);
+    expect(runs[0].env.TMPDIR!.startsWith(`${real}/gstack-prv-`)).toBe(true);
+    expect(runs[1].env.TMPDIR).toBe(`${link}/`);
+    expect(f.out.some(l => l.startsWith('test/x.test.ts (default temp root)') && l.endsWith(' ok'))).toBe(true);
+  });
+
   test('a runner/dependency change keeps the run red unless the owner accepts the full-suite risk', async () => {
     const f = fixture('full', "test('x', () => expect(y).toBe(2));");
     write(f.tree, 'tsconfig.test.json', '{}\n');
