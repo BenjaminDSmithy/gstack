@@ -62,6 +62,26 @@ describe('pure classification', () => {
     expect(classifyShard(1, { status: 'passed', exitCode: 0, failingFiles: [] }, null).klass).toBe('INFRA');
   });
 
+  test('an abort or a hang drafts only when the missing summary is the shard\'s ONLY failure evidence', () => {
+    const crashLog = read('37346036310-shard.log.txt');
+    const crash = result('37346036310');
+    // the runner's other fail marker, and an unhandled error between tests, are failure evidence
+    expect(draftable(classifyShard(4, crash, `✗ suite > broke [2.00ms]\n${crashLog}`))).toBe(false);
+    const unhandled = `::group::test\\a.test.ts:\n# Unhandled error between tests\nerror: boom\nGetQueuedCompletionStatusEx: (735) ERROR_ABANDONED_WAIT_0\n`;
+    expect(draftable(classifyShard(4, crash, unhandled))).toBe(false);
+    // the runner counted more than the missing terminal summary, or the artifact predates the fields
+    expect(draftable(classifyShard(4, { ...crash, unattributedFailures: 2 }, crashLog))).toBe(false);
+    expect(draftable(classifyShard(4, { ...crash, summary: { sawTerminalSummary: true } }, crashLog))).toBe(false);
+    const { unattributedFailures: _u, summary: _s, ...bare } = crash;
+    expect(draftable(classifyShard(4, bare, crashLog))).toBe(false);
+    // a hang with a (fail) line, or with no log read, never drafts, even with same-tree evidence
+    const hang = result('37347305098');
+    const hangLog = read('37347305098-shard.log.txt');
+    expect(draftable({ ...classifyShard(5, hang, `(fail) suite > a real assertion failed [3.00ms]\n${hangLog}`), sameTreeGreen: '150' })).toBe(false);
+    expect(draftable({ ...classifyShard(5, hang, null), sameTreeGreen: '150' })).toBe(false);
+    expect(draftable({ ...classifyShard(5, { ...hang, unattributedFailures: 3 }, hangLog), sameTreeGreen: '150' })).toBe(false);
+  });
+
   test('inFlightFile ignores a group that was closed', () => {
     expect(inFlightFile('::group::a.test.ts:\n(pass) x\n::endgroup::\n')).toBeNull();
     expect(inFlightFile('::group::a.test.ts:\n::endgroup::\n::group::b\\c.test.ts:\nboom\n')).toBe('b/c.test.ts');
