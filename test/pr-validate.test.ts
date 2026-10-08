@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { validationEnv, selectTests, uncoveredCode, relativeImports, judgeBunRun, bunPinFrom, macosNamedFrom, validateMain, defaultTool, bunfigPreload, writeCiGitConfig, shellcheckTargetsFrom, type ValidateDeps, type ToolRunner } from '../lib/pr-validate';
-import { prStateDir, topicFor, readStateFor, type GhRunner } from '../lib/pr-context';
+import { prStateDir, topicFor, readStateFor, defaultGit, type GhRunner, type GitRunner } from '../lib/pr-context';
 
 setDefaultTimeout(180_000);
 
@@ -645,6 +645,20 @@ describe('run, select and declare against a fixture PR tree', () => {
     });
     expect(committed.rc).toBe(1);
     expect(committed.f.out.find(l => l.startsWith('tree changed during the run'))).toMatch(/HEAD moved from \w{12} to \w{12}/);
+  });
+
+  test('a secret scan whose diff failed is red and never scans an empty diff', async () => {
+    let tree = '';
+    const rec = recorder(() => tree);
+    const git: GitRunner = (args, o) => (args[0] === 'diff' && args.includes('--unified=0') ? { status: 128, stdout: '', stderr: 'fatal: bad object' } : defaultGit(args, o));
+    const f = fixture('scan-diff-fails', "test('x', () => expect(y).toBe(2));", {
+      base: { '.github/scripts/gate-secret-scan.mjs': 'process.exit(0);\n' },
+      deps: { tool: rec.tool, git },
+    });
+    tree = f.tree;
+    expect(await f.call(['run'])).toBe(1);
+    expect(f.out).toContain('mirror secret-scan RED: git diff failed (exit 128: fatal: bad object); nothing was scanned');
+    expect(rec.calls.some(c => c.line.includes('gate-secret-scan.mjs'))).toBe(false);
   });
 
   test('gen:skill-docs output that is not committed is red', async () => {
