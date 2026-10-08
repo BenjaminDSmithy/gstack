@@ -49,7 +49,9 @@ TMPDIR. Records the verdict for the exact commit in the PR state.
             (typecheck, typecheck:test, the added-line secret scan,
             shellcheck when shell files changed); exit 0 green, 1 red
   select    print the selection and the rule that picked each file
-  declare   record test paths that must always run for this PR
+  declare   record test paths that must always run for this PR (free
+            test files of the tree only; voids a recorded verdict that
+            did not run them)
 
 A file passes only with exit 0, no "(fail)" line and a
 "Ran N tests across 1 file" line (no line = a truncated run).
@@ -101,7 +103,12 @@ const CLASS_CODE = ['test/egress-receipt-wiring.test.ts'];
 const CLASS_TEST = ['test/spawnsync-timeout-tripwire.test.ts', 'test/test-of-test-ratchet.test.ts', 'test/paid-orphan-tripwire.test.ts', 'test/test-free-shards.test.ts'];
 const CLASS_RELEASE = ['test/agents-digest.test.ts', 'test/gstack-version-bump.test.ts', 'test/gstack-next-version.test.ts', 'test/ship-version-sync.test.ts', 'test/version-source.test.ts'];
 
-export interface Selection { files: { file: string; rules: string[] }[]; full: string[] }
+export interface Selection {
+  files: { file: string; rules: string[] }[];
+  full: string[];
+  /** Declared paths that are not free test files of this tree: they cannot run, so they are red. */
+  missingDeclared: string[];
+}
 
 // `from '…'`, `import '…'`, `import('…')`, `require('…')` with a relative specifier.
 const IMPORT_RE = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|^\s*import\s+)(['"])(\.{1,2}\/[^'"\n]+)\1/gm;
@@ -187,8 +194,12 @@ export function selectTests(x: { changed: string[]; universe: string[]; declared
       if (hit) add(t, `names:${hit}`);
     }
   }
-  for (const f of x.declared) add(f, 'declared');
-  return { files: [...picks.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([file, rules]) => ({ file, rules: [...rules].sort() })), full };
+  const missingDeclared: string[] = [];
+  for (const f of x.declared) {
+    if (universe.has(f)) add(f, 'declared');
+    else if (!missingDeclared.includes(f)) missingDeclared.push(f);
+  }
+  return { files: [...picks.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([file, rules]) => ({ file, rules: [...rules].sort() })), full, missingDeclared };
 }
 
 // ── parsing ─────────────────────────────────────────────────────────────────
@@ -363,7 +374,7 @@ function selection(c: Ctx, state: PrState | null): { sel: Selection; mb: string;
   const mb = gitOk(c.d, c.tree, ['merge-base', 'HEAD', c.base], 'git merge-base').trim();
   const changed = changedFiles(c, mb);
   const universe = c.d.universe(c.tree);
-  const declared = (state?.focused?.paths ?? []).concat(c.f.sub === 'declare' ? c.f.paths : []);
+  const declared = state?.focused?.paths ?? [];
   const source = (f: string) => {
     try {
       return fs.readFileSync(path.join(c.tree, f), 'utf8');
@@ -383,20 +394,38 @@ function cmdSelect(c: Ctx): number {
   c.d.out(`RESULT SELECTED files=${sel.files.length} full=${sel.full.length ? 'yes' : 'no'} base=${c.base.slice(0, 12)} merge-base=${mb.slice(0, 12)}`);
   for (const f of sel.full) c.d.out(`FULL\t${f}`);
   for (const s of sel.files) c.d.out(`SELECT\t${s.file}\t${s.rules.join(',')}`);
+  for (const f of sel.missingDeclared) c.d.out(`DECLARED_MISSING\t${f}`);
   const code = untestedCode(changed, sel, f => fs.existsSync(path.join(c.tree, f)));
   if (code.length && !sel.files.length) c.d.out(noTestsLine(code));
   return 0;
 }
 
+/** A declared path in the universe's form (`test/x.test.ts`), or why it can never run. */
+function declaredPath(c: Ctx, universe: Set<string>, p: string): { path: string } | { why: string } {
+  const rel = path.isAbsolute(p) ? path.relative(c.tree, p) : p;
+  const n = path.posix.normalize(rel.split(path.sep).join('/')).replace(/^\.\//, '');
+  if (n === '..' || n.startsWith('../') || path.isAbsolute(n)) return { why: `${p} (outside ${c.tree})` };
+  if (universe.has(n)) return { path: n };
+  return { why: `${p} (${fs.existsSync(path.join(c.tree, n)) ? 'not a free test file: paid evals and non-test files never run here' : 'not found'})` };
+}
+
 function cmdDeclare(c: Ctx): number {
   if (!c.f.paths.length) throw new PrContextError('declare needs at least one test path', 2);
-  const missing = c.f.paths.filter(p => !/\.test\.ts$/.test(p) || !fs.existsSync(path.join(c.tree, p)));
-  if (missing.length) throw new PrContextError(`not test files in ${c.tree}: ${missing.join(', ')}`, 2);
+  const universe = new Set(c.d.universe(c.tree));
+  const wanted = c.f.paths.map(p => declaredPath(c, universe, p));
+  const bad = wanted.flatMap(w => ('why' in w ? [w.why] : []));
+  if (bad.length) throw new PrContextError(`cannot declare ${bad.join(', ')}`, 2);
+  const add = wanted.flatMap(w => ('path' in w ? [w.path] : []));
   withPrLock(c.stateDir, () => {
     const s = readStateFor(c.stateDir, c.pr) ?? freshState(c.pr);
-    const paths = [...new Set([...(s.focused?.paths ?? []), ...c.f.paths])].sort();
-    writeState(c.stateDir, { ...s, focused: { paths, declaredAt: c.d.now().toISOString() } });
+    const before = new Set(s.focused?.paths ?? []);
+    const paths = [...new Set([...before, ...add])].sort();
+    const added = paths.filter(p => !before.has(p));
+    // A recorded verdict never ran a newly declared file: void it so push asks for a new run.
+    const voided = added.length > 0 && s.validation !== null;
+    writeState(c.stateDir, { ...s, focused: { paths, declaredAt: c.d.now().toISOString() }, validation: voided ? null : s.validation });
     c.d.out(`RESULT DECLARED ${paths.length} path(s): ${paths.join(' ')}`);
+    if (voided) c.d.out(`NOTE the recorded validation of ${s.validation!.sha.slice(0, 12)} did not run ${added.join(' ')}: it is void; run gstack-pr-validate run again`);
   });
   return 0;
 }
@@ -477,6 +506,7 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
     line(`precondition build-node-server rc=${r.status}`, r.status !== 0);
   }
 
+  for (const f of sel.missingDeclared) line(`declared ${f} RED: not a free test file in this tree`, true);
   if (sel.full.length) line(`selection FULL (${sel.full.join(', ')}): the full free suite is the real gate${c.f.acceptFull ? '; accepted by --accept-full-risk' : ''}`, !c.f.acceptFull);
 
   // Each selected file in its own bun process, as the runner shards would see it.

@@ -106,7 +106,9 @@ describe('selectTests', () => {
   });
 
   test('declared files always run; files outside the free universe never do', () => {
-    expect(sel([], { declared: ['test/b.test.ts', 'test/skill-e2e-paid.test.ts'] }).files).toEqual([{ file: 'test/b.test.ts', rules: ['declared'] }]);
+    const s = sel([], { declared: ['test/b.test.ts', 'test/skill-e2e-paid.test.ts'] });
+    expect(s.files).toEqual([{ file: 'test/b.test.ts', rules: ['declared'] }]);
+    expect(s.missingDeclared).toEqual(['test/skill-e2e-paid.test.ts']);
   });
 });
 
@@ -267,5 +269,39 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(await f.call(['declare', 'test/nope.test.ts'])).toBe(2);
     write(f.tree, 'lib/y.ts', 'export const y = 3;\n');
     expect(await f.call(['run'])).toBe(30);
+  });
+
+  test('declare stores the universe form, refuses what would never run, and voids a verdict that did not run it', async () => {
+    const universe = ['test/x.test.ts', 'test/z.test.ts', 'test/w.test.ts'];
+    const f = fixture('decl-norm', "test('x', () => expect(y).toBe(2));", {
+      universe,
+      base: {
+        'test/w.test.ts': "import { test, expect } from 'bun:test';\ntest('w', () => expect(1).toBe(2));\n",
+        'test/skill-e2e-paid.test.ts': "import { test } from 'bun:test';\ntest('p', () => {});\n",
+      },
+    });
+    expect(await f.call(['declare', './test/z.test.ts'])).toBe(0);
+    expect(readStateFor(f.dir, pr)!.focused?.paths).toEqual(['test/z.test.ts']);
+    for (const bad of ['test/skill-e2e-paid.test.ts', '../tree/test/z.test.ts', 'test/none.test.ts']) {
+      f.out.length = 0;
+      expect(await f.call(['declare', bad]), bad).toBe(2);
+      expect(f.out[0], bad).toMatch(/^RESULT USAGE /);
+    }
+    expect(f.out[0]).toContain('not found');
+
+    expect(await f.call(['run'])).toBe(0);
+    expect(readStateFor(f.dir, pr)!.validation).toMatchObject({ worst: 0 });
+    // A failing test declared after a green verdict: the verdict never ran it, so it is void.
+    expect(await f.call(['declare', 'test/w.test.ts'])).toBe(0);
+    expect(readStateFor(f.dir, pr)!.validation).toBeNull();
+
+    // A declared path that has left the free universe is red, not silently dropped.
+    universe.splice(universe.indexOf('test/z.test.ts'), 1);
+    f.out.length = 0;
+    expect(await f.call(['select'])).toBe(0);
+    expect(f.out).toContain('DECLARED_MISSING\ttest/z.test.ts');
+    f.out.length = 0;
+    expect(await f.call(['run'])).toBe(1);
+    expect(f.out.join('\n')).toContain('declared test/z.test.ts RED: not a free test file in this tree');
   });
 });
