@@ -197,6 +197,27 @@ function ghJson<T>(d: WatchDeps, args: string[], what: string): T {
 
 class UnverifiedError extends Error {}
 
+const PAGE_SIZE = 100;
+const MAX_PAGES = 30;
+
+/**
+ * Every item of a REST list, page by page until a short page. GitHub lists
+ * comments and timeline events oldest first and `gh api` returns one page
+ * per call, so a single read drops the newest items, which are the signals
+ * (#3032's P0 cross-reference was timeline event 87 of 91). A list longer
+ * than MAX_PAGES pages is UNVERIFIED, never a partial read reported quiet.
+ */
+function ghList<T>(d: WatchDeps, endpoint: string, what: string, headers: string[] = []): T[] {
+  const all: T[] = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const items = ghJson<T[]>(d, ['api', ...headers, `${endpoint}?per_page=${PAGE_SIZE}&page=${page}`], `${what} page ${page}`);
+    if (!Array.isArray(items)) throw new UnverifiedError(`${what} page ${page}: not a list`);
+    all.push(...items);
+    if (items.length < PAGE_SIZE) return all;
+  }
+  throw new UnverifiedError(`${what}: more than ${PAGE_SIZE * MAX_PAGES} items, the read stopped`);
+}
+
 function freshState(pr: PrInfo): PrState {
   return {
     v: 1, topic: topicFor(pr.headRef), repo: pr.repo, number: pr.number, headRef: pr.headRef, headOwner: pr.headOwner,
@@ -238,9 +259,9 @@ export function poll(d: WatchDeps, repo: string, n: number, cwd: string): PollRe
   try {
     const self = viewerLogin(d.gh);
     const pull = ghJson<PullState>(d, ['api', `repos/${repo}/pulls/${n}`], 'pull');
-    const comments = ghJson<Comment[]>(d, ['api', `repos/${repo}/issues/${n}/comments?per_page=100`], 'comments');
-    const reviews = ghJson<Review[]>(d, ['api', `repos/${repo}/pulls/${n}/reviews?per_page=100`], 'reviews');
-    const timeline = ghJson<TimelineEvent[]>(d, ['api', '-H', 'Accept: application/vnd.github+json', `repos/${repo}/issues/${n}/timeline?per_page=100`], 'timeline');
+    const comments = ghList<Comment>(d, `repos/${repo}/issues/${n}/comments`, 'comments');
+    const reviews = ghList<Review>(d, `repos/${repo}/pulls/${n}/reviews`, 'reviews');
+    const timeline = ghList<TimelineEvent>(d, `repos/${repo}/issues/${n}/timeline`, 'timeline', ['-H', 'Accept: application/vnd.github+json']);
     const merged = ghJson<{ mergedBy?: { login?: string } | null }[]>(d, ['pr', 'list', '--repo', repo, '--state', 'merged', '--limit', '30', '--json', 'mergedBy'], 'merged PRs');
     const owner = repo.split('/')[0];
     const proxies = new Set<string>(SEED_PROXIES);
