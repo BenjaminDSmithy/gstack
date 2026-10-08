@@ -20,8 +20,9 @@ report's `head` is not `git rev-parse HEAD`. Do not open over EXACT_DUP.
 
 `RESULT GREEN|AMBER|RED` compares churn and files (release files excluded)
 with merged contributor PRs. Commits are shown, not scored: upstream
-squash-merges. On RED, ask the owner with AskUserQuestion whether to split
-the branch first or open as is: a 74-commit, +4632-line contributor PR read
+squash-merges. On RED, ask the owner with AskUserQuestion
+(`<gstack-qid:pr-prep-size-split>`) whether to split the branch first or
+open as is: a 74-commit, +4632-line contributor PR read
 RED and was rewritten upstream inside a 220-file maintainer wave. Never
 decide this yourself.
 
@@ -44,8 +45,10 @@ login is the repo owner (owner exemption).
 
 Render the first body (`gstack-pr-body render` needs the PR number, so for
 the first open copy the template and replace `<!-- pr-prep:facts -->` with a short
-"facts follow after the first push" line), then, with the owner's go-ahead
-in this turn:
+"facts follow after the first push" line). Then, in the turn the owner
+gives that instruction, ask with AskUserQuestion, with
+`<gstack-qid:pr-prep-open-pr>` in the question, naming the upstream repo,
+`<your login>:<branch>`, the base and the title. On yes:
 
 ```bash
 ~/.claude/skills/gstack/bin/gstack-egress-receipt write --sink pr-prep --host github.com --class pr-create --payload-file <body file> --consent "user ran /pr-prep"

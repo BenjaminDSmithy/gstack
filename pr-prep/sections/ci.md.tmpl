@@ -17,9 +17,10 @@
   the newer run, or report what is missing.
 
 A fork contributor cannot re-run upstream jobs, so the remedy is one empty
-`ci:` commit. Ask the owner with AskUserQuestion: PR number, run, shard,
-class, and the head the draft is bound to (`head` in the binding file the
-RESULT line names). On yes:
+`ci:` commit. Ask the owner with AskUserQuestion, with
+`<gstack-qid:pr-prep-ci-retrigger-push>` in the question: PR number, run,
+shard, class, and the head the draft is bound to (`head` in the binding
+file the RESULT line names). On yes:
 
 ```bash
 ~/.claude/skills/gstack/bin/gstack-pr-sync retrigger --pr <number> --repo <upstream owner/name> --message <drafted message file> --yes
