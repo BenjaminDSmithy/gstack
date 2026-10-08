@@ -858,12 +858,7 @@ function cmdPush(c: Ctx): number {
     const now = pinBranch(d.git, c.cwd, c.headRemote, c.pr.headRef).sha;
     if (now !== staged.h0) throw new PrContextError(`${c.headRemote}/${c.pr.headRef} moved to ${now.slice(0, 12)}; abort and re-sync`, SYNC_EXIT.REMOTE_MOVED);
     pushOrThrow(c, staged.scratch, staged.sha, 'pr-sync-push');
-    let seen = '';
-    for (let i = 0; i < 5; i++) {
-      seen = readPr(d.gh, c.repo, c.pr.number).headOid;
-      if (seen === staged.sha) break;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, d.readbackDelayMs);
-    }
+    // It landed (git exit 0): record that before any network read can fail.
     const after = readStateFor(c.stateDir, c.pr) ?? state;
     writeState(c.stateDir, { ...after, bodyStaleSince: staged.sha });
     fs.rmSync(syncFile(c.stateDir), { force: true });
@@ -874,10 +869,31 @@ function cmdPush(c: Ctx): number {
       if (ff.status === 0) local = `local ${c.pr.headRef} fast-forwarded`;
     }
     removeScratch(c, staged.scratch);
-    d.out(`RESULT PUSHED sha=${staged.sha.slice(0, 12)} pr=${c.pr.number} readback=${seen === staged.sha ? 'ok' : `pending (${seen.slice(0, 12)})`}`);
+    const rb = readback(c, staged.sha);
+    d.out(`RESULT PUSHED sha=${staged.sha.slice(0, 12)} pr=${c.pr.number} readback=${rb.word}`);
     d.out(`NOTE ${local}; scratch removed; the PR body is stale until gstack-pr-body publish`);
+    for (const line of rb.detail) d.out(line);
     return SYNC_EXIT.SYNCED;
   });
+}
+
+/**
+ * Best effort, after the push landed: does the PR report the new head yet?
+ * GitHub can lag a few seconds, and a failed read changes nothing (the push
+ * and its bookkeeping are already done), so it is reported, never thrown.
+ */
+function readback(c: Ctx, sha: string): { word: string; detail: string[] } {
+  let seen = '';
+  for (let i = 0; i < 5; i++) {
+    try {
+      seen = readPr(c.d.gh, c.repo, c.pr.number).headOid;
+    } catch (error) {
+      return { word: 'unverified', detail: ['NOTE the PR head could not be read back after the push landed (gh failed); check it with gstack-pr-watch poll', envelope((error as Error).message, 'gh pr view')] };
+    }
+    if (seen === sha) return { word: 'ok', detail: [] };
+    if (i < 4) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, c.d.readbackDelayMs);
+  }
+  return { word: `pending (${seen.slice(0, 12)})`, detail: [] };
 }
 
 /**
