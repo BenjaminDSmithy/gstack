@@ -44,6 +44,10 @@ the body's sha256 from render's `RESULT` line. On yes:
   hand-written body). Show the owner the enveloped diff, and only after
   they accept it re-run with `--accept-live-diff <x>`. If the live body
   changes again, publish shows a new diff and a new sha256.
+- Exit 30 naming the PR head: a push landed after the render, so the
+  facts describe an older head. Render again, show the owner, and ask
+  again with the new sha256. A sync or `ci:` push marks the body stale
+  (`body-stale-since=` on each RESULT line) until this publish clears it.
 - Exit 22: a redaction finding. HIGH blocks. For each MEDIUM, show the
   owner the finding, and pass its key in `--confirm-redaction` only after
   their yes. Versions the repo already published are not findings.

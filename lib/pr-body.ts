@@ -77,8 +77,12 @@ Options:
 
 Exit codes: 0 ok, 1 error, 2 usage or approval missing, 20 refused (a live
 attachment or ticked box would be lost, a lint rule, an unaccepted live
-diff, or a body that is not the approved sha256), 22 redaction (HIGH, or MEDIUM not confirmed), 30 precondition (PR
-not OPEN, pre-write gate), 40 liveness pending (check).`;
+diff, or a body that is not the approved sha256), 22 redaction (HIGH, or
+MEDIUM not confirmed), 30 precondition (PR not OPEN, the pre-write gate or
+a gate older than 60 s, facts naming an older head, or a body_stale_since
+push outside the head's history), 40 liveness pending (check). facts,
+render, check and publish report body-stale-since=<sha|none> on their
+RESULT line.`;
 
 export const FACTS_BEGIN = '<!-- pr-prep:facts:begin v1 -->';
 export const FACTS_END = '<!-- pr-prep:facts:end -->';
@@ -532,7 +536,7 @@ function cmdFacts(c: Ctx): number {
   const f = collectFacts(c);
   fs.mkdirSync(c.stateDir, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(c.stateDir, 'facts.json'), JSON.stringify(f, null, 2) + '\n', { mode: 0o600 });
-  c.d.out(`RESULT FACTS head=${s12(f.head)} base=${s12(f.baseSha)} version=${f.version} file=${path.join(c.stateDir, 'facts.json')}`);
+  c.d.out(`RESULT FACTS head=${s12(f.head)} base=${s12(f.baseSha)} version=${f.version} ${staleField(c)} file=${path.join(c.stateDir, 'facts.json')}`);
   c.d.out(renderFactsBlock(f));
   return 0;
 }
@@ -571,7 +575,7 @@ function cmdRender(c: Ctx): number {
   const out = c.f.out ?? path.join(c.stateDir, `pr-body-${today(d)}.md`);
   fs.writeFileSync(out, body, { mode: 0o600 });
   const word = lost.length || lint.length || slotProblems.length ? 'REFUSED' : 'RENDERED';
-  d.out(`RESULT ${word} body=${out} sha256=${sha256(body).slice(0, 12)} live-changed=${liveChanged(c, live) ? 'yes' : 'no'}`);
+  d.out(`RESULT ${word} body=${out} sha256=${sha256(body).slice(0, 12)} live-changed=${liveChanged(c, live) ? 'yes' : 'no'} ${staleField(c)}`);
   for (const l of slotProblems) d.out(`FACTS ${l}`);
   printOwnerContent(d, 'LOST', lost, c.pr.number);
   for (const l of lint) d.out(`LINT ${l}`);
@@ -648,6 +652,22 @@ export function lineDiff(a: string, b: string): string {
   return out.join('\n');
 }
 
+/** The 12-hex head the body's facts block names (`- Head \`<sha>\``), or null. */
+export function factsHeadOf(body: string): string | null {
+  const block = body.match(FACTS_BLOCK_RE)?.[0] ?? '';
+  return /^- Head `([0-9a-f]{12})`/m.exec(block)?.[1] ?? null;
+}
+
+function staleBody(named: string, head: string): PrContextError {
+  return new PrContextError(`the body's facts name ${named}, but the PR head is ${s12(head)}: re-render with gstack-pr-body render, then publish that body`, BODY_EXIT.PRECONDITION);
+}
+
+/** `body-stale-since=<sha12|none>`: a sync or ci push set it, the next verified publish clears it. */
+function staleField(c: Ctx): string {
+  const stale = readStateFor(c.stateDir, c.pr)?.bodyStaleSince ?? null;
+  return `body-stale-since=${stale ? s12(stale) : 'none'}`;
+}
+
 /** The pre-write gate must have run within this long of the edit (plan: "within 60 s of the write"). */
 export const GATE_MAX_AGE_MS = 60_000;
 
@@ -678,6 +698,12 @@ function cmdPublish(c: Ctx): number {
     d.out(`RESULT REFUSED the body must hold exactly one facts block; it has ${count(body, FACTS_BEGIN)} (render it with gstack-pr-body render)`);
     return BODY_EXIT.REFUSED;
   }
+  const factsHead = factsHeadOf(body);
+  if (!factsHead) {
+    d.out('RESULT REFUSED the facts block names no head (render it with gstack-pr-body render)');
+    return BODY_EXIT.REFUSED;
+  }
+  if (!c.pr.headOid.startsWith(factsHead)) throw staleBody(factsHead, c.pr.headOid);
   const revs = pinnedRevs(c);
   const lint = lintBody(body, lintContext(c, c.pr.headOid, revs[1] ?? null));
   if (lint.length) {
@@ -705,6 +731,15 @@ function cmdPublish(c: Ctx): number {
   const gate = d.preWriteGate({ gh: d.gh, git: d.git, env: d.env, cwd: c.f.cwd, repo: c.repo, number: c.pr.number, state: readStateFor(c.stateDir, c.pr) });
   if (!gate.ok) throw new PrContextError(`pre-write gate: ${gate.reason}`, BODY_EXIT.PRECONDITION);
   return withPrLock(c.stateDir, () => {
+    const now = readPr(d.gh, c.repo, c.pr.number);
+    if (now.state !== 'OPEN') throw new PrContextError(`PR #${c.pr.number} is ${now.state}`, BODY_EXIT.PRECONDITION);
+    if (!now.headOid.startsWith(factsHead)) throw staleBody(factsHead, now.headOid);
+    const state = readStateFor(c.stateDir, c.pr);
+    const stale = state?.bodyStaleSince ?? null;
+    if (stale && stale !== now.headOid) {
+      const r = d.git(['merge-base', '--is-ancestor', stale, now.headOid], { cwd: c.f.cwd });
+      if (r.status !== 0) throw new PrContextError(`the body has been stale since the push of ${s12(stale)}, which is not in the PR head's history (${s12(now.headOid)}); find out what replaced that push before publishing`, BODY_EXIT.PRECONDITION);
+    }
     const live = liveBody(c);
     const lost = lostOwnerContent(live, body);
     if (lost.length) {
@@ -726,7 +761,6 @@ function cmdPublish(c: Ctx): number {
       d.out(`RESULT PRECONDITION the pre-write gate ran ${Math.round(waited / 1000)} s before the edit (limit ${GATE_MAX_AGE_MS / 1000} s): run publish again`);
       return BODY_EXIT.PRECONDITION;
     }
-    const state = readStateFor(c.stateDir, c.pr);
     const sendFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-pr-body-')), 'body.md');
     fs.writeFileSync(sendFile, body, { mode: 0o600 });
     try {
@@ -748,7 +782,7 @@ function cmdPublish(c: Ctx): number {
     }
     writeState(c.stateDir, { ...(state ?? freshState(c.pr)), lastPublishedBodySha256: sha256(after), bodyStaleSince: null });
     fs.writeFileSync(path.join(c.stateDir, `pr-body-${today(d)}.published.md`), body, { mode: 0o600 });
-    d.out(`RESULT PUBLISHED pr=${c.pr.number} sha256=${sha256(after).slice(0, 12)}`);
+    d.out(`RESULT PUBLISHED pr=${c.pr.number} sha256=${sha256(after).slice(0, 12)} head=${factsHead} body-stale-since=none cleared-stale=${stale ? s12(stale) : 'none'}`);
     d.out('WARNING if the owner has the PR description open for editing in a browser tab, they must cancel that edit: saving it overwrites this body and its screenshot.');
     return BODY_EXIT.OK;
   });
@@ -800,7 +834,7 @@ async function cmdCheck(c: Ctx): Promise<number> {
     if (code !== 200) reachable = false;
   }
   const ok = live.attached.length > 0 && live.ticked && !live.placeholder && reachable;
-  d.out(`RESULT ${ok ? 'ATTACHED' : 'PENDING'} attachments=${live.attached.length} box1=${live.ticked ? 'ticked' : 'unticked'} placeholder=${live.placeholder ? 'present' : 'gone'} reachable=${reachable ? 'yes' : 'no'}`);
+  d.out(`RESULT ${ok ? 'ATTACHED' : 'PENDING'} attachments=${live.attached.length} box1=${live.ticked ? 'ticked' : 'unticked'} placeholder=${live.placeholder ? 'present' : 'gone'} reachable=${reachable ? 'yes' : 'no'} ${staleField(c)}`);
   for (const s of statuses) d.out(`ASSET ${s}`);
   if (!ok) d.out('NEXT the owner attaches the live `GSTACK PR` screenshot in the Liveness proof section, ticks box 1 and deletes the placeholder, then runs `gh pr ready`; the agent never does');
   return ok ? BODY_EXIT.OK : BODY_EXIT.LIVENESS_PENDING;
