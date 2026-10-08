@@ -42,13 +42,14 @@ export const WATCH_USAGE = `gstack-pr-watch <poll|ack|enable|disable|size> --pr 
   size     churn, files and commits against merged contributor PRs
 
 Signals: P0 SUPERSEDED (a maintainer or maintainer-proxy bot says the work
-was rewritten, replaced or will be closed; a maintainer PR cross-references
-this one; while it is unmerged, upstream's base branch cites it, or carries
-our trailer on a commit linked to it; closed unmerged). Our trailer on a
-commit not linked to it (credit for another PR) is P2. P1 ATTENTION (any
-other maintainer or proxy comment or review, changes requested, a merge
-conflict or a behind base, an owner commit referencing this PR). P2
-informational.
+was rewritten, replaced or will be closed; a maintainer or proxy references
+it from a maintainer PR; while it is unmerged, upstream's base branch cites
+it, or carries our trailer on a commit linked to it; closed unmerged).
+P1 ATTENTION (any other maintainer or proxy comment or review, a maintainer
+mention from an issue or another contributor's PR, changes requested, a
+merge conflict or a behind base, an owner commit referencing this PR).
+P2 informational (an external user's comment or cross-reference, our
+trailer on a commit not linked to this PR).
 
 Exit codes: 0 quiet (no unacknowledged P0/P1), 1 error, 2 usage,
 10 unacknowledged P0, 11 unacknowledged P1, 12 UNVERIFIED (an endpoint
@@ -86,7 +87,10 @@ export interface Signal { id: string; level: 'P0' | 'P1' | 'P2'; kind: string; a
 
 interface Comment { id: number; user?: { login?: string; type?: string }; author_association?: string; created_at?: string; html_url?: string; body?: string }
 interface Review { id: number; user?: { login?: string; type?: string }; author_association?: string; state?: string; submitted_at?: string; body?: string }
-interface TimelineEvent { event?: string; actor?: { login?: string; type?: string } | null; created_at?: string; commit_id?: string | null; source?: { issue?: { number?: number; user?: { login?: string } } } | null }
+interface TimelineEvent {
+  event?: string; actor?: { login?: string; type?: string } | null; created_at?: string; commit_id?: string | null;
+  source?: { issue?: { number?: number; user?: { login?: string; type?: string }; author_association?: string; pull_request?: unknown } } | null;
+}
 interface PullState { state?: string; merged?: boolean; mergeable_state?: string; head?: { sha?: string } }
 
 export interface Absorbed { sha: string; credit: boolean; cites?: boolean }
@@ -97,6 +101,8 @@ export interface SignalInput {
   /** Base commits since the merge base that cite `(#N)` or carry our Co-authored-by trailer. */
   absorbed: Absorbed[];
 }
+
+const strong = (w: ActorClass) => w === 'maintainer' || w === 'proxy';
 
 /** Pure: every signal in the inputs, with stable ids. */
 export function signalsFrom(x: SignalInput): Signal[] {
@@ -122,11 +128,19 @@ export function signalsFrom(x: SignalInput): Signal[] {
     const who = classifyActor({ login: actor, type: e.actor?.type, assoc: hasLogin(x.maintainers, actor) ? 'OWNER' : undefined }, x.proxies, x.self);
     const at = e.created_at ?? '';
     if (e.event === 'cross-referenced') {
+      // Weighed by who made the reference (the actor), not by who wrote the
+      // issue it was made in: anyone can mention #N in a comment on a
+      // maintainer's PR. Only a maintainer or proxy referencing it from a
+      // maintainer or proxy PR is SUPERSEDED.
       const src = e.source?.issue;
-      const srcWho = classifyActor({ login: src?.user?.login, assoc: hasLogin(x.maintainers, src?.user?.login ?? '') ? 'OWNER' : undefined }, x.proxies, x.self);
-      if (src?.number && src.number !== x.number && (srcWho === 'maintainer' || srcWho === 'proxy')) {
-        out.push({ id: `xref:${src.number}`, level: 'P0', kind: 'maintainer-cross-reference', at, ref: `#${src.number}`, who: `${src.user?.login ?? '?'} (${srcWho})` });
-      }
+      if (!src?.number || src.number === x.number) continue;
+      const srcLogin = src.user?.login ?? '';
+      const srcWho = classifyActor({ login: srcLogin, type: src.user?.type, assoc: src.author_association ?? (hasLogin(x.maintainers, srcLogin) ? 'OWNER' : undefined) }, x.proxies, x.self);
+      const actorWho = srcLogin && actor.toLowerCase() === srcLogin.toLowerCase() ? srcWho : who;
+      const base = { id: `xref:${src.number}`, at, ref: `#${src.number}`, who: `${actor || '?'} (${actorWho})` };
+      if (strong(actorWho) && strong(srcWho) && src.pull_request) out.push({ ...base, level: 'P0', kind: 'maintainer-cross-reference' });
+      else if (strong(actorWho)) out.push({ ...base, level: 'P1', kind: 'maintainer-mention' });
+      else if (actorWho !== 'self') out.push({ ...base, level: 'P2', kind: 'cross-reference' });
     } else if (e.event === 'referenced' && e.commit_id && (who === 'maintainer' || who === 'proxy')) {
       out.push({ id: `ref:${e.commit_id.slice(0, 12)}`, level: 'P1', kind: 'maintainer-commit-reference', at, ref: e.commit_id.slice(0, 12), who: `${actor} (${who})` });
     } else if (e.event === 'renamed') {
@@ -340,7 +354,7 @@ export function poll(d: WatchDeps, repo: string, n: number, cwd: string): PollRe
       if (login && login.toLowerCase() !== owner.toLowerCase() && !hasLogin(INFRA_BOTS, login)) proxies.add(login);
     }
     const maintainers = new Set<string>([owner]);
-    for (const c of comments) if (c.author_association && MAINTAINER_ASSOC.has(c.author_association) && c.user?.login) maintainers.add(c.user.login);
+    for (const c of [...comments, ...reviews]) if (c.author_association && MAINTAINER_ASSOC.has(c.author_association) && c.user?.login) maintainers.add(c.user.login);
     // The git half runs last and cannot discard what the REST reads found: a
     // definite P0/P1 outranks a failed scan (reported as error=), and a scan
     // failure with nothing else waiting is UNVERIFIED, never quiet.

@@ -79,6 +79,30 @@ describe('classification', () => {
   });
 });
 
+describe('cross-references', () => {
+  const xref = (actor: string, src: { login: string; assoc?: string; pr?: boolean }) => ({
+    event: 'cross-referenced', actor: { login: actor, type: 'User' }, created_at: '2026-10-07T00:00:00Z',
+    source: { issue: { number: 50, user: { login: src.login }, author_association: src.assoc, ...(src.pr === false ? {} : { pull_request: { url: 'https://api.github.com/repos/garrytan/gstack/pulls/50' } }) } },
+  });
+  const run = (...timeline: unknown[]) => signalsFrom({ number: 1, self: 'me', proxies, maintainers, pull: { state: 'open' }, comments: [], reviews: [], timeline: timeline as never[], absorbed: [] })
+    .filter(s => s.id === 'xref:50').map(s => [s.level, s.kind, s.who]);
+
+  test('a maintainer who references this PR from a maintainer PR is P0, named as the actor', () => {
+    expect(run(xref('garrytan', { login: 'garrytan', assoc: 'OWNER' }))).toEqual([['P0', 'maintainer-cross-reference', 'garrytan (maintainer)']]);
+  });
+  test('the sender decides: an external or self mention on a maintainer PR cannot raise a P0', () => {
+    expect(run(xref('rando', { login: 'garrytan', assoc: 'OWNER' }))).toEqual([['P2', 'cross-reference', 'rando (external)']]);
+    expect(run(xref('me', { login: 'garrytan', assoc: 'OWNER' }))).toEqual([]);
+  });
+  test('a maintainer mention from an issue or from another contributor\'s PR is P1', () => {
+    expect(run(xref('garrytan', { login: 'garrytan', assoc: 'OWNER', pr: false }))).toEqual([['P1', 'maintainer-mention', 'garrytan (maintainer)']]);
+    expect(run(xref('garrytan', { login: 'rando', assoc: 'NONE' }))).toEqual([['P1', 'maintainer-mention', 'garrytan (maintainer)']]);
+  });
+  test('a MEMBER\'s PR counts as a maintainer PR from its author_association, without a comment here', () => {
+    expect(run(xref('colleague', { login: 'colleague', assoc: 'MEMBER' }))).toEqual([['P0', 'maintainer-cross-reference', 'colleague (maintainer)']]);
+  });
+});
+
 describe('size', () => {
   test('static thresholds: #3032 RED, #3066 AMBER, a small PR GREEN', () => {
     expect(sizeVerdict({ churn: 4665, files: 16 }, []).verdict).toBe('RED');
