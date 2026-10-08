@@ -67,7 +67,13 @@ describe('classification', () => {
     const base = { number: 1, self: 'me', proxies, maintainers, pull: { state: 'open' }, reviews: [], timeline: [], absorbed: [] };
     expect(signalsFrom({ ...base, comments: [{ id: 1, user: { login: 'garrytan' }, author_association: 'OWNER', body: 'Can you rebase?' }] })[0]).toMatchObject({ level: 'P1' });
     expect(signalsFrom({ ...base, comments: [{ id: 2, user: { login: 'rando' }, author_association: 'NONE', body: 'Closing in favor of #9' }] })[0]).toMatchObject({ level: 'P2' });
-    expect(signalsFrom({ ...base, comments: [], absorbed: [{ sha: 'a'.repeat(40), credit: true }] })[0]).toMatchObject({ level: 'P0', kind: 'absorbed-with-credit' });
+    const sha = 'a'.repeat(40);
+    expect(signalsFrom({ ...base, comments: [], absorbed: [{ sha, credit: true, cites: true }] })[0]).toMatchObject({ level: 'P0', kind: 'absorbed-with-credit' });
+    expect(signalsFrom({ ...base, comments: [], absorbed: [{ sha, credit: false, cites: true }] })[0]).toMatchObject({ level: 'P0', kind: 'cited-on-base' });
+    expect(signalsFrom({ ...base, comments: [], absorbed: [{ sha, credit: true, cites: false }] })[0]).toMatchObject({ level: 'P2', kind: 'credited-elsewhere' });
+    // GitHub links a commit that mentions #N without the (#N) form through a `referenced` event on this PR.
+    const referenced = [{ event: 'referenced', actor: { login: 'capy-ai[bot]', type: 'Bot' }, commit_id: sha }];
+    expect(signalsFrom({ ...base, comments: [], timeline: referenced, absorbed: [{ sha, credit: true, cites: false }] }).find(s => s.id.startsWith('absorbed:'))).toMatchObject({ level: 'P0', kind: 'absorbed-with-credit' });
     expect(signalsFrom({ ...base, comments: [], pull: { state: 'open', mergeable_state: 'dirty', head: { sha: 'b'.repeat(40) } } })[0]).toMatchObject({ level: 'P1', kind: 'mergeable-dirty' });
     expect(signalsFrom({ ...base, comments: [], pull: { state: 'open', mergeable_state: 'blocked' } })).toEqual([]);
   });
@@ -215,12 +221,20 @@ describe('poll, ack and the write gate', () => {
     expect(await watchMain(argv('poll'), { gh, env, out: () => {} })).toBe(0);
   });
 
-  test('our trailer on upstream\'s base branch is ABSORBED-WITH-CREDIT', async () => {
-    const t = topology('absorbed', 'fix: wave (#99)\n\nCo-authored-by: me <me@example.com>');
-    const out: string[] = [];
-    const code = await watchMain(['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone], { gh: fakeGh(t, { comments: [] }), env: { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') }, out: l => out.push(l) });
-    expect(code).toBe(10);
-    expect(out.join('\n')).toContain('absorbed-with-credit');
+  test('our trailer on a base commit that cites this PR is ABSORBED-WITH-CREDIT; credit for another PR is information', async () => {
+    const poll = async (name: string, msg: string) => {
+      const t = topology(name, msg);
+      const out: string[] = [];
+      const code = await watchMain(['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone], { gh: fakeGh(t, { comments: [] }), env: { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') }, out: l => out.push(l) });
+      return { code, text: out.join('\n') };
+    };
+    const ours = await poll('absorbed', 'fix: wave (#7)\n\nCo-authored-by: me <me@example.com>');
+    expect(ours.code, ours.text).toBe(10);
+    expect(ours.text).toContain('absorbed-with-credit');
+    // 28f1385ea credits the owner for #3032; a poll of the owner's #1696 must not read that as #1696 absorbed.
+    const elsewhere = await poll('credited-elsewhere', 'fix: wave (#99)\n\nCo-authored-by: me <me@example.com>');
+    expect(elsewhere.code, elsewhere.text).toBe(0);
+    expect(elsewhere.text).toMatch(/INFO\tabsorbed:[0-9a-f]{12}\tcredited-elsewhere/);
   });
 
   test('an endpoint that does not answer is UNVERIFIED, never quiet', async () => {
