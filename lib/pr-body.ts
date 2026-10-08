@@ -216,6 +216,24 @@ export function lostOwnerContent(live: string, next: string): string[] {
   return lost;
 }
 
+/**
+ * Print lostOwnerContent's items. An attachment URL is bounded by ASSET_RE
+ * (hex and hyphens), so it stays on a machine line. A ticked line is live
+ * PR text anyone who can edit the description wrote: only its count goes on
+ * a machine line, and the lines themselves go in one envelope, control
+ * bytes stripped.
+ */
+function printOwnerContent(d: BodyDeps, word: 'LOST' | 'VANISHED', items: string[], pr: number): void {
+  const ticks: string[] = [];
+  for (const item of items) {
+    if (item.startsWith('ticked: ')) ticks.push(item.slice('ticked: '.length));
+    else d.out(`${word} ${item}`);
+  }
+  if (!ticks.length) return;
+  d.out(`${word} ticked ${ticks.length} (the lines follow inside the envelope)`);
+  d.out(envelope(ticks.join('\n'), `pr-${pr}-${word.toLowerCase()}-ticks`));
+}
+
 /** Rules for prose outside the facts block. */
 export function lintBody(body: string): string[] {
   const problems: string[] = [];
@@ -503,7 +521,7 @@ function cmdRender(c: Ctx): number {
   const word = lost.length || lint.length || slotProblems.length ? 'REFUSED' : 'RENDERED';
   d.out(`RESULT ${word} body=${out} sha256=${sha256(body).slice(0, 12)} live-changed=${liveChanged(c, live) ? 'yes' : 'no'}`);
   for (const l of slotProblems) d.out(`FACTS ${l}`);
-  for (const l of lost) d.out(`LOST ${l}`);
+  printOwnerContent(d, 'LOST', lost, c.pr.number);
   for (const l of lint) d.out(`LINT ${l}`);
   return word === 'REFUSED' ? BODY_EXIT.REFUSED : BODY_EXIT.OK;
 }
@@ -539,7 +557,7 @@ function cmdPublish(c: Ctx): number {
     const live = liveBody(c);
     const lost = lostOwnerContent(live, body);
     if (lost.length) {
-      for (const l of lost) d.out(`LOST ${l}`);
+      printOwnerContent(d, 'LOST', lost, c.pr.number);
       d.out('RESULT REFUSED the outgoing body would drop live owner content');
       return BODY_EXIT.REFUSED;
     }
@@ -590,7 +608,7 @@ function cmdPublish(c: Ctx): number {
     const facts = /<!-- pr-prep:facts:begin v1 -->[\s\S]*?<!-- pr-prep:facts:end -->/.exec(body)?.[0] ?? '';
     if (vanished.length || (facts && !after.includes(facts))) {
       fs.writeFileSync(restore, live, { mode: 0o600 });
-      for (const v of vanished) d.out(`VANISHED ${v}`);
+      printOwnerContent(d, 'VANISHED', vanished, c.pr.number);
       d.out(`RESULT ERROR the read-back does not hold what was sent (a concurrent web edit?). The pre-publish body is saved at ${restore}; do not re-edit automatically, tell the owner.`);
       return BODY_EXIT.ERROR;
     }
