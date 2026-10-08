@@ -19,7 +19,7 @@ Detailed guides for every gstack skill — philosophy, workflow, and examples.
 | [`/qa-only`](#qa) | **QA Reporter** | Explore the same surfaces and propose regression cases with evidence, without changing product code or tests. |
 | [`/scrape`](#browse) | **Browser Data Extractor** | Pull structured data off a web page — tables, lists, prices — in your Aside browser with the page's real logged-in state. Same driver contract as `/browse`. On the fallback browser, a codified browser-skill answers a repeat intent in ~200ms. |
 | [`/skillify`](#browse) | **Skill Codifier** | Fallback-browser skill: walks back through your conversation, finds the last `/scrape` prototype, synthesizes script + test + fixture, runs the test, asks before committing. On Aside, durable per-site automation belongs to Aside's own skills. |
-| [`/pr-prep`](#pr-prep) | **PR Auditor** | Pre-PR upstream duplicate audit. Walks `git log base..HEAD`, queries upstream issues + PRs, scores each commit (EXACT_DUP / OVERLAP / SIBLING / CLEAN), and refuses to proceed on exact duplicates. Hooks into `/ship` as Step 1.5. |
+| [`/pr-prep`](#pr-prep) | **PR Auditor** | Pre-PR upstream duplicate audit against the pinned upstream base: scores each commit (EXACT_DUP / OVERLAP / SIBLING / CLEAN / UNVERIFIED) and refuses on exact duplicates; `/ship` runs it at Step 1.5. Its modes keep an open upstream PR current: `open`, `sync`, `body`, `watch`, `ci`, `liveness`. |
 | [`/ship`](#ship) | **Release Engineer** | Sync main, run tests, explore changed behavior within a bound, audit coverage and docs before final verification, then push and open or update a PR. Bootstraps test frameworks when appropriate. |
 | [`/land-and-deploy`](#land-and-deploy) | **Release Engineer** | Merge the PR, wait for CI and deploy, verify production health. One command from "approved" to "verified in production." |
 | [`/canary`](#canary) | **SRE** | Post-deploy monitoring loop. Watches for console errors, performance regressions, and page failures in your Aside browser. |
@@ -707,6 +707,21 @@ Two soft checks ride along, because they cost one more pass over commits you hav
 ### In `/ship`
 
 `/ship` runs the audit at Step 1.5, before it pushes anything. No upstream repo means the gate skips and costs nothing. `EXACT_DUP` aborts the ship. `UNVERIFIED` does not abort, but ship says plainly that the audit did not clear the branch. `UNVERIFIED`, `OVERLAP` and `SIBLING` all ride along into the PR body as collapsed context so the reviewer sees the neighbourhood without digging.
+
+The audit is incremental. It walks the branch against upstream's base pinned by SHA, never a stale local branch. It skips merges, release-only commits and empty `ci:` re-runs. A commit it already judged only searches for what is new since then and keeps its old verdict, so a re-run is cheap and `worst` never drops. It never scores the branch's own open PR against itself.
+
+### After it opens
+
+Most of the cost of an upstream PR comes after it opens. Main moves, the version you claimed gets taken, CI flakes on Windows, and a maintainer rewrites the fix while you are asleep. Each mode is one command over a tested helper. Every write to the PR waits for your yes in the same turn: a push, a description edit, an empty re-run commit, or opening the PR.
+
+| Mode | What it does |
+|---|---|
+| `open` | Size against what upstream actually merges from contributors, a draft PR with the upstream template's headings, and the liveness screenshot handed to you as a checklist. |
+| `sync` | Merges upstream's base, never a rebase. Resolves VERSION, package.json, the agents digest and the CHANGELOG mechanically, upstream's entries byte-identical and yours on top. Re-versions through upstream's own queue, proves your code diff did not change, validates the exact commit after CI's own preconditions, then pushes fast-forward. |
+| `body` | Regenerates the description as your template plus one facts block: head, base, version, merges, CI, tests. It never drops a screenshot you attached and never states another PR's version claim. |
+| `watch` | Reads comments, reviews and the timeline, and weighs a signal by who sent it. A "we rewrote this" from the bot that merges and closes here latches a P0, and every write stops until you have read it. An opt-in LaunchAgent polls every 30 minutes and notifies you. |
+| `ci` | Tells a Bun abort or a runner hang on a Windows shard from a real failure, and drafts the empty `ci:` commit only when the evidence holds, because a fork contributor cannot re-run the job. |
+| `liveness` | Checks that your screenshot is attached, box one is ticked and the placeholder is gone. It never attaches anything itself. |
 
 ---
 
