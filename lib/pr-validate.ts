@@ -36,7 +36,7 @@ import {
   pinBranch, readPr, topicFor, prStateDir, readStateFor, writeState, withPrLock,
   type GhResult, type GhRunner, type GitRunner, type PrInfo, type PrState,
 } from './pr-context';
-import { collectFreeTestFiles } from '../scripts/test-free-shards';
+import { collectFreeTestFiles, TEST_ROOTS } from '../scripts/test-free-shards';
 import { parseBunTerminalSummary, stripAnsiLine } from '../scripts/lib/shard-engine';
 import { FREE_HOME_SURFACES, privateFreeHome, type FreeHomeGuard } from '../scripts/lib/free-home-guard';
 
@@ -205,7 +205,13 @@ export function testFileEnv(base: NodeJS.ProcessEnv, stateDir: string, file: str
 // helper decides what counts as a free test).
 const FULL_RE = /^(bun\.lock|bun\.lockb|bunfig\.toml|test-setup\.ts|patches\/.*|tsconfig[^/]*\.json|scripts\/test-free-shards\.ts|scripts\/lib\/(shard-engine|windows-curation|free-[^/]*)\.ts|test\/helpers\/paid-test-set\.ts)$/;
 const SKILL_SURFACE_RE = /(^|\/)SKILL\.md\.tmpl$|^scripts\/resolvers\/|^scripts\/gen-skill-docs\.ts$|^hosts\//;
-const CODE_RE = /^(bin|lib|scripts)\//;
+// The roots test/egress-receipt-wiring.test.ts's NEW-SINK SCANNER sweeps
+// (its SWEEP list; pinned by test/pr-validate.test.ts). The class:test
+// roots are the free runner's TEST_ROOTS, which the sync-spawn tripwire
+// scans, plus any test file (the paid-orphan tripwire reads every one).
+const CODE_ROOTS = ['bin', 'lib', 'scripts', 'design/src', 'browse/src', 'hosts'];
+const TEST_FILE_RE = /\.test\.[cm]?[jt]sx?$/;
+const under = (f: string, roots: readonly string[]) => roots.some(r => f.startsWith(`${r}/`));
 const CLASS_SKILL = ['test/gen-skill-docs.test.ts', 'test/skill-validation.test.ts', 'test/catalog-budget.test.ts', 'test/context-budget-ratchet.test.ts'];
 const CLASS_CODE = ['test/egress-receipt-wiring.test.ts'];
 const CLASS_TEST = ['test/spawnsync-timeout-tripwire.test.ts', 'test/test-of-test-ratchet.test.ts', 'test/paid-orphan-tripwire.test.ts', 'test/test-free-shards.test.ts'];
@@ -290,8 +296,8 @@ export function selectTests(x: { changed: string[]; universe: string[]; declared
     if (FULL_RE.test(f) || (x.preload ?? []).includes(f) || (f === 'package.json' && !x.pkgVersionOnly)) full.push(f);
     if (universe.has(f)) add(f, 'changed');
     if (SKILL_SURFACE_RE.test(f)) CLASS_SKILL.forEach(t => add(t, `class:skill(${f})`));
-    if (CODE_RE.test(f) && !/\.test\.ts$/.test(f)) CLASS_CODE.forEach(t => add(t, `class:code(${f})`));
-    if (/^(test|browse\/test|design\/test)\//.test(f)) CLASS_TEST.forEach(t => add(t, `class:test(${f})`));
+    if (under(f, CODE_ROOTS) && !TEST_FILE_RE.test(f)) CLASS_CODE.forEach(t => add(t, `class:code(${f})`));
+    if (under(f, TEST_ROOTS) || TEST_FILE_RE.test(f)) CLASS_TEST.forEach(t => add(t, `class:test(${f})`));
     if (RELEASE_FILES.includes(f)) CLASS_RELEASE.forEach(t => add(t, `class:release(${f})`));
   }
   // A test that imports a changed module (one hop, the way bun resolves the
