@@ -86,8 +86,16 @@ describe('listAuditCommits', () => {
     const prior = { generated_at: '2026-10-05T10:00:00Z', commits: [{ sha: 'f'.repeat(40), subject: 'feat: a', bucket: 'OVERLAP' }], audited: [{ patchId: first.audit[0].patchId, sha: 'f'.repeat(40), bucket: 'OVERLAP' }, { patchId: first.audit[1].patchId, sha: sha.c4, bucket: 'UNVERIFIED' }] };
     const l = listAuditCommits(defaultGit, repo, base, prior);
     expect(l.audit.map(c => c.mode)).toEqual(['CARRY', 'RECHECK']);
-    expect(searchQualifier(l.audit[0])).toBe('updated:>=2026-10-05');
+    expect(searchQualifier(l.audit[0])).toBe('updated:>=2026-10-04');
     expect(searchQualifier(l.audit[1])).toBeNull();
+  });
+
+  test('a CARRY search starts a day before the last stamp, so searches that ran before UTC midnight leave no gap', () => {
+    const c = { sha: 'a'.repeat(40), subject: 's', files: ['lib/a.ts'], patchId: 'p', mode: 'CARRY' as const, since: '2026-10-09T00:05:00.000Z', prior: null };
+    // The audit searched at 2026-10-08T23:45Z and stamped at 00:05Z; an item opened at 23:50Z must still be searched.
+    expect(searchQualifier(c)).toBe('updated:>=2026-10-08');
+    expect(searchQualifier({ ...c, since: 'x OR is:closed' })).toBeNull();
+    expect(searchQualifier({ ...c, mode: 'NEW' })).toBeNull();
   });
 
   test('a package.json commit is release-only only when nothing but its version moved', () => {
