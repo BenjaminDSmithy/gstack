@@ -48,7 +48,7 @@ export function worstOf(buckets: readonly unknown[]): Bucket {
 }
 
 export interface PriorEntry { sha: string; patchId?: string; subject?: string; bucket: string; topScore?: number; hits?: unknown[] }
-export interface PriorReport { repo?: string | null; generated_at?: string; base_sha?: string; head?: string; commits?: PriorEntry[]; audited?: { patchId: string; sha: string; bucket: string }[] }
+export interface PriorReport { repo?: string | null; worst?: unknown; generated_at?: string; base_sha?: string; head?: string; commits?: PriorEntry[]; audited?: { patchId: string; sha: string; bucket: string }[] }
 
 const REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 
@@ -74,7 +74,23 @@ export type Mode = 'NEW' | 'CARRY' | 'RECHECK';
  */
 const RECHECK_BUCKETS: ReadonlySet<string> = new Set(['UNVERIFIED', 'EXACT_DUP']);
 export interface AuditCommit { sha: string; subject: string; files: string[]; patchId: string; mode: Mode; since: string | null; prior: PriorEntry | null }
-export interface CommitList { base: string; head: string; audit: AuditCommit[]; skipped: { sha: string; subject: string; reason: 'release-only' | 'empty' }[] }
+export interface CommitList { base: string; head: string; floor?: Bucket | null; audit: AuditCommit[]; skipped: { sha: string; subject: string; reason: 'release-only' | 'empty' }[] }
+
+/**
+ * The part of the last report's `worst` that no audited commit carries, or
+ * null: a row for a skipped commit (never searched again) or the agent's
+ * declared worst. Nothing says which commit it belonged to, so the next list
+ * re-checks every audited commit in full rather than carry their verdicts
+ * past a delta search, and an EXACT_DUP floor stays until each of those
+ * searches returned a verdict. Otherwise it would drop without a search.
+ */
+export function priorFloor(prior: PriorReport | null): Bucket | null {
+  if (!prior || typeof prior !== 'object' || prior.worst === undefined || prior.worst === null) return null;
+  const rows = [...(Array.isArray(prior.commits) ? prior.commits : []), ...(Array.isArray(prior.audited) ? prior.audited : [])];
+  const carried = worstOf(rows.map(r => r?.bucket));
+  const declared = worstOf([prior.worst]);
+  return rank(declared) > rank(carried) ? declared : null;
+}
 
 function git(g: GitRunner, cwd: string, args: string[], input?: string): string {
   const r = g(args, { cwd, input });
@@ -161,7 +177,8 @@ export function listAuditCommits(g: GitRunner, cwd: string, base: string, prior:
   const baseSha = git(g, cwd, ['rev-parse', `${base}^{commit}`]).trim();
   const shas = git(g, cwd, ['rev-list', '--no-merges', '--reverse', `${baseSha}..${head}`]).split('\n').filter(Boolean);
   const index = priorIndex(prior);
-  const out: CommitList = { base: baseSha, head, audit: [], skipped: [] };
+  const floor = priorFloor(prior);
+  const out: CommitList = { base: baseSha, head, floor, audit: [], skipped: [] };
   for (const sha of shas) {
     const subject = git(g, cwd, ['log', '-1', '--format=%s', sha]).trim();
     const files = git(g, cwd, ['diff-tree', '--no-commit-id', '--name-only', '-r', '--root', sha]).split('\n').filter(Boolean);
@@ -174,7 +191,7 @@ export function listAuditCommits(g: GitRunner, cwd: string, base: string, prior:
     let mode: Mode = 'NEW';
     // The search keywords come from the subject: a reworded commit (same diff,
     // new subject) was never searched under its new keywords.
-    if (p) mode = RECHECK_BUCKETS.has(p.bucket) || !entries.some(e => e.subject === subject) ? 'RECHECK' : 'CARRY';
+    if (p) mode = floor || RECHECK_BUCKETS.has(p.bucket) || !entries.some(e => e.subject === subject) ? 'RECHECK' : 'CARRY';
     out.audit.push({ sha, subject, files, patchId, mode, since: mode === 'CARRY' ? (prior?.generated_at ?? null) : null, prior: p });
   }
   return out;
@@ -205,7 +222,8 @@ const SHA_PREFIX_RE = /^[0-9a-f]{7,64}$/i;
  * Validate the agent's report and stamp what the agent never types: head,
  * base, time, the audited patch-ids. Every row counts: a commit takes the
  * worst of all its rows, a row for a skipped commit still counts toward
- * `worst`, and the agent's own `worst` is a floor. A row that names no
+ * `worst`, and the agent's own `worst` is a floor; the next list re-checks
+ * every commit when either of those set `worst` (priorFloor). A row that names no
  * commit between the base and HEAD (a typo, a wrong --base, a sha rewritten
  * since `list`) or names it by fewer than 7 hex characters refuses the whole
  * report (code 2): dropping it could hide an EXACT_DUP (commitsMain then
@@ -254,7 +272,9 @@ export function stampReport(agent: unknown, list: CommitList, now: Date, opts: {
     return got.length ? { ...s, bucket: worstOf(got.map(r => r.bucket)) } : s;
   });
   const declared = a.worst === undefined || a.worst === null ? [] : [String(a.worst)];
-  const worst = worstOf([...commits.map(c => c.bucket), ...skipped.flatMap(s => ('bucket' in s ? [s.bucket] : [])), ...declared]);
+  // The last report's uncarried EXACT_DUP (priorFloor) stands while any commit's full search returned no verdict.
+  const floorStands = list.floor === 'EXACT_DUP' && commits.some(c => c.bucket === 'UNVERIFIED');
+  const worst = worstOf([...commits.map(c => c.bucket), ...skipped.flatMap(s => ('bucket' in s ? [s.bucket] : [])), ...declared, ...(floorStands ? ['EXACT_DUP'] : [])]);
   return {
     summary: a.summary, worst, commits,
     skipped,
@@ -332,10 +352,12 @@ export const COMMITS_USAGE = `gstack-pr-prep-commits <list|stamp|self|paths> [op
           NEW (full searches), CARRY (audited before with a verdict: search
           only items updated since the day before that audit's stamp, keep
           the old verdict), RECHECK (audited
-          before as UNVERIFIED or EXACT_DUP, or under another subject:
-          full searches, the verdict is re-derived, but a known EXACT_DUP
-          stays until a full search returns a verdict and a reworded
-          commit keeps its verified one); release-only commits
+          before as UNVERIFIED or EXACT_DUP, or under another subject, or
+          the last report's worst came from a row no audited commit
+          carries, printed as \`floor\`: full searches, the verdict is
+          re-derived, but a known EXACT_DUP stays until a full search
+          returns a verdict and a reworded commit keeps its verified
+          one); release-only commits
           (only VERSION, CHANGELOG.md, the agents digest, and package.json
           with nothing but its version changed) and empty commits are
           skipped and listed. Only a prior stamped for the same --repo

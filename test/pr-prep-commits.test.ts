@@ -205,6 +205,27 @@ describe('stampReport', () => {
     expect(prior.commits[0].hits).toEqual([hit(0.2)]);
   });
 
+  test('a verdict the last report could not carry, from a skipped commit\'s row or a declared worst, re-checks every commit', () => {
+    const first = listAuditCommits(defaultGit, repo, base, null);
+    const modes = (l: typeof first) => [l.floor, l.audit.map(c => c.mode), l.audit.map(searchQualifier)];
+    const clean = [{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4, bucket: 'CLEAN' }];
+    // c2 is release-only and never searched again; the agent put the OVERLAP it found on it.
+    const r1 = stampReport({ summary: 's', commits: [...clean, { sha: sha.c2, bucket: 'OVERLAP' }] }, first, now) as PriorReport & { worst: string };
+    expect(r1.worst).toBe('OVERLAP');
+    expect(modes(listAuditCommits(defaultGit, repo, base, r1))).toEqual(['OVERLAP', ['RECHECK', 'RECHECK'], [null, null]]);
+    // A declared EXACT_DUP no row carries stays until every commit's full search returned a verdict.
+    const r2 = stampReport({ summary: 's', worst: 'EXACT_DUP', commits: clean }, first, now) as PriorReport;
+    const l2 = listAuditCommits(defaultGit, repo, base, r2);
+    expect(modes(l2)).toEqual(['EXACT_DUP', ['RECHECK', 'RECHECK'], [null, null]]);
+    const worst = (commits: { sha: string; bucket: string }[]) => (stampReport({ summary: 's', commits }, l2, now) as Record<string, any>).worst;
+    expect(worst([{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4, bucket: 'UNVERIFIED' }])).toBe('EXACT_DUP');
+    expect(worst([{ sha: sha.c1, bucket: 'CLEAN' }])).toBe('EXACT_DUP');
+    expect(worst(clean)).toBe('CLEAN');
+    // A report whose worst its commits carry is carried as before.
+    const r3 = stampReport({ summary: 's', worst: 'CLEAN', commits: [{ sha: sha.c1, bucket: 'OVERLAP' }, { sha: sha.c4, bucket: 'CLEAN' }, { sha: sha.c2, bucket: 'SIBLING' }] }, first, now) as PriorReport;
+    expect(modes(listAuditCommits(defaultGit, repo, base, r3)).slice(0, 2)).toEqual([null, ['CARRY', 'CARRY']]);
+  });
+
   test('every row the agent reported counts toward worst, and its own worst is a floor', () => {
     const l = listAuditCommits(defaultGit, repo, base, null);
     const st = (commits: { sha: string; bucket: string }[], worst?: string) =>
