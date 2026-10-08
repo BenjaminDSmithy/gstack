@@ -80,7 +80,12 @@ function spawnFailure(tool: string, error: Error, timeoutMs: number): string {
   return `${tool} failed to run (${code ?? error.message})`;
 }
 
-/** gh subcommands that write to GitHub, by command group, with gh's own aliases (`pr new`, `secret remove`). */
+/**
+ * gh subcommands that write to GitHub, by command group, with gh's own
+ * aliases (`pr new`, `secret remove`), as `gh reference` lists them in gh
+ * 2.102. codespace `cp` and `ssh` reach into a codespace; agent-task
+ * `create` starts an agent that opens a PR.
+ */
 const GH_WRITES: ReadonlyMap<string, readonly string[]> = new Map(Object.entries({
   pr: ['create', 'new', 'edit', 'merge', 'comment', 'close', 'reopen', 'ready', 'review', 'lock', 'unlock', 'update-branch', 'revert'],
   issue: ['create', 'new', 'edit', 'comment', 'close', 'reopen', 'delete', 'lock', 'unlock', 'transfer', 'pin', 'unpin', 'develop'],
@@ -89,7 +94,7 @@ const GH_WRITES: ReadonlyMap<string, readonly string[]> = new Map(Object.entries
   release: ['create', 'new', 'edit', 'delete', 'upload', 'delete-asset'],
   repo: ['create', 'new', 'edit', 'delete', 'fork', 'rename', 'archive', 'unarchive', 'sync'],
   label: ['create', 'edit', 'delete', 'clone'],
-  gist: ['create', 'new', 'edit', 'delete'],
+  gist: ['create', 'new', 'edit', 'delete', 'rename'],
   secret: ['set', 'delete', 'remove'],
   variable: ['set', 'delete', 'remove'],
   cache: ['delete'],
@@ -97,12 +102,22 @@ const GH_WRITES: ReadonlyMap<string, readonly string[]> = new Map(Object.entries
   'gpg-key': ['add', 'delete'],
   project: ['create', 'edit', 'delete', 'close', 'copy', 'field-create', 'field-delete', 'item-add', 'item-archive',
     'item-create', 'item-delete', 'item-edit', 'link', 'unlink', 'mark-template'],
-  codespace: ['create', 'delete', 'edit', 'stop', 'rebuild'],
+  codespace: ['create', 'delete', 'edit', 'stop', 'rebuild', 'cp', 'ssh'],
+  discussion: ['create', 'comment', 'edit'],
+  'agent-task': ['create'],
+  skill: ['publish'],
 }));
-/** Write verbs one level below a group (`gh repo deploy-key add`). */
+/** gh's own aliases of a command group (`gh cs` is `gh codespace`). */
+const GH_GROUP_ALIASES: ReadonlyMap<string, string> = new Map(Object.entries({
+  cs: 'codespace', agent: 'agent-task', agents: 'agent-task', 'agent-tasks': 'agent-task', skills: 'skill',
+}));
+/** gh commands whose every run may write: `gh copilot` runs an agent with whatever arguments follow. */
+const GH_AGENT_COMMANDS = new Set(['copilot']);
+/** Write verbs one level below a group (`gh repo deploy-key add`), with gh's aliases (`autolink new`). */
 const GH_NESTED_WRITES: ReadonlyMap<string, readonly string[]> = new Map(Object.entries({
   'repo deploy-key': ['add', 'delete'],
-  'repo autolink': ['create', 'delete'],
+  'repo autolink': ['create', 'new', 'delete'],
+  'codespace ports': ['visibility', 'forward'],
 }));
 /** gh flags that print help or the version and run nothing. */
 const GH_INERT_FLAGS = new Set(['-h', '--help', '--version']);
@@ -117,7 +132,21 @@ const GIT_FLAG_OPTS = new Set(['-p', '--paginate', '-P', '--no-pager', '--bare',
   '--exec-path', '--html-path', '--man-path', '--info-path']);
 const GIT_ATTACHED_OPT_RE = /^--(?:git-dir|work-tree|namespace|config-env|attr-source|exec-path|list-cmds)=/;
 /** git commands that send to a remote or off the machine. */
-const GIT_WRITES = new Set(['push', 'send-pack', 'http-push', 'send-email', 'imap-send']);
+const GIT_WRITES = new Set(['push', 'send-pack', 'http-push', 'send-email', 'imap-send', 'cvsexportcommit']);
+/**
+ * git commands that send only through one subcommand (`git subtree push`,
+ * `git lfs push`), or run any command (`git submodule foreach`). The
+ * subcommand is matched anywhere after the command, since `git subtree`
+ * takes its options before it (`-P sub push`); a path spelled like one of
+ * these words fails closed, as a write.
+ */
+const GIT_SUBCOMMAND_WRITES: ReadonlyMap<string, readonly string[]> = new Map(Object.entries({
+  subtree: ['push'],
+  lfs: ['push', 'pre-push'],
+  p4: ['submit'],
+  svn: ['dcommit', 'branch', 'tag', 'set-tree', 'commit-diff'],
+  submodule: ['foreach'],
+}));
 
 /**
  * The git write this argv performs, named from a fixed vocabulary, or null.
@@ -143,6 +172,9 @@ function gitWriteOp(args: readonly string[], depth = 0): string | null {
   if (command === undefined) return null;
   if (GIT_WRITES.has(command)) return `git ${command}`;
   if (command.startsWith('remote-')) return 'git remote-helper';
+  const subs = GIT_SUBCOMMAND_WRITES.get(command);
+  const sub = subs && args.slice(i + 1).find(a => subs.includes(a));
+  if (sub) return `git ${command} ${sub}`;
   const expansion = aliases.get(command.toLowerCase());
   if (expansion === undefined) return null;
   if (expansion.trimStart().startsWith('!')) return 'a git shell alias';
@@ -212,8 +244,10 @@ function ghWriteOp(args: readonly string[]): string | null {
     else if (group === undefined) {
       if (a.startsWith('-')) return 'gh with a flag before the command';
       if (a === 'api') return ghApiWriteOp(args.slice(i + 1));
-      if (!GH_WRITES.has(a)) return null;
-      group = a;
+      if (GH_AGENT_COMMANDS.has(a)) return `gh ${a} (an agent that may write)`;
+      const canonical = GH_GROUP_ALIASES.get(a) ?? a;
+      if (!GH_WRITES.has(canonical)) return null;
+      group = canonical;
     } else {
       if (a.startsWith('-')) return `gh ${group} (a flag before the subcommand)`;
       if (GH_NESTED_WRITES.has(`${group} ${a}`)) {
@@ -229,13 +263,16 @@ function ghWriteOp(args: readonly string[]): string | null {
 
 /**
  * Would this argv write to a remote? git: `push`, `send-pack`, `http-push`,
- * `send-email`, `imap-send` and the `remote-*` helpers, found past every
- * global option, also through an alias defined in argv. gh: the write verbs
- * of GH_WRITES (repo flags before the verb skipped), and `gh api` per
- * ghApiWriteOp. Exported so the helpers' fake runners apply the same test.
- * It catches a helper's own mistake; it is not a sandbox: what git or gh
- * runs by itself (hooks, `rebase --exec`, `-c core.sshCommand`, aliases set
- * in config files, gh aliases) is not classified.
+ * `send-email`, `imap-send`, `cvsexportcommit` and the `remote-*` helpers,
+ * plus the sending subcommands of GIT_SUBCOMMAND_WRITES (`subtree push`,
+ * `lfs push`, `submodule foreach`), found past every global option, also
+ * through an alias defined in argv. gh: the write verbs of GH_WRITES and
+ * GH_NESTED_WRITES under gh's own group aliases (repo flags before the verb
+ * skipped), `gh copilot`, and `gh api` per ghApiWriteOp. Exported so the
+ * helpers' fake runners apply the same test. It catches a helper's own
+ * mistake; it is not a sandbox: what git or gh runs by itself (hooks,
+ * `rebase --exec`, `-c core.sshCommand`, aliases set in config files, gh
+ * aliases and extensions) is not classified.
  */
 export function isRemoteWrite(tool: 'gh' | 'git', args: readonly string[]): boolean {
   return (tool === 'git' ? gitWriteOp(args) : ghWriteOp(args)) !== null;

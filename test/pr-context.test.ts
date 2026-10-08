@@ -1085,6 +1085,21 @@ describe('writes only through receiptedSend', () => {
       ['git', ['-c', 'alias.a=b', '-c', 'alias.b=push', 'a']], ['git', ['-c', 'alias.ship=!git push', 'ship']],
       ['git', ['-c', 'alias.loop=loop', 'loop']], ['git', ['--config-env=alias.up=SOME_VAR', 'up']],
       ['git', ['--some-future-option', 'status']],
+      // gh 2.102's other writes: gh's own aliases of a verb (`autolink new`) and of a group
+      // (`cs`, `agent`, `skills`), writes one level down (`codespace ports visibility`), and
+      // the groups that write (discussion, agent-task, skill publish, the agent copilot runs).
+      ['gh', ['repo', 'autolink', 'new', 'JIRA-', 'https://x/<num>']], ['gh', ['cs', 'delete', '-c', 'x', '--force']],
+      ['gh', ['codespace', 'ports', 'visibility', '80:public']], ['gh', ['cs', 'ports', 'forward', '80:8080']],
+      ['gh', ['codespace', 'cp', 'local.txt', 'remote:/x']], ['gh', ['codespace', 'ssh', '-c', 'x']],
+      ['gh', ['gist', 'rename', 'abc', 'a.md', 'b.md']], ['gh', ['discussion', 'create', '--title', 't', '--body', 'b']],
+      ['gh', ['discussion', 'comment', '5', '--body', 'x']], ['gh', ['discussion', 'edit', '5', '--title', 'y']],
+      ['gh', ['agent-task', 'create', 'fix the bug', '-R', 'o/r']], ['gh', ['agent', 'create', 'x']],
+      ['gh', ['skill', 'publish', '.']], ['gh', ['skills', 'publish']], ['gh', ['copilot', '-p', 'x']],
+      // git commands that send only through a subcommand (options may precede it), or run any command.
+      ['git', ['subtree', 'push', '--prefix=sub', 'origin', 'side']], ['git', ['subtree', '-P', 'sub', 'push', 'origin', 'side']],
+      ['git', ['lfs', 'push', 'origin', 'main']], ['git', ['lfs', 'pre-push', 'origin']], ['git', ['p4', 'submit']],
+      ['git', ['svn', 'dcommit']], ['git', ['cvsexportcommit', '-c', 'abc']], ['git', ['submodule', 'foreach', 'git push']],
+      ['git', ['-c', 'alias.sp=subtree push', 'sp', '--prefix=x', 'origin', 'b']],
     ];
     const reads: [ 'gh' | 'git', string[]][] = [
       ['gh', ['pr', 'view', '1', '--json', 'state']], ['gh', ['pr', 'checks', '1']], ['gh', ['run', 'view', '9', '--log-failed']],
@@ -1096,6 +1111,11 @@ describe('writes only through receiptedSend', () => {
       ['gh', ['api', 'graphql', '-F', 'query={ viewer { login } }', '-F', 'n=1']], ['gh', ['api', '-H', 'graphql', 'repos/o/r']],
       ['git', ['--attr-source', 'push', 'status']], ['git', ['-c', 'alias.lg=log --oneline', 'lg']], ['git', ['--version']],
       ['git', ['--no-pager', '-P', 'log']],
+      ['gh', ['discussion', 'list']], ['gh', ['discussion', 'view', '5']], ['gh', ['agent-task', 'list']], ['gh', ['agent', 'view', '1']],
+      ['gh', ['skill', 'list']], ['gh', ['skill', 'search', 'x']], ['gh', ['cs', 'list']], ['gh', ['codespace', 'ports']],
+      ['gh', ['gist', 'view', 'abc']], ['gh', ['repo', 'autolink', 'view', '1']],
+      ['git', ['subtree', 'split', '--prefix=sub']], ['git', ['lfs', 'fetch']], ['git', ['lfs', 'ls-files']],
+      ['git', ['submodule', 'update', '--init']], ['git', ['p4', 'sync']], ['git', ['svn', 'fetch']],
     ];
     for (const [tool, args] of writes) expect(isRemoteWrite(tool, args), `${tool} ${args.join(' ')}`).toBe(true);
     for (const [tool, args] of reads) expect(isRemoteWrite(tool, args), `${tool} ${args.join(' ')}`).toBe(false);
