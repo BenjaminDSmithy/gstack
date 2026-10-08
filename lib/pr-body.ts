@@ -475,6 +475,67 @@ const CODE_PATHSPEC: readonly string[] = [':(top)', ...RELEASE_FILES.map(f => `:
  */
 const PLAIN_DIFF: readonly string[] = ['--no-color', '--no-ext-diff', '--no-textconv', '--no-relative'];
 
+const numstatLines = (rows: string[]) => rows.reduce((n, l) => n + l.split('\t').slice(0, 2).reduce((a, x) => a + (Number(x) || 0), 0), 0);
+
+/** package.json's text with its top-level `version` value blanked; the text as it is when that cannot be done exactly. */
+export function manifestWithoutVersion(text: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return text;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || typeof (parsed as { version?: unknown }).version !== 'string') return text;
+  const out = text.replace(/^([ \t]*"version"[ \t]*:[ \t]*)"(?:[^"\\\n]|\\.)*"/m, (_m, key: string) => `${key}"-"`);
+  try {
+    // The first "version" line could belong to a nested object: then keep the text.
+    return (JSON.parse(out) as { version?: unknown }).version === '-' ? out : text;
+  } catch {
+    return text;
+  }
+}
+
+/**
+ * package.json's changes between two revisions with its top-level version
+ * held equal. RELEASE_FILES keeps package.json out of the code diff because
+ * a sync re-versions it, but a dependency, a script or a bin entry is code:
+ * excluding the whole file published "unchanged since the last publish"
+ * after a push that only added a postinstall script. The two manifests go
+ * through `git diff --no-index` in a scratch directory, and the header
+ * names are rewritten to package.json's own, so the patch-id input is the
+ * patch git prints for the file when only the version is set aside.
+ */
+function manifestDiff(c: Ctx, from: string, to: string): { files: number; lines: number; text: string } {
+  const read = (rev: string) => {
+    const r = c.d.git(['show', `${rev}:package.json`], { cwd: c.f.cwd });
+    return r.status === 0 ? r.stdout : null;
+  };
+  const a = read(from);
+  const b = read(to);
+  const none = { files: 0, lines: 0, text: '' };
+  if (a === b) return none;
+  const na = manifestWithoutVersion(a ?? '');
+  const nb = manifestWithoutVersion(b ?? '');
+  if (na === nb) return none;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-pr-body-manifest-'));
+  try {
+    for (const [side, text] of [['a', na], ['b', nb]]) {
+      fs.mkdirSync(path.join(dir, side));
+      fs.writeFileSync(path.join(dir, side, 'package.json'), text);
+    }
+    const diff = (extra: string[]) => {
+      const r = c.d.git(['diff', '--no-index', ...PLAIN_DIFF, ...extra, '--', 'a/package.json', 'b/package.json'], { cwd: dir });
+      // --no-index exits 1 when the files differ.
+      if (r.status !== 0 && r.status !== 1) throw new PrContextError(`git diff of package.json failed: ${(r.error ?? r.stderr).trim().split('\n').at(-1)}`, 1);
+      return r.stdout;
+    };
+    const text = diff(['--binary']).split('\n').map(l => (/^(?:diff --git|--- |\+\+\+ )/.test(l) ? l.replace(' a/a/', ' a/').replace(' b/b/', ' b/') : l)).join('\n');
+    return { files: text ? 1 : 0, lines: numstatLines(diff(['--numstat']).split('\n').filter(Boolean)), text };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /**
  * `git patch-id --stable` of a diff ('' for an empty one). A failed run or
  * a non-empty diff without an id is an error, never a blank fingerprint.
@@ -529,8 +590,9 @@ export function collectFacts(c: Ctx): Facts {
     .filter((p): p is string => !!p && inBase(p))
     .map(p => ({ upstream: p, version: show(p, 'VERSION'), pr: prNum(gitOut(c, ['log', '-1', '--format=%s', p]).trim()) }));
   const stat = gitOut(c, ['diff', ...PLAIN_DIFF, '--numstat', mb, head, '--', ...CODE_PATHSPEC]).split('\n').filter(Boolean);
-  const lines = stat.reduce((n, l) => n + l.split('\t').slice(0, 2).reduce((a, x) => a + (Number(x) || 0), 0), 0);
-  const pid = patchIdOf(c, gitOut(c, ['diff', ...PLAIN_DIFF, '--binary', mb, head, '--', ...CODE_PATHSPEC]));
+  const manifest = manifestDiff(c, mb, head);
+  const lines = numstatLines(stat) + manifest.lines;
+  const pid = patchIdOf(c, gitOut(c, ['diff', ...PLAIN_DIFF, '--binary', mb, head, '--', ...CODE_PATHSPEC]) + manifest.text);
   const previous = readPublishedFacts(c.stateDir);
   const state = readStateFor(c.stateDir, pr);
   const ci = readCiAt(c, head);
@@ -538,7 +600,7 @@ export function collectFacts(c: Ctx): Facts {
     at: d.now().toISOString().replace(/\.\d+Z$/, 'Z'), head, codeSha, emptyCi, baseRef: pr.baseRef, baseSha: base,
     baseVersion: show(base, 'VERSION'), basePr: prNum(gitOut(c, ['log', '-1', '--format=%s', base]).trim()),
     version: show(head, 'VERSION'), merges,
-    diff: { files: stat.length, lines, patchId: pid, previousPatchId: previous ? previous.patchId : null },
+    diff: { files: stat.length + manifest.files, lines, patchId: pid, previousPatchId: previous ? previous.patchId : null },
     commits: Number(gitOut(c, ['rev-list', '--no-merges', '--count', `${mb}..${head}`]).trim()),
     validation: state?.validation ? { sha: state.validation.sha, worst: state.validation.worst, summary: state.validation.summary } : null,
     ci,
