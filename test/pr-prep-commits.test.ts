@@ -82,11 +82,27 @@ describe('listAuditCommits', () => {
 
   test('a commit audited before carries its verdict and searches only newer items; UNVERIFIED is re-checked in full', () => {
     const first = listAuditCommits(defaultGit, repo, base, null);
-    const prior = { generated_at: '2026-10-05T10:00:00Z', commits: [], audited: [{ patchId: first.audit[0].patchId, sha: 'f'.repeat(40), bucket: 'OVERLAP' }, { patchId: first.audit[1].patchId, sha: sha.c4, bucket: 'UNVERIFIED' }] };
+    // c1 was audited under another sha (before a rebase): its patch-id and subject still match.
+    const prior = { generated_at: '2026-10-05T10:00:00Z', commits: [{ sha: 'f'.repeat(40), subject: 'feat: a', bucket: 'OVERLAP' }], audited: [{ patchId: first.audit[0].patchId, sha: 'f'.repeat(40), bucket: 'OVERLAP' }, { patchId: first.audit[1].patchId, sha: sha.c4, bucket: 'UNVERIFIED' }] };
     const l = listAuditCommits(defaultGit, repo, base, prior);
     expect(l.audit.map(c => c.mode)).toEqual(['CARRY', 'RECHECK']);
     expect(searchQualifier(l.audit[0])).toBe('updated:>=2026-10-05');
     expect(searchQualifier(l.audit[1])).toBeNull();
+  });
+
+  test('a commit reworded since its audit, or a prior with no subject, is searched in full: the keywords come from the subject', () => {
+    const now = new Date('2026-10-08T00:00:00Z');
+    const { dir, base: b } = freshRepo('reword', { 'lib/z.ts': 'z\n' });
+    commitIn(dir, { 'lib/c.ts': 'c\n' }, 'fix(cache): misc cleanup');
+    const l1 = listAuditCommits(defaultGit, dir, b, null);
+    const r1 = stampReport({ summary: 's', commits: [{ sha: l1.audit[0].sha, bucket: 'CLEAN' }] }, l1, now) as PriorReport;
+    expect(listAuditCommits(defaultGit, dir, b, r1).audit[0].mode).toBe('CARRY');
+    gitIn(dir, 'commit', '-q', '--amend', '-m', 'feat(browse): add a persistent CDP session cache');
+    const l2 = listAuditCommits(defaultGit, dir, b, r1);
+    expect(l2.audit[0].patchId).toBe(l1.audit[0].patchId);
+    expect(l2.audit[0].mode).toBe('RECHECK');
+    const bare = { generated_at: '2026-10-05T10:00:00Z', audited: [{ patchId: l1.audit[0].patchId, sha: 'f'.repeat(40), bucket: 'CLEAN' }] };
+    expect(listAuditCommits(defaultGit, dir, b, bare).audit[0].mode).toBe('RECHECK');
   });
 });
 
@@ -94,7 +110,7 @@ describe('stampReport', () => {
   const now = new Date('2026-10-08T00:00:00Z');
   test('worst never drops for a carried commit; an unreported commit is UNVERIFIED; stamps are not typed by the agent', () => {
     const first = listAuditCommits(defaultGit, repo, base, null);
-    const prior = { generated_at: '2026-10-05T10:00:00Z', audited: [{ patchId: first.audit[0].patchId, sha: sha.c1, bucket: 'OVERLAP' }] };
+    const prior = { generated_at: '2026-10-05T10:00:00Z', commits: [{ sha: sha.c1, subject: 'feat: a', bucket: 'OVERLAP' }], audited: [{ patchId: first.audit[0].patchId, sha: sha.c1, bucket: 'OVERLAP' }] };
     const l = listAuditCommits(defaultGit, repo, base, prior);
     const r = stampReport({ summary: 'x', worst: 'CLEAN', commits: [{ sha: sha.c1.slice(0, 8), bucket: 'CLEAN' }] }, l, now) as Record<string, any>;
     expect(r.commits.map((c: { bucket: string }) => c.bucket)).toEqual(['OVERLAP', 'UNVERIFIED']);
