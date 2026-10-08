@@ -770,19 +770,21 @@ function cmdPublish(c: Ctx): number {
     } finally {
       fs.rmSync(path.dirname(sendFile), { recursive: true, force: true });
     }
+    // The read-back must hold exactly the bytes sent. Anything else (a web
+    // save or a bot edit in the window) is reported, and the stored body is
+    // NOT recorded as ours, so the next publish shows the difference.
     const after = liveBody(c);
-    const restore = path.join(c.stateDir, `pr-body-restore-${d.now().toISOString().replace(/[:.]/g, '-')}.md`);
-    const vanished = lostOwnerContent(live, after);
-    const facts = /<!-- pr-prep:facts:begin v1 -->[\s\S]*?<!-- pr-prep:facts:end -->/.exec(body)?.[0] ?? '';
-    if (vanished.length || (facts && !after.includes(facts))) {
+    if (after !== body) {
+      const restore = path.join(c.stateDir, `pr-body-restore-${d.now().toISOString().replace(/[:.]/g, '-')}.md`);
       fs.writeFileSync(restore, live, { mode: 0o600 });
-      d.out(`RESULT ERROR the read-back does not hold what was sent (a concurrent web edit?). The pre-publish body is saved at ${restore}; do not re-edit automatically, tell the owner.`);
-      printOwnerContent(d, 'VANISHED', vanished, c.pr.number);
+      d.out(`RESULT ERROR the read-back is not the body sent (a concurrent web edit?). The pre-publish body is saved at ${restore}; do not re-edit automatically, tell the owner. The difference, sent -> stored, follows.`);
+      printOwnerContent(d, 'VANISHED', lostOwnerContent(live, after), c.pr.number);
+      d.out(envelope(lineDiff(body, after), `pr-${c.pr.number}-sent-vs-stored`));
       return BODY_EXIT.ERROR;
     }
-    writeState(c.stateDir, { ...(state ?? freshState(c.pr)), lastPublishedBodySha256: sha256(after), bodyStaleSince: null });
+    writeState(c.stateDir, { ...(state ?? freshState(c.pr)), lastPublishedBodySha256: sha256(body), bodyStaleSince: null });
     fs.writeFileSync(path.join(c.stateDir, `pr-body-${today(d)}.published.md`), body, { mode: 0o600 });
-    d.out(`RESULT PUBLISHED pr=${c.pr.number} sha256=${sha256(after).slice(0, 12)} head=${factsHead} body-stale-since=none cleared-stale=${stale ? s12(stale) : 'none'}`);
+    d.out(`RESULT PUBLISHED pr=${c.pr.number} sha256=${sha256(body).slice(0, 12)} head=${factsHead} body-stale-since=none cleared-stale=${stale ? s12(stale) : 'none'}`);
     d.out('WARNING if the owner has the PR description open for editing in a browser tab, they must cancel that edit: saving it overwrites this body and its screenshot.');
     return BODY_EXIT.OK;
   });
