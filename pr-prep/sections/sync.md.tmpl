@@ -9,9 +9,17 @@ Every step is a helper; the judgement left to you is in the STOP lines.
 ~/.claude/skills/gstack/bin/gstack-pr-watch poll --pr <number> --repo <upstream owner/name>
 ```
 
-Exit 10 (P0: superseded, closed, absorbed) or 11 (P1: a maintainer spoke):
-STOP. Show the owner the signal; the watch section says what to do. Exit 12
-(UNVERIFIED): STOP, the PR's state is unknown.
+- Exit 0: quiet, go on.
+- Exit 11 whose every `SIGNAL` line is of kind `mergeable-dirty` or
+  `mergeable-behind`: the PR conflicts with or is behind its base, which is
+  what this mode fixes. Show the owner those lines and go on; step 4's
+  question names them, because the push refuses (exit 30) while they are
+  unacknowledged.
+- Exit 10 (P0: superseded, closed, absorbed), or 11 with any other signal (a
+  maintainer or proxy spoke, changes requested): STOP. Show the owner the
+  signal; the watch section says what to do.
+- Exit 12 (UNVERIFIED): STOP, the PR's state is unknown. Exit 45: another
+  poll or write holds the lock; poll again.
 
 ### 2. Plan, then merge
 
@@ -51,7 +59,16 @@ also fails on the base (run it there too) before you call it pre-existing.
 
 AskUserQuestion, with `<gstack-qid:pr-prep-sync-push>` in the question: PR
 number, `<head remote> <head ref>`, old head -> staged SHA, the version
-change, and the validation summary. On yes:
+change, the validation summary, and any `mergeable-*` signal from step 1.
+
+On yes, if step 1 showed a `mergeable-*` signal, record that the owner has
+now read it, with the `<id>@P1` tokens from the poll's NEXT line:
+
+```bash
+~/.claude/skills/gstack/bin/gstack-pr-watch ack --pr <number> --repo <upstream owner/name> <signal id>@P1
+```
+
+Then push:
 
 ```bash
 ~/.claude/skills/gstack/bin/gstack-pr-sync push --pr <number> --repo <upstream owner/name> --yes
