@@ -215,6 +215,8 @@ describe('run, select and declare against a fixture PR tree', () => {
     pr?: Record<string, string | null>;
     universe?: string[];
     deps?: Partial<ValidateDeps>;
+    /** Overrides on the caller's env (deps.env). */
+    env?: NodeJS.ProcessEnv;
     /** Carry gstack's release tooling (the platform gate's markers); default true. */
     platform?: boolean;
   }
@@ -253,7 +255,7 @@ describe('run, select and declare against a fixture PR tree', () => {
       }
       return { status: 1, stdout: '', stderr: `unexpected gh ${args.join(' ')}` };
     }) as GhRunner;
-    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(base, 'home') };
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(base, 'home'), ...opts.env };
     const out: string[] = [];
     const err: string[] = [];
     const universe = opts.universe ?? ['test/x.test.ts', 'test/z.test.ts'];
@@ -371,6 +373,45 @@ describe('run, select and declare against a fixture PR tree', () => {
     const envOf = (l: string) => rec.calls.find(c => c.line.startsWith(l))!.env;
     expect(envOf('bun test').GSTACK_EXPECT_BINARIES).toBe('1');
     expect(envOf('bun run build:gates').GSTACK_EXPECT_BINARIES).toBeUndefined();
+  });
+
+  test('each test file runs in a private HOME: a write to ~/.gstack is red and never reaches the caller\'s home', async () => {
+    const home = path.join(ROOT, 'home-write-caller');
+    write(home, '.gstack/config.yaml', 'a: 1\n');
+    const f = fixture('home-write', [
+      "import fs from 'node:fs';",
+      "test('x', () => {",
+      "  fs.mkdirSync(`${process.env.HOME}/.gstack`, { recursive: true });",
+      "  fs.writeFileSync(`${process.env.HOME}/.gstack/config.yaml`, 'a: 2\\n');",
+      '  expect(y).toBe(2);',
+      '});',
+    ].join('\n'), { env: { HOME: home } });
+    expect(await f.call(['run'])).toBe(1);
+    const x = f.out.find(l => l.startsWith('test/x.test.ts'))!;
+    expect(x).toContain('RED');
+    expect(x).toContain('~/.gstack/config.yaml');
+    expect(fs.readFileSync(path.join(home, '.gstack/config.yaml'), 'utf8')).toBe('a: 1\n');
+    expect(readStateFor(f.dir, pr)!.validation).toMatchObject({ worst: 1 });
+  });
+
+  test('a test file gets a CI shard\'s sandbox: private HOME, its own browser state, nothing pointing into the caller\'s state', async () => {
+    const home = path.join(ROOT, 'sandbox-caller');
+    let tree = '';
+    const rec = recorder(() => tree);
+    const f = fixture('sandbox', "test('x', () => expect(y).toBe(2));", {
+      deps: { tool: rec.tool },
+      env: {
+        HOME: home, GSTACK_HOME: `${home}/.gstack`, GSTACK_USER_RENDER_DIR: `${home}/.gstack/render`, CODEX_HOME: `${home}/.codex`,
+        XDG_CONFIG_HOME: `${home}/.config`, SOME_TOOL_DIR: `${home}/.claude/tool`, PLAYWRIGHT_BROWSERS_PATH: undefined,
+      },
+    });
+    tree = f.tree;
+    expect(await f.call(['run'])).toBe(0);
+    const env = rec.calls.find(c => c.line.startsWith('bun test'))!.env;
+    for (const k of ['HOME', 'CHROMIUM_PROFILE', 'BROWSE_STATE_FILE', 'TMPDIR']) expect(env[k]!.startsWith(`${ROOT}/gstack-prv-`), k).toBe(true);
+    for (const k of ['GSTACK_HOME', 'GSTACK_STATE_ROOT', 'GSTACK_USER_RENDER_DIR', 'CODEX_HOME', 'XDG_CONFIG_HOME', 'SOME_TOOL_DIR']) expect(env[k], k).toBeUndefined();
+    // The browser cache still comes from the caller's home, as the free runner's private HOME does it.
+    expect(env.PLAYWRIGHT_BROWSERS_PATH!.startsWith(`${home}/`)).toBe(true);
   });
 
   test('the shellcheck mirror covers what CI shellchecks, including the extensionless setup', async () => {
