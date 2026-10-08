@@ -84,8 +84,12 @@ frontmatter_hooks() {
   ' "${skills[@]}"
 }
 
+# /autoplan's hook is named outright as well as read from its frontmatter: a
+# tree without autoplan/SKILL.md (a partial copy, gstack-doctor's test fixture)
+# still checks it, as it did before the frontmatter read.
 hook_list() {
   sed -n 's/.*\$(_hook_command_path \([A-Za-z0-9._/-]*\).*/\1/p' "$SETUP_FILE" 2>/dev/null
+  echo autoplan/bin/phase-publication-hook
   frontmatter_hooks
 }
 HOOKS=$(hook_list | awk '!seen[$0]++')

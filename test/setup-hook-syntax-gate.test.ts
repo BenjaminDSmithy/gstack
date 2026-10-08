@@ -162,6 +162,19 @@ describe('gstack-hook-check: the hook list is the registration code', () => {
     expect([...listHooks(root)].sort()).toEqual([...HOOKS].sort());
   });
 
+  test('a tree without autoplan/SKILL.md still lists and checks /autoplan\'s hook', () => {
+    // gstack-doctor's test fixture copies setup and a few bin/ files, no skill
+    // directories, and expects a broken autoplan shim to fail the hooks row.
+    const root = tmpBase();
+    fixtureTree(root);
+    fs.rmSync(path.join(root, 'autoplan', 'SKILL.md'));
+    expect(listHooks(root)).toContain('autoplan/bin/phase-publication-hook');
+    fs.writeFileSync(path.join(root, 'autoplan/bin/phase-publication-hook'), '#!/bin/sh\nif then\n');
+    const r = check(root);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('fail autoplan/bin/phase-publication-hook');
+  });
+
   test('every shipped hook in this checkout passes', () => {
     const r = check(ROOT);
     expect(r.code).toBe(0);
@@ -249,7 +262,8 @@ describe('gstack-hook-check: what fails', () => {
     fs.writeFileSync(path.join(root, 'hooks/plain'), '#!/bin/sh\nexec "$(dirname "$0")/worker.sh" "$@"\n', { mode: 0o755 });
     fs.writeFileSync(path.join(root, 'hooks/worker.sh'), '#!/usr/bin/env bash\nwhile read -r l; do echo "$l"; done < <(echo a)\n', { mode: 0o755 });
     const r = check(root);
-    expect(r.out.trim()).toBe('ok hooks/plain');
+    expect(r.out).toContain('ok hooks/plain');
+    expect(r.out).not.toContain('fail ');
     expect(r.code).toBe(0);
   });
 
