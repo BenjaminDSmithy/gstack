@@ -361,6 +361,35 @@ describe('poll, ack and the write gate', () => {
   });
 });
 
+describe('enable and disable', () => {
+  test('a topic holds one watch: enabling or disabling another PR there is refused, the first watch kept', async () => {
+    // topicFor folds pr/x and x together, as for a fork PR and its upstream PR from one checkout.
+    const home = path.join(ROOT, 'enable-home');
+    const env = { ...process.env, GSTACK_STATE_ROOT: home, GSTACK_PROJECT_SLUG: 'me-gw' };
+    const gh = ((args: string[]) => {
+      if (args[0] !== 'pr' || args[1] !== 'view') return { status: 1, stdout: '', stderr: 'unexpected' };
+      const n = Number(args[2]);
+      const repo = n === 7 ? 'acme/gw' : 'me/gw';
+      return { status: 0, stderr: '', stdout: JSON.stringify({ number: n, state: 'OPEN', isDraft: false, headRefOid: 'c'.repeat(40), url: `https://github.com/${repo}/pull/${n}`, headRepositoryOwner: { login: 'me' }, headRepository: { name: 'gw' }, headRefName: n === 7 ? 'pr/x' : 'x', baseRefName: 'main' }) };
+    }) as GhRunner;
+    const run = async (sub: string, n: number, repo: string) => {
+      const out: string[] = [];
+      const code = await watchMain([sub, '--pr', String(n), '--repo', repo, '--cwd', ROOT], { gh, env, out: l => out.push(l) });
+      return { code, first: out[0] ?? '' };
+    };
+    const file = path.join(prStateDir({ cwd: ROOT, topic: 'x', env }), 'watch.json');
+    expect((await run('enable', 7, 'acme/gw')).code).toBe(0);
+    expect(await run('enable', 8, 'me/gw')).toMatchObject({ code: 30 });
+    expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toMatchObject({ repo: 'acme/gw', number: 7 });
+    expect((await run('disable', 8, 'me/gw')).code).toBe(30);
+    expect(fs.existsSync(file)).toBe(true);
+    expect((await run('enable', 7, 'acme/gw')).code).toBe(0);
+    expect((await run('disable', 7, 'acme/gw')).code).toBe(0);
+    expect(fs.existsSync(file)).toBe(false);
+    expect((await run('disable', 7, 'acme/gw')).code).toBe(0);
+  });
+});
+
 describe('size before the PR is open', () => {
   /** gh for `size` without --pr: the default branch, and a baseline that is not read (static thresholds). */
   const sizeGh = (() => (args: string[]) => {
