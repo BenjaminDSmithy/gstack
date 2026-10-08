@@ -193,6 +193,21 @@ export function draftable(t: ShardTriage): boolean {
   return t.klass === 'HANG' && clean && o?.status === 'timed-out' && !!t.sameTreeGreen;
 }
 
+/** Pure: why draftable() refused a shard, in fixed vocabulary (REAL gets the blame step instead). */
+export function noDraftReason(t: ShardTriage): string {
+  if (t.klass !== 'CRASH' && t.klass !== 'HANG') return t.why;
+  const o = t.outcome;
+  if (!t.logRead) return 'no shard log to read';
+  if (t.failLines) return `${t.failLines} failed-test line(s) in the shard log`;
+  if (t.unhandled) return `${t.unhandled} unhandled error(s) between tests in the shard log`;
+  if (!Array.isArray(o?.failingFiles)) return 'the result artifact has no failingFiles list';
+  if (o?.unattributedFailures !== 1 || o.summary?.sawTerminalSummary !== false) {
+    return `the runner counted ${exitWord(o?.unattributedFailures)} unattributed failure(s), not only the missing terminal summary`;
+  }
+  if (t.klass === 'HANG' && !t.sameTreeGreen) return 'no earlier run of this tree passed the shard';
+  return t.why;
+}
+
 const causeOf = (t: ShardTriage): string => (t.klass === 'HANG' ? 'a hang' : t.signature === 'GLib' ? 'a GLib abort' : 'a Bun IOCP crash');
 
 /**
@@ -366,7 +381,7 @@ function cmdRun(d: TriageDeps, f: Flags): number {
   if (ok.length !== triaged.length) {
     for (const t of triaged.filter(x => !draftable(x))) {
       if (t.klass === 'REAL') detail.push(`BLAME shard ${t.shard}: run the failing file(s) on the PR head and on the base with gstack-pr-validate (declare them) before calling them pre-existing; a failure that passes on the base is this PR's`);
-      else detail.push(`NO_DRAFT shard ${t.shard} ${t.klass}: ${t.klass === 'HANG' ? 'no earlier run of this tree passed the shard' : t.why}`);
+      else detail.push(`NO_DRAFT shard ${t.shard} ${t.klass}: ${noDraftReason(t)}`);
     }
     d.out(`RESULT NO_DRAFT run=${runId} shards=${triaged.map(t => `${t.shard}:${t.klass}`).join(',')}`);
     for (const line of detail) d.out(line);
