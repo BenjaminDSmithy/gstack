@@ -74,8 +74,9 @@ commit in the PR state.
             did not run them)
 
 A file passes only with exit 0, no "(fail)" line and bun's own last
-"Ran N tests across 1 file" line agreeing with the counts above it (no
-such line = a truncated run). A file in which no test passed (every
+"Ran N tests across 1 file" line on stderr, with no test result after
+it, agreeing with the counts above it (no such line = a truncated run;
+a block a test printed cannot stand in). A file in which no test passed (every
 test skipped) is UNVERIFIED: named in the summary, never counted green.
 Changed code (anything but release files and *.md) that no passing
 selected test covers is red (NO_TESTS), never "0/0 green": declare the
@@ -319,20 +320,26 @@ export interface FileVerdict {
 
 /**
  * One `bun test <file>` run. Green only with exit 0, no `(fail)` line or
- * unhandled error between tests, and bun's own summary: the LAST
- * `Ran N tests across 1 file. [t]` line, whose N equals the pass, fail,
- * skip and todo counts printed directly above it. A summary-shaped line a
- * test printed before a stray process.exit has no counts block, so it
- * cannot stand in. A clean run in which no test passed is unverified,
- * never green.
+ * unhandled error between tests (either stream), and bun's own summary:
+ * the LAST `Ran N tests across 1 file. [t]` line on stderr, bun's
+ * reporter stream (a test's console.log goes to stdout), with no test
+ * result line after it, and whose N equals the pass, fail, skip and todo
+ * counts printed directly above it. So a block a test printed on stdout,
+ * or echoed on stderr from a child run before a stray process.exit (bun
+ * prints the echoing test's result after it), cannot stand in. A clean
+ * run in which no test passed is unverified, never green.
  */
 export function judgeBunRun(file: string, r: GhResult): FileVerdict {
-  const lines = `${r.stdout}\n${r.stderr}`.split('\n').map(stripAnsiLine);
+  const lines = r.stderr.split('\n').map(stripAnsiLine);
   let at = -1;
   let sum: { tests: number; files: number } | null = null;
   for (let i = lines.length - 1; i >= 0 && !sum; i--) {
     sum = parseBunTerminalSummary(lines[i]);
     if (sum) at = i;
+  }
+  if (sum && lines.slice(at + 1).some(l => /^\((pass|fail|skip|todo)\) /.test(l))) {
+    sum = null;
+    at = -1;
   }
   const counts: Record<string, number> = { pass: 0, fail: 0, skip: 0, todo: 0 };
   for (let i = at - 1; i >= 0; i--) {
@@ -342,7 +349,7 @@ export function judgeBunRun(file: string, r: GhResult): FileVerdict {
   }
   const total = counts.pass + counts.fail + counts.skip + counts.todo;
   const ran = sum !== null && sum.files === 1 && sum.tests === total;
-  const failLine = lines.some(l => /^\(fail\) /.test(l) || l === '# Unhandled error between tests');
+  const failLine = [...r.stdout.split('\n').map(stripAnsiLine), ...lines].some(l => /^\(fail\) /.test(l) || l === '# Unhandled error between tests');
   const v = { file, rc: r.status, pass: counts.pass, fail: counts.fail, skip: counts.skip, ran };
   let why = 'ok';
   if (r.error) why = `did not finish: ${r.error}`;

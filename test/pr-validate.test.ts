@@ -181,6 +181,21 @@ describe('judgeBunRun on real bun runs', () => {
     expect(v).toMatchObject({ rc: 0, ok: false, ran: false });
     expect(v.why).toContain('cut short');
   });
+  test('a counts block a test prints on stdout before a stray exit does not stand in for bun\'s own (stderr) summary', () => {
+    const v = run('stdout-block', "test('l', () => { console.log(' 1 pass\\n 0 fail\\nRan 1 test across 1 file. [1.00ms]'); process.exit(0); });\ntest('m', () => expect(1).toBe(2));");
+    expect(v).toMatchObject({ rc: 0, ok: false, ran: false });
+    expect(v.why).toContain('cut short');
+  });
+  test('a child run\'s summary echoed on stderr before a stray exit does not stand in either: test results follow it', () => {
+    const block = "console.error(' 1 pass\\n 0 fail\\n 1 expect() calls\\nRan 1 test across 1 file. [7.00ms]');";
+    const v = run('echoed-child', `test('n', () => { ${block} });\ntest('o', () => { process.exit(0); });\ntest('p', () => expect(1).toBe(2));`);
+    expect(v).toMatchObject({ rc: 0, ok: false, ran: false });
+    expect(v.why).toContain('cut short');
+  });
+  test('bun\'s LAST summary decides: an earlier printed block saying 3 pass cannot turn an all-skipped file green', () => {
+    const v = run('first-block', "console.error(' 3 pass\\n 0 fail\\nRan 3 tests across 1 file. [1.00ms]');\ntest.skip('q', () => {});\ntest.skip('r', () => {});");
+    expect(v).toMatchObject({ rc: 0, ok: false, unverified: true, pass: 0, skip: 2 });
+  });
   test('a committed test.only is red under the validation env, as it is in CI (CI=true)', () => {
     // Without CI bun runs only the .only test and silently skips its failing sibling.
     const v = run('only', "test.only('j', () => expect(1).toBe(1));\ntest('k', () => expect(1).toBe(2));");
@@ -198,6 +213,9 @@ describe('judgeBunRun on real bun runs', () => {
     expect(judge('\u001b[32m 1 pass\u001b[0m\n 0 fail\nRan 1 test across 1 file. [5.00ms]\r\n').ok).toBe(true);
     expect(judge(' 2 pass\n 0 fail\nRan 2 tests across 2 files. [5.00ms]\n').why).toContain('2 files');
     expect(judge(' 1 pass\n 0 fail\nRan 1 test across 1 file. [5.00ms]\n# Unhandled error between tests\n').ok).toBe(false);
+    // The summary is read from stderr only, but a (fail) line on either stream is red, as in CI's classifier.
+    expect(judgeBunRun('f', { status: 0, stdout: '(fail) a > b [1.00ms]\n', stderr: ' 1 pass\n 0 fail\nRan 1 test across 1 file. [5.00ms]\n' }).ok).toBe(false);
+    expect(judgeBunRun('f', { status: 0, stdout: ' 1 pass\n 0 fail\nRan 1 test across 1 file. [5.00ms]\n', stderr: '' }).why).toContain('cut short');
   });
 });
 
