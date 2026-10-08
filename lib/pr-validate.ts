@@ -40,6 +40,9 @@ import { parseBunTerminalSummary, stripAnsiLine } from '../scripts/lib/shard-eng
 
 export const VALIDATE_EXIT = { GREEN: 0, RED: 1, USAGE: 2, PRECONDITION: 30 } as const;
 
+/** gstack's release tooling: the selection rules and CI mirrors assume a tree that carries it. */
+const PLATFORM_FILES = ['bin/gstack-next-version', 'scripts/gen-agents-digest.ts'];
+
 export const VALIDATE_USAGE = `gstack-pr-validate <run|select|declare> --pr <number|url> [options] [paths]
 
 Runs the free tests a PR touches after CI's local preconditions in CI's
@@ -81,6 +84,10 @@ Options:
   --tree DIR            tree to validate (default: the staged sync, else --cwd)
   --accept-full-risk    a FULL trigger does not by itself make the run red;
                         the recorded summary says the full suite was waived
+
+Exit 30: a precondition (the tree lacks gstack's release tooling,
+bin/gstack-next-version and scripts/gen-agents-digest.ts; uncommitted
+changes; no remote for the repo).
 
 First line of stdout: RESULT <WORD> ... (run prints the upstream range
 of a staged sync on stderr before executing it).`;
@@ -418,6 +425,8 @@ function resolveCtx(d: ValidateDeps, f: Flags): Ctx {
   } catch { /* no staged sync */ }
   if (staged && (staged.repo !== repo || staged.number !== pr.number)) staged = null;
   const tree = f.tree ?? (staged?.scratch && fs.existsSync(staged.scratch) ? staged.scratch : f.cwd);
+  const absent = PLATFORM_FILES.filter(file => d.git(['cat-file', '-e', `HEAD:${file}`], { cwd: tree }).status !== 0);
+  if (absent.length) throw new PrContextError(`${tree} is not a gstack release tree (HEAD lacks ${absent.join(', ')}): gstack-pr-validate only validates gstack-shaped trees`, VALIDATE_EXIT.PRECONDITION);
   let base = staged?.base ?? '';
   if (!base) {
     const remote = remoteForRepo(d.git, f.cwd, repo);
