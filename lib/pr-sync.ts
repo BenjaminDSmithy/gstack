@@ -63,8 +63,10 @@ exact commit.
   push     publishes the staged sync commit (needs --yes); then fast-
            forwards the local PR branch and removes the scratch worktree
   abort    removes the staged sync, or the scratch worktree an interrupted
-           merge left; only a worktree gstack-pr-sync made is removed
-  status   prints the staged sync and whether it may be pushed
+           merge left; only a worktree gstack-pr-sync made is removed.
+           Runs for a closed or merged PR too, to clear the sync it left
+           in a topic a newer PR from its branch now uses
+  status   prints the staged sync and whether it may be pushed (any state)
   retrigger  pushes ONE empty commit on top of the PR head with the
            message file gstack-pr-ci-triage drafted (needs --yes and
            --message); the tree is unchanged, so no new validation.
@@ -340,7 +342,13 @@ export function readStagedSync(dir: string, pr: { repo: string; number: number }
     return null;
   }
   const s = JSON.parse(raw) as StagedSync;
-  if (s?.v !== 1 || s.repo !== pr.repo || s.number !== pr.number) throw new PrContextError(`${syncFile(dir)} belongs to another PR`, 30);
+  if (s?.v !== 1 || s.repo !== pr.repo || s.number !== pr.number) {
+    // A PR opened from a closed PR's branch shares its topic dir: name the PR whose sync it is, and the way to clear it.
+    const owner = s?.v === 1 && typeof s.repo === 'string' && Number.isSafeInteger(s.number) && s.number > 0 ? `${s.repo} #${s.number}` : null;
+    throw new PrContextError(owner
+      ? `${syncFile(dir)} is a sync staged for ${owner}, not for ${pr.repo} #${pr.number}: push it from that PR, or clear it with \`gstack-pr-sync abort --pr ${s.number}\` (abort runs for a closed PR too)`
+      : `${syncFile(dir)} belongs to another PR`, 30);
+  }
   return s;
 }
 
@@ -421,7 +429,11 @@ function resolveCtx(d: SyncDeps, f: Flags): Ctx {
   const repo = f.repo ?? upstreamRepoFromGh(d.gh, f.cwd);
   const n = parsePrRefFor(f.pr, repo);
   const pr = readPr(d.gh, repo, n);
-  assertWritableIdentity(pr, viewerLogin(d.gh));
+  // abort and status only read or remove what this tool made locally, so
+  // they also run for a PR that is no longer OPEN: the way to clear a sync a
+  // closed PR left staged in a topic dir a newer PR from its branch now uses.
+  const local = f.sub === 'abort' || f.sub === 'status';
+  assertWritableIdentity(local && pr.state !== 'OPEN' ? { ...pr, state: 'OPEN' } : pr, viewerLogin(d.gh));
   const headRemote = remoteForRepo(d.git, f.cwd, pr.headRepo);
   if (!headRemote) throw new PrContextError(`no git remote in ${f.cwd} points at ${pr.headRepo}`, 30);
   const upRemote = remoteForRepo(d.git, f.cwd, repo);
@@ -702,6 +714,8 @@ function cmdMerge(c: Ctx): number {
     generatedConflicts = cls.generated;
   }
   const existing = readStagedSync(c.stateDir, c.pr);
+  // Another PR's state.json (30) would refuse the record at the end: refuse it before any worktree is made.
+  readStateFor(c.stateDir, c.pr);
   const scratch = defaultScratch(c);
   if (existing) throw new PrContextError(`a sync is already staged at ${existing.scratch}: push it or run \`gstack-pr-sync abort\``, SYNC_EXIT.DIRTY);
   if (fs.existsSync(scratch)) {
