@@ -1072,6 +1072,8 @@ describe('writes only through receiptedSend', () => {
       ['gh', ['pr', '--repo=o/r', 'merge', '5']], ['gh', ['pr', '-Ro/r', 'comment', '1', '-b', 'x']],
       ['gh', ['-R', 'o/r', 'pr', 'edit', '5']], ['gh', ['pr', '--draft-ish', 'edit', '5']],
       ['gh', ['pr', 'new', '--draft', '--title', 't']], ['gh', ['issue', 'new', '--title', 't']], ['gh', ['secret', 'remove', 'X']],
+      // Write verbs one level below a group, and the codespace group.
+      ['gh', ['repo', 'deploy-key', 'add', 'k.pub']], ['gh', ['repo', 'autolink', 'delete', '1']], ['gh', ['codespace', 'delete', '-c', 'x']],
       // A graphql query that is not inline in argv may be a mutation.
       ['gh', ['api', 'graphql', '--input', 'q.json']], ['gh', ['api', 'graphql', '-F', 'query=@q.graphql']],
       ['gh', ['api', 'graphql', '--field=query=@-']], ['gh', ['api', 'graphql', '-F', 'owner=o']],
@@ -1090,6 +1092,7 @@ describe('writes only through receiptedSend', () => {
       ['gh', ['api', 'graphql', '-f', 'query=query { viewer { login } }']], ['gh', ['repo', 'view', '--json', 'nameWithOwner']],
       ['git', ['fetch', '--no-tags', 'up']], ['git', ['ls-remote', 'up']], ['git', ['stash', 'push', '-m', 'x']], ['git', ['-C', 'push', 'status']],
       ['gh', ['pr', '-R', 'o/r', 'view', '5']], ['gh', ['-R', 'o/r', 'run', 'view', '9']], ['gh', ['pr', '--help']],
+      ['gh', ['repo', 'deploy-key', 'list']], ['gh', ['repo', 'autolink', 'list']], ['gh', ['codespace', 'list']],
       ['gh', ['api', 'graphql', '-F', 'query={ viewer { login } }', '-F', 'n=1']], ['gh', ['api', '-H', 'graphql', 'repos/o/r']],
       ['git', ['--attr-source', 'push', 'status']], ['git', ['-c', 'alias.lg=log --oneline', 'lg']], ['git', ['--version']],
       ['git', ['--no-pager', '-P', 'log']],
