@@ -199,6 +199,17 @@ describe('stampReport', () => {
     // An unknown bucket ranks as UNVERIFIED; it must not hide a later EXACT_DUP.
     expect(worstOf(['MAYBE', 'EXACT_DUP'])).toBe('EXACT_DUP');
   });
+
+  test('a verdict spelled in another case, with a hyphen or a space, or padded, still ranks as itself', () => {
+    const l = listAuditCommits(defaultGit, repo, base, null);
+    for (const b of ['exact_dup', 'Exact-Dup', 'EXACT DUP', 'EXACT_DUP ']) {
+      const r = stampReport({ summary: 's', commits: [{ sha: sha.c1, bucket: b }, { sha: sha.c4, bucket: 'CLEAN' }] }, l, now) as Record<string, any>;
+      expect([b, r.worst, r.commits[0].bucket]).toEqual([b, 'EXACT_DUP', 'EXACT_DUP']);
+    }
+    const declared = stampReport({ summary: 's', worst: 'exact-dup', commits: [{ sha: sha.c1, bucket: 'clean' }, { sha: sha.c4, bucket: 'Clean' }] }, l, now) as Record<string, any>;
+    expect([declared.worst, declared.commits[0].bucket]).toEqual(['EXACT_DUP', 'CLEAN']);
+    expect(worstOf(['clean', ' overlap'])).toBe('OVERLAP');
+  });
 });
 
 describe('a revert and a re-apply share a patch-id', () => {
