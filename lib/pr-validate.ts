@@ -49,7 +49,9 @@ build:cso; GSTACK_EXPECT_BINARIES=1 for the tests when build:gates ran),
 one bun process per file,
 with agent markers (CLAUDECODE, AI_AGENT, AGENT, REPL_ID, CLAUDE*)
 stripped, every credential-shaped variable unset and a real-path
-TMPDIR. Records the verdict for the exact commit in the PR state.
+TMPDIR; git reads CI's global config (identity, init.defaultBranch main,
+safe.directory) instead of yours. Records the verdict for the exact
+commit in the PR state.
 
   run       preconditions + selection + per-file runs + mirrors
             (typecheck, typecheck:test, the added-line secret scan,
@@ -97,14 +99,33 @@ const CREDENTIAL_SEGMENTS = new Set([
 ]);
 const credentialShaped = (name: string) => !/^GIT_CONFIG_KEY_\d+$/.test(name) && name.toUpperCase().split('_').some(seg => CREDENTIAL_SEGMENTS.has(seg));
 
-/** The env a validation run gets: agent markers and provider credentials gone, CI's git default branch, real-path TMPDIR. */
-export function validationEnv(base: NodeJS.ProcessEnv, tmpdir: string, seedBase: string | null): NodeJS.ProcessEnv {
+// The caller's own git config overrides: CI has none, and GIT_CONFIG_COUNT
+// entries outrank a test's GIT_CONFIG_GLOBAL isolation.
+const GIT_CONFIG_ENV_RE = /^GIT_CONFIG(_COUNT|_KEY_\d+|_VALUE_\d+|_PARAMETERS|_GLOBAL|_SYSTEM|_NOSYSTEM)?$/;
+
+/** The global git config free-tests.yml writes with `git config --global` before the suite. */
+export const CI_GITCONFIG = '[user]\n\temail = free-tests-ci@gstack.test\n\tname = Free Tests CI\n[init]\n\tdefaultBranch = main\n[safe]\n\tdirectory = *\n';
+
+/** Write CI's global git config into `dir`; returns its path for validationEnv. */
+export function writeCiGitConfig(dir: string): string {
+  const file = path.join(dir, 'ci.gitconfig');
+  fs.writeFileSync(file, CI_GITCONFIG, { mode: 0o600 });
+  return file;
+}
+
+/**
+ * The env a validation run gets: agent markers, credentials and the
+ * caller's git config overrides gone; CI's global git config as
+ * GIT_CONFIG_GLOBAL (so a test that isolates with its own
+ * GIT_CONFIG_GLOBAL loses it, exactly as in CI, and the caller's
+ * ~/.gitconfig never reaches a test); real-path TMPDIR.
+ */
+export function validationEnv(base: NodeJS.ProcessEnv, tmpdir: string, seedBase: string | null, gitConfig: string | null = null): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(base)) if (!STRIP_RE.test(k) && !credentialShaped(k) && v !== undefined) env[k] = v;
-  const n = Number.parseInt(env.GIT_CONFIG_COUNT ?? '0', 10) || 0;
-  env.GIT_CONFIG_COUNT = String(n + 1);
-  env[`GIT_CONFIG_KEY_${n}`] = 'init.defaultBranch';
-  env[`GIT_CONFIG_VALUE_${n}`] = 'main';
+  for (const [k, v] of Object.entries(base)) {
+    if (!STRIP_RE.test(k) && !credentialShaped(k) && !GIT_CONFIG_ENV_RE.test(k) && v !== undefined) env[k] = v;
+  }
+  if (gitConfig) env.GIT_CONFIG_GLOBAL = gitConfig;
   env.TMPDIR = tmpdir.endsWith('/') ? tmpdir : `${tmpdir}/`;
   if (seedBase) env.GSTACK_FREE_SEED_BASE = seedBase;
   return env;
@@ -512,7 +533,7 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   const { d } = c;
   const state = readStateFor(c.stateDir, c.pr);
   const { sel, mb, changed } = selection(c, state);
-  const env = validationEnv(d.env, tmp, mb);
+  const env = validationEnv(d.env, tmp, mb, writeCiGitConfig(outDir));
   const lines: string[] = [];
   let worst = 0;
   const line = (s: string, bad: boolean) => {
