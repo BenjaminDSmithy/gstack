@@ -1007,6 +1007,8 @@ function cmdPush(c: Ctx): number {
   return withPrLock(c.stateDir, () => {
     const staged = readStagedSync(c.stateDir, c.pr);
     if (!staged || staged.sha !== pending.sha) throw new PrContextError('the staged sync changed while the gate ran; re-run push', SYNC_EXIT.PRECONDITION);
+    // Retargeted since the merge: pushing would add the old base's commits to the PR's diff.
+    if (staged.baseRef !== c.pr.baseRef) throw new PrContextError(`the PR's base changed from ${staged.baseRef} to ${c.pr.baseRef} since the sync was staged: abort and re-sync`, SYNC_EXIT.PRECONDITION);
     const state = readStateFor(c.stateDir, c.pr);
     if (state?.bodyStaleSince) throw new PrContextError(`the PR body is still stale since the push of ${state.bodyStaleSince.slice(0, 12)}: publish the body first`, SYNC_EXIT.BODY_STALE);
     if (!state?.validation || state.validation.sha !== staged.sha) throw new PrContextError(`no validation recorded for ${staged.sha.slice(0, 12)}: run gstack-pr-validate in ${staged.scratch}`, SYNC_EXIT.VALIDATION);
