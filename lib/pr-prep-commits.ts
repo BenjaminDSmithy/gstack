@@ -50,17 +50,36 @@ function git(g: GitRunner, cwd: string, args: string[], input?: string): string 
   return r.stdout;
 }
 
-/** Prior entries keyed by patch-id (survives a rebase or a merge of the base) and by sha. */
-function priorIndex(prior: PriorReport | null): Map<string, PriorEntry> {
-  const m = new Map<string, PriorEntry>();
-  if (!prior) return m;
-  const byShaBucket = new Map((prior.commits ?? []).map(c => [c.sha, c]));
-  for (const a of prior.audited ?? []) {
-    const entry = byShaBucket.get(a.sha) ?? { sha: a.sha, bucket: a.bucket };
-    m.set(`p:${a.patchId}`, { ...entry, patchId: a.patchId, bucket: a.bucket });
+/**
+ * Prior entries keyed by patch-id (survives a rebase or a merge of the base)
+ * and by sha. A key keeps every entry: a commit and its re-apply after a
+ * revert share a patch-id, and neither verdict may overwrite the other.
+ */
+function priorIndex(prior: PriorReport | null): Map<string, PriorEntry[]> {
+  const m = new Map<string, PriorEntry[]>();
+  const add = (k: string, e: PriorEntry) => m.set(k, [...(m.get(k) ?? []), e]);
+  if (!prior || typeof prior !== 'object') return m;
+  const commits = (Array.isArray(prior.commits) ? prior.commits : []).filter(c => c && typeof c.sha === 'string');
+  const bySha = new Map(commits.map(c => [c.sha, c]));
+  for (const a of Array.isArray(prior.audited) ? prior.audited : []) {
+    if (!a || typeof a.sha !== 'string' || typeof a.patchId !== 'string' || !a.patchId) continue;
+    const c = bySha.get(a.sha);
+    add(`p:${a.patchId}`, { ...(c ?? { sha: a.sha }), patchId: a.patchId, bucket: worstOf([a.bucket, ...(c ? [c.bucket] : [])]) });
   }
-  for (const c of prior.commits ?? []) if (!m.has(`s:${c.sha}`)) m.set(`s:${c.sha}`, c);
+  for (const c of commits) add(`s:${c.sha}`, c);
   return m;
+}
+
+/** One commit's earlier entries (by its own sha and by its patch-id) folded: the worst bucket wins. */
+function foldPrior(entries: PriorEntry[]): PriorEntry | null {
+  if (!entries.length) return null;
+  const bySha = new Map<string, PriorEntry>();
+  for (const e of entries) {
+    const had = bySha.get(e.sha);
+    bySha.set(e.sha, had ? { ...had, bucket: worstOf([had.bucket, e.bucket]) } : e);
+  }
+  const all = [...bySha.values()];
+  return { ...all[0], bucket: worstOf(all.map(e => e.bucket)), hits: all.flatMap(e => (Array.isArray(e.hits) ? e.hits : [])) };
 }
 
 export function listAuditCommits(g: GitRunner, cwd: string, base: string, prior: PriorReport | null): CommitList {
@@ -76,9 +95,9 @@ export function listAuditCommits(g: GitRunner, cwd: string, base: string, prior:
     if (files.every(f => RELEASE_FILES.includes(f))) { out.skipped.push({ sha, subject, reason: 'release-only' }); continue; }
     const diff = git(g, cwd, ['show', '--format=', '--no-color', sha]);
     const patchId = diff ? (git(g, cwd, ['patch-id', '--stable'], diff).trim().split(/\s+/)[0] ?? '') : '';
-    const p = index.get(`p:${patchId}`) ?? index.get(`s:${sha}`) ?? null;
+    const p = foldPrior([...(index.get(`s:${sha}`) ?? []), ...(patchId ? (index.get(`p:${patchId}`) ?? []) : [])]);
     let mode: Mode = 'NEW';
-    if (p) mode = p.bucket === 'UNVERIFIED' || rank(p.bucket) < 0 ? 'RECHECK' : 'CARRY';
+    if (p) mode = p.bucket === 'UNVERIFIED' ? 'RECHECK' : 'CARRY';
     out.audit.push({ sha, subject, files, patchId, mode, since: mode === 'CARRY' ? (prior?.generated_at ?? null) : null, prior: p });
   }
   return out;
