@@ -124,6 +124,26 @@ describe('listAuditCommits', () => {
     const bare = { generated_at: '2026-10-05T10:00:00Z', audited: [{ patchId: l1.audit[0].patchId, sha: 'f'.repeat(40), bucket: 'CLEAN' }] };
     expect(listAuditCommits(defaultGit, dir, b, bare).audit[0].mode).toBe('RECHECK');
   });
+
+  test('a reworded commit keeps its verified verdict and hits; an UNVERIFIED one is re-derived', () => {
+    const now = new Date('2026-10-08T00:00:00Z');
+    const { dir, base: b } = freshRepo('reword-keep', { 'lib/z.ts': 'z\n' });
+    commitIn(dir, { 'lib/c.ts': 'c\n' }, 'fix(cache): misc cleanup');
+    const l1 = listAuditCommits(defaultGit, dir, b, null);
+    const hit = { ref: '#3000', title: 't', state: 'OPEN', score: 0.4 };
+    const r1 = stampReport({ summary: 's', commits: [{ sha: l1.audit[0].sha, bucket: 'OVERLAP', topScore: 0.4, hits: [hit] }] }, l1, now) as PriorReport;
+    gitIn(dir, 'commit', '-q', '--amend', '-m', 'feat(browse): add a persistent CDP session cache');
+    const l2 = listAuditCommits(defaultGit, dir, b, r1);
+    expect([l2.audit[0].mode, searchQualifier(l2.audit[0])]).toEqual(['RECHECK', null]);
+    // The new keywords find nothing; the diff, and so its file overlap with #3000, did not change.
+    const r2 = stampReport({ summary: 's', commits: [{ sha: l2.audit[0].sha, bucket: 'CLEAN' }] }, l2, now) as Record<string, any>;
+    expect([r2.worst, r2.commits[0].topScore]).toEqual(['OVERLAP', 0.4]);
+    expect(r2.commits[0].hits.map((h: { ref: string }) => h.ref)).toEqual(['#3000']);
+    const unverified = stampReport({ summary: 's', commits: [{ sha: l1.audit[0].sha, bucket: 'UNVERIFIED' }] }, l1, now) as PriorReport;
+    const l3 = listAuditCommits(defaultGit, dir, b, unverified);
+    expect(l3.audit[0].mode).toBe('RECHECK');
+    expect((stampReport({ summary: 's', commits: [{ sha: l3.audit[0].sha, bucket: 'CLEAN' }] }, l3, now) as Record<string, any>).worst).toBe('CLEAN');
+  });
 });
 
 describe('stampReport', () => {
