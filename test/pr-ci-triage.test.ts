@@ -3,9 +3,10 @@
  * run 37346036310 shard 4 and run 37504870219 shard 5 (Bun IOCP abort,
  * exit 3, no failing test) and run 37347305098 shard 5 (a hang to the
  * deadline). Fixtures are the trimmed windows-result-<n> artifacts and the
- * last 40 lines of each shard log. A draft appears only for a fully
- * evidenced CRASH, or a HANG whose identical tree passed the shard
- * earlier, on the PR's current head. The helper never commits or pushes.
+ * last 40 lines of each shard log, stored as `.log.txt` because the repo's
+ * .gitignore drops `*.log`. A draft appears only for a fully evidenced
+ * CRASH, or a HANG whose identical tree passed the shard earlier, on the
+ * PR's current head. The helper never commits or pushes.
  */
 import { describe, test, expect, beforeAll, afterAll, setDefaultTimeout } from 'bun:test';
 import { spawnSync } from 'node:child_process';
@@ -29,13 +30,13 @@ describe('pure classification', () => {
   });
 
   test('IOCP abort: CRASH with the in-flight file, draftable', () => {
-    const t = classifyShard(4, result('37346036310'), read('37346036310-shard.log'));
+    const t = classifyShard(4, result('37346036310'), read('37346036310-shard.log.txt'));
     expect(t).toMatchObject({ klass: 'CRASH', signature: 'IOCP', inFlight: 'browse/test/cookie-import-node.test.ts', failLines: 0 });
     expect(draftable(t)).toBe(true);
   });
 
   test('a hang is HANG, but draftable only with same-tree evidence', () => {
-    const t = classifyShard(5, result('37347305098'), read('37347305098-shard.log'));
+    const t = classifyShard(5, result('37347305098'), read('37347305098-shard.log.txt'));
     expect(t.klass).toBe('HANG');
     expect(draftable(t)).toBe(false);
     expect(draftable({ ...t, sameTreeGreen: '37346036310' })).toBe(true);
@@ -44,7 +45,7 @@ describe('pure classification', () => {
   test('a named failing file is REAL; no signature is UNKNOWN; a (fail) line or a missing artifact blocks a draft', () => {
     expect(classifyShard(1, { status: 'failed', exitCode: 1, failingFiles: ['test/x.test.ts'] }, null).klass).toBe('REAL');
     expect(classifyShard(1, { status: 'failed', exitCode: 3, failingFiles: [] }, 'just noise\n').klass).toBe('UNKNOWN');
-    const failBefore = classifyShard(1, result('37346036310'), `(fail) something [3ms]\n${read('37346036310-shard.log')}`);
+    const failBefore = classifyShard(1, result('37346036310'), `(fail) something [3ms]\n${read('37346036310-shard.log.txt')}`);
     expect(failBefore.klass).toBe('CRASH');
     expect(draftable(failBefore)).toBe(false);
     expect(classifyShard(1, null, null).klass).toBe('UNKNOWN');
@@ -113,9 +114,9 @@ function fakeGh(runs: FakeRun[], calls: string[][], headOid = B): GhRunner {
         fs.writeFileSync(path.join(dir, `shard-${r.shard}.json`), r.result ? JSON.stringify({ outcome: r.result }) : read(`${r.fixture}-result.json`));
         return ok('');
       }
-      if (name === `windows-free-test-shard-logs-${r.shard}` && fs.existsSync(path.join(FX, `${r.fixture}-shard.log`))) {
+      if (name === `windows-free-test-shard-logs-${r.shard}` && fs.existsSync(path.join(FX, `${r.fixture}-shard.log.txt`))) {
         fs.mkdirSync(path.join(dir, 'gstack'), { recursive: true });
-        fs.writeFileSync(path.join(dir, 'gstack', 'shard.log'), read(`${r.fixture}-shard.log`));
+        fs.writeFileSync(path.join(dir, 'gstack', 'shard.log'), read(`${r.fixture}-shard.log.txt`));
         return ok('');
       }
       return { status: 1, stdout: '', stderr: 'no artifact' };

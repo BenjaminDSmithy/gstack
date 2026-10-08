@@ -1,0 +1,40 @@
+──────────────────────────────────────────────────────────────────────
+  Total: 0/1 passed                     $0.12  0s
+  Evidence: 1 executed, 0 reused
+Saved: D:\a\_temp\gstack-free-shard-MSvYcm\tmp\plan-report-recording-free-8XB5oS\evals\1.91.28-HEAD-e2e-2026-10-05-1722--suite-plan.json
+
+NO BASELINE: no completed prior e2e run found in D:\a\_temp\gstack-free-shard-MSvYcm\tmp\plan-report-recording-free-8XB5oS\evals (the in-progress accumulator is not a baseline). Nothing compared — this run says nothing about regressions.
+(pass) report assertion report remains a recorded failure [66.12ms]
+
+Eval Results — v1.91.28 @ HEAD (dd879c4) — e2e
+══════════════════════════════════════════════════════════════════════
+  /plan-review-report                   FAIL    $0.12    4t     0s  
+──────────────────────────────────────────────────────────────────────
+  Total: 0/1 passed                     $0.12  0s
+  Evidence: 1 executed, 0 reused
+Saved: D:\a\_temp\gstack-free-shard-MSvYcm\tmp\plan-report-recording-free-fEYk9L\evals\1.91.28-HEAD-e2e-2026-10-05-1722--suite-plan.json
+
+NO BASELINE: no completed prior e2e run found in D:\a\_temp\gstack-free-shard-MSvYcm\tmp\plan-report-recording-free-fEYk9L\evals (the in-progress accumulator is not a baseline). Nothing compared — this run says nothing about regressions.
+(pass) report assertion header remains a recorded failure [65.57ms]
+
+Eval Results — v1.91.28 @ HEAD (dd879c4) — e2e
+══════════════════════════════════════════════════════════════════════
+  /plan-review-report                   FAIL    $0.12    4t     0s  
+──────────────────────────────────────────────────────────────────────
+  Total: 0/1 passed                     $0.12  0s
+  Evidence: 1 executed, 0 reused
+Saved: D:\a\_temp\gstack-free-shard-MSvYcm\tmp\plan-report-recording-free-lMeEJj\evals\1.91.28-HEAD-e2e-2026-10-05-1722--suite-plan.json
+
+NO BASELINE: no completed prior e2e run found in D:\a\_temp\gstack-free-shard-MSvYcm\tmp\plan-report-recording-free-lMeEJj\evals (the in-progress accumulator is not a baseline). Nothing compared — this run says nothing about regressions.
+(pass) report assertion ceo remains a recorded failure [66.47ms]
+
+Eval Results — v1.91.28 @ HEAD (dd879c4) — e2e
+══════════════════════════════════════════════════════════════════════
+  /plan-review-report                   FAIL    $0.12    4t     0s  
+──────────────────────────────────────────────────────────────────────
+  Total: 0/1 passed                     $0.12  0s
+  Evidence: 1 executed, 0 reused
+Saved: D:\a\_temp\gstack-free-shard-MSvYcm\tmp\plan-report-recording-free-gbtl4J\evals\1.91.28-HEAD-e2e-2026-10-05-1722--suite-plan.json
+
+NO BASELINE: no completed prior e2e run found in D:\a\_temp\gstack-free-shard-MSvYcm\tmp\plan-report-recording-free-gbtl4J\evals (the in-progress accumulator is not a baseline). Nothing compared — this run says nothing about regressions.
+(pass) report assertion eng remains a recorded failure [65.76ms]

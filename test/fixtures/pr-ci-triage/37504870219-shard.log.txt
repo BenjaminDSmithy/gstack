@@ -1,0 +1,40 @@
+(pass) the observed clipped packet binds only its uniquely displayed first question and never combines grades [1.97ms]
+(pass) clipped packets reject later tabs, ambiguous shared evidence, contradictions and incomplete native menus [1.99ms]
+(pass) packet identity stays unique across complete-body and elided-body display routes [1.23ms]
+(pass) first native display reader > requires exact owned session/cwd/config and leaves the call unanswered [5.12ms]
+(pass) first native display reader > ignores foreign cwd hook events [2.59ms]
+(pass) first native display reader > ignores foreign agent_id hook events [2.46ms]
+(pass) first native display reader > rejects stale or future timestamp offset %s [2.65ms]
+(pass) first native display reader > rejects stale or future timestamp offset %s [2.46ms]
+(pass) first native display reader > never reopens or replaces a first call after PostToolUse [4.85ms]
+(pass) first native display reader > never reopens or replaces a first call after PostToolUseFailure [4.56ms]
+(pass) first native display reader > conflicting, concurrent, locked and symlinked sources cannot supply a question [10.65ms]
+(pass) only explicit public API error panels are surfaced, and the total operation budget stays four minutes [0.17ms]
+(pass) public viewport retention is exact within its bound and labels any truncation [0.10ms]
+(skip) real PTY observes native public calls, preserves failures, model/tool scope and cleans every outcome
+(pass) AUQ matrix format gate > passes full-format [0.11ms]
+(pass) AUQ matrix format gate > passes no-emoji-or-net
+(pass) AUQ matrix format gate > passes bold-recommendation
+(pass) AUQ matrix format gate > passes pros-cons-block-in-question
+(pass) AUQ matrix format gate > fails no-recommendation-line [0.02ms]
+(pass) AUQ matrix format gate > fails two-recommended
+(pass) AUQ matrix format gate > fails no-recommended-option
+(pass) AUQ matrix format gate > fails recommended-only-in-question-text
+(pass) AUQ matrix format gate > fails empty-recommendation [0.02ms]
+(pass) AUQ matrix format gate > a brief missing only presentation elements no longer fails, but they are still reported [0.09ms]
+
+::endgroup::
+
+::group::test\autoplan-pending-artifact.test.ts:
+(skip) real launcher installs only opt-in owned hooks and removes records on close or early exit
+
+::endgroup::
+
+::group::test\autoplan-publication-hook.test.ts:
+(pass) Autoplan hook transport > ordinary project and non-Read tools abstain without a parent journal [225.41ms]
+(pass) Autoplan hook transport > invalid input fails closed with one nested native denial [111.75ms]
+(pass) Autoplan hook transport > missing current journal is evidence unavailable, not a claim that publication is missing [2160.66ms]
+(pass) Autoplan hook transport > missing TypeScript helper cannot silently allow a phase Read [77.17ms]
+(pass) Autoplan hook transport > unknown child input does not publish or answer anything [127.10ms]
+(pass) Autoplan hook journal-root verdicts > an unrecognized root shape degrades to an advisory: no permission decision, user and model notices, a content-free log [63.86ms]
+GetQueuedCompletionStatusEx: (735) ERROR_ABANDONED_WAIT_0
