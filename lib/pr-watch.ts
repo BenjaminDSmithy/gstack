@@ -3,7 +3,7 @@
  * it costs anything, and compare a PR's size with what upstream merges.
  *
  *   gstack-pr-watch poll    --pr <n|url> [--repo o/r] [--cwd <pr worktree>]
- *   gstack-pr-watch ack     --pr <n|url> [...] <signal id>...
+ *   gstack-pr-watch ack     --pr <n|url> [...] <signal id>@<level>...
  *   gstack-pr-watch enable  --pr <n|url> [...]     (the LaunchAgent polls it)
  *   gstack-pr-watch disable --pr <n|url> [...]
  *   gstack-pr-watch size    [--pr <n|url>] [--repo o/r] [--cwd <dir>]
@@ -39,7 +39,9 @@ export const WATCH_USAGE = `gstack-pr-watch <poll|ack|enable|disable|size> --pr 
            plus upstream's base branch for commits that cite this PR or
            carry our Co-authored-by trailer; classify each signal; latch
            P0/P1 in the PR state
-  ack      record that the owner acknowledged these signal ids
+  ack      record that the owner read these signals, each as <id>@<level>
+           the way poll's NEXT line prints it; refused when a signal has
+           latched at another level since (poll again and show it)
   enable   let the opt-in LaunchAgent (contrib/pr-watch) poll this PR
   disable  stop the LaunchAgent polling it
   size     churn, files and commits against contributor PRs merged among
@@ -451,6 +453,31 @@ export function pollForWrite(d: WatchDeps, repo: string, n: number, cwd: string)
 
 // ── subcommands ─────────────────────────────────────────────────────────────
 
+/** The ack token for a signal, as the NEXT line prints it: `<id>@<level>`. */
+const ackToken = (s: { id: string; level: string }) => `${s.id}@${s.level}`;
+
+function parseAckToken(token: string): { id: string; level: 'P0' | 'P1' } {
+  const m = /^(.+)@(P[01])$/.exec(token);
+  if (!m) throw new PrContextError(`ack ${token}: name the level the poll showed the owner, as <id>@<level> (for example ${token}@P0)`, 2);
+  return { id: m[1], level: m[2] as 'P0' | 'P1' };
+}
+
+/**
+ * The latch an ack token clears. An ack records what the owner was shown,
+ * so it names the level too: a P1 the owner read, edited into a supersede
+ * notice and latched again at P0 by a poll whose output nobody saw (the
+ * LaunchAgent, another session's write gate), must not be cleared by the
+ * ack of the P1. Any mismatch is refused (2) until a poll shows it again.
+ */
+function ackEntry(latched: Latched[], t: { id: string; level: 'P0' | 'P1' }): Latched {
+  const l = latched.find(x => x.id === t.id);
+  if (!l) throw new PrContextError(`not latched for this PR: ${t.id}`, 2);
+  if (l.level !== t.level) {
+    throw new PrContextError(`${t.id} is latched at ${l.level} ${l.kind}, not ${t.level}: poll again, show the owner the ${l.level}, then ack ${ackToken(l)}`, 2);
+  }
+  return l;
+}
+
 function printSignals(d: WatchDeps, r: PollResult, n: number): void {
   const word = r.code === WATCH_EXIT.P0 ? 'P0' : r.code === WATCH_EXIT.P1 ? 'P1' : r.code === WATCH_EXIT.UNVERIFIED ? 'UNVERIFIED' : 'QUIET';
   d.out(`RESULT ${word} pr=${n} state=${r.state} new=${r.fresh.length} unacknowledged=${r.unacked.length}${r.error ? ` error=${r.error}` : ''}`);
@@ -460,13 +487,15 @@ function printSignals(d: WatchDeps, r: PollResult, n: number): void {
   // and the write gate latch with their output discarded, so the owner's poll
   // is often not the first. The excerpt is re-read on each poll, never stored.
   for (const s of r.unacked) if (s.excerpt) d.out(envelope(s.excerpt, `pr-${n}-${s.id}`));
+  // The ack names each signal at the level shown here (ackEntry refuses another).
+  const ack = `gstack-pr-watch ack ${r.unacked.map(ackToken).join(' ')}`;
   if (r.unacked.some(s => s.level === 'P0')) {
-    d.out('NEXT stop every push and body publish for this PR, show the owner the signal, and suggest turning Auto-fix off; a follow-up PR is the owner\'s call. After the owner has read it: gstack-pr-watch ack <id>');
+    d.out(`NEXT stop every push and body publish for this PR, show the owner the signal, and suggest turning Auto-fix off; a follow-up PR is the owner's call. After the owner has read it: ${ack}`);
   } else if (r.unacked.length) {
     // A conflict latches like any P1 (the plan's pre-write gate), so it is acked
     // once the owner has seen it; only then can the sync push that fixes it pass.
     const conflict = r.unacked.some(s => s.kind.startsWith('mergeable-'));
-    d.out(`NEXT show the owner each signal; writes for this PR refuse until then. After the owner has read it: gstack-pr-watch ack <id>${conflict ? '; then the sync mode resolves the merge conflict or behind base' : ''}`);
+    d.out(`NEXT show the owner each signal; writes for this PR refuse until then. After the owner has read it: ${ack}${conflict ? '; then the sync mode resolves the merge conflict or behind base' : ''}`);
   }
 }
 
@@ -558,13 +587,13 @@ export async function watchMain(argv: string[], deps: Partial<WatchDeps> = {}): 
     const pr = readPr(d.gh, repo, n);
     const dir = prStateDir({ cwd: f.cwd, topic: topicFor(pr.headRef), env: d.env });
     if (f.sub === 'ack') {
-      if (!f.ids.length) throw new PrContextError('ack needs at least one signal id', 2);
+      if (!f.ids.length) throw new PrContextError('ack needs at least one signal, as <id>@<level>', 2);
+      const tokens = f.ids.map(parseAckToken);
       return withPrLock(dir, () => {
         const st = readStateFor(dir, pr) ?? freshState(pr);
-        const unknown = f.ids.filter(id => !st.signals.latched.some(l => l.id === id));
-        if (unknown.length) throw new PrContextError(`not latched for this PR: ${unknown.join(', ')}`, 2);
-        writeState(dir, { ...st, signals: { latched: st.signals.latched, acked: [...new Set([...st.signals.acked, ...f.ids])] } });
-        d.out(`RESULT ACKED ${f.ids.join(' ')}`);
+        const entries = tokens.map(t => ackEntry(st.signals.latched, t));
+        writeState(dir, { ...st, signals: { latched: st.signals.latched, acked: [...new Set([...st.signals.acked, ...entries.map(l => l.id)])] } });
+        d.out(`RESULT ACKED ${entries.map(l => `${l.id}@${l.level} ${l.kind}`).join(', ')}`);
         return 0;
       });
     }
