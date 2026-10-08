@@ -40,6 +40,7 @@ import {
 } from './pr-context';
 import { parseChecks, bucketClass } from './ci-gate';
 import { scan, type Finding } from './redact-engine';
+import { writeOutcome, writeReceipt } from './egress-receipt';
 import { pollForWrite } from './pr-watch';
 
 export const BODY_EXIT = { OK: 0, ERROR: 1, USAGE: 2, REFUSED: 20, REDACTION: 22, PRECONDITION: 30, LIVENESS_PENDING: 40 } as const;
@@ -364,7 +365,7 @@ export interface BodyDeps {
   preWriteGate: (ctx: { gh: GhRunner; git: GitRunner; env: NodeJS.ProcessEnv; cwd: string; repo: string; number: number; state: PrState | null }) => { ok: boolean; reason: string };
 }
 
-/** An asset read (GET) is unreceipted, the same as gh's GET reads. */
+/** An asset GET; cmdCheck receipts it (receiptedAssetGet). */
 const defaultHttp: HttpStatus = async url => {
   try {
     const r = await fetch(url, { method: 'GET', redirect: 'follow', signal: AbortSignal.timeout(30_000) });
@@ -862,7 +863,7 @@ async function cmdCheck(c: Ctx): Promise<number> {
   const statuses: string[] = [];
   let reachable = true;
   for (const url of live.attached) {
-    const code = await d.http(url);
+    const code = await receiptedAssetGet(d, url);
     statuses.push(`${url} -> ${code ?? 'no answer'}`);
     if (code !== 200) reachable = false;
   }
@@ -871,6 +872,30 @@ async function cmdCheck(c: Ctx): Promise<number> {
   for (const s of statuses) d.out(`ASSET ${s}`);
   if (!ok) d.out('NEXT the owner attaches the live `GSTACK PR` screenshot in the Liveness proof section, ticks box 1 and deletes the placeholder, then runs `gh pr ready`; the agent never does');
   return ok ? BODY_EXIT.OK : BODY_EXIT.LIVENESS_PENDING;
+}
+
+/**
+ * One asset GET, receipted (plan WP4: "each asset URL returns 200
+ * (receipted GET)"). The request carries no body (0 bytes), but it is a
+ * gstack-initiated send to github.com, so the receipt goes first and the
+ * status after, fail-open as receiptedSend is: a ledger that cannot be
+ * written warns on stderr and the GET still runs. The URL is not recorded,
+ * only the host and the payload class.
+ */
+async function receiptedAssetGet(d: BodyDeps, url: string): Promise<number | null> {
+  let receipt: string | null = null;
+  try {
+    receipt = writeReceipt({ sink: 'pr-prep', host: 'github.com', payloadClass: 'pr-asset-get', bytes: 0, sha256: null, consent: 'user ran /pr-prep', env: d.env }).id;
+  } catch (error) {
+    process.stderr.write(`gstack: egress receipt could not be written for pr-prep (${(error as Error).message}); sending anyway (fail-open)\n`);
+  }
+  const code = await d.http(url);
+  if (receipt) {
+    try {
+      writeOutcome({ receipt, status: code === null ? 'no answer' : String(code), env: d.env });
+    } catch { /* the outcome is best-effort bookkeeping; the receipt is the invariant */ }
+  }
+  return code;
 }
 
 // ── main ────────────────────────────────────────────────────────────────────
