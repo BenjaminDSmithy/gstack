@@ -2,9 +2,10 @@
 <!-- Regenerate: bun run gen:skill-docs -->
 ## Step 19: Create PR/MR
 
-For a fork PR to an upstream repo you do not own, `/pr-prep open` prepares it
-(size check, draft, upstream headings, liveness handoff) and `/pr-prep body`
-later regenerates its description without dropping the owner's screenshot.
+Step 17's `UPSTREAM_PR: new` and `open` never reach this step: a fork PR to
+someone else's repo is opened by `/pr-prep open` on the owner's instruction,
+and its description is refreshed by `/pr-prep body`, which keeps the owner's
+screenshot and ticked boxes. If one did, stop here and print that handoff.
 
 Recheck Step 18's PR/MR lookup and record it. Errors or ambiguous matches STOP publication.
 If the open PR/MR or title changed, repeat Step 18's identity/title preparation,

@@ -1107,6 +1107,30 @@ stage 4's recovery before publication. Otherwise continue to Step 17.
 
 ## Step 17: Push
 
+**Upstream PR check — before anything is pushed.** A PR on a repo that
+`origin` is not (a fork PR to someone else's project) is the owner's to write to:
+
+```bash
+_UP_REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null | tr 'A-Z' 'a-z')
+_PUSH_URL=$(git remote get-url --push origin 2>/dev/null | tr 'A-Z' 'a-z')
+case "$_PUSH_URL" in (""|*[/:]"$_UP_REPO"|*[/:]"$_UP_REPO".git|*[/:]"$_UP_REPO"/) _UP_REPO="" ;; esac
+if [ -z "$_UP_REPO" ]; then echo "UPSTREAM_PR: none"; exit 0; fi
+_OPEN=$(gh pr list --repo "$_UP_REPO" --head <branch-name> --state open --json number -q '.[].number' 2>/dev/null) || { echo "UPSTREAM_PR: lookup failed - STOP"; exit 1; }
+if [ -z "$_OPEN" ]; then echo "UPSTREAM_PR: new $_UP_REPO"; else echo "UPSTREAM_PR: open $(printf '%s\n' "$_OPEN" | tr '\n' ' ')$_UP_REPO"; fi
+```
+
+- `none`: continue below.
+- `new <repo>`: push below, then skip Steps 18-19: a PR on someone else's
+  repo opens only on the owner's instruction naming the branch, through
+  `/pr-prep open` (draft, upstream's template). Print that handoff, then Step 20.
+- `open <number> <repo>`: /ship never writes to that PR. Do not push and
+  skip Steps 18-19 (a fresh body would drop the owner's screenshot and ticked
+  boxes). Print the handoff:
+  `~/.claude/skills/gstack/bin/gstack-pr-watch poll --pr <number> --repo <repo>`
+  must exit 0 before the owner pushes, then `/pr-prep body` refreshes the
+  description. Then Step 20.
+- `lookup failed`: STOP; an unknown PR state never means no PR.
+
 **Credential pre-push guard — run before the push:**
 
 ```bash
