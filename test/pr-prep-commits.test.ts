@@ -90,6 +90,18 @@ describe('listAuditCommits', () => {
     expect(searchQualifier(l.audit[1])).toBeNull();
   });
 
+  test('a package.json commit is release-only only when nothing but its version moved', () => {
+    const pkg = (o: Record<string, unknown>) => `${JSON.stringify({ name: 'x', version: '1.0.0', scripts: { t: 'bun test' }, ...o }, null, 2)}\n`;
+    const { dir, base: b } = freshRepo('pkg', { 'package.json': pkg({}), 'VERSION': '1.0.0\n', 'lib/z.ts': 'z\n' });
+    const scripts = commitIn(dir, { 'package.json': pkg({ scripts: { t: 'bun test', lint: 'eslint .' } }) }, 'feat: add a lint script');
+    const bump = commitIn(dir, { 'package.json': pkg({ version: '1.0.1', scripts: { t: 'bun test', lint: 'eslint .' } }), 'VERSION': '1.0.1\n' }, 'chore(release): 1.0.1');
+    const mixed = commitIn(dir, { 'VERSION': '1.0.2\n', 'lib/x.ts': 'x\n' }, 'feat: x');
+    const deps = commitIn(dir, { 'package.json': pkg({ version: '1.0.1', scripts: { t: 'bun test', lint: 'eslint .' }, dependencies: { 'left-pad': '1.3.0' } }) }, 'feat(deps): add left-pad');
+    const l = listAuditCommits(defaultGit, dir, b, null);
+    expect(l.audit.map(c => c.sha)).toEqual([scripts, mixed, deps]);
+    expect(l.skipped.map(s => [s.sha, s.reason])).toEqual([[bump, 'release-only']]);
+  });
+
   test('a commit reworded since its audit, or a prior with no subject, is searched in full: the keywords come from the subject', () => {
     const now = new Date('2026-10-08T00:00:00Z');
     const { dir, base: b } = freshRepo('reword', { 'lib/z.ts': 'z\n' });
