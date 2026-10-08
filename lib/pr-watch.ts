@@ -15,9 +15,12 @@
  * association, and a P0 latches in the PR state until the owner
  * acknowledges it: every pr-prep write refuses while one is unacknowledged.
  *
- * Reads only (REST GETs, `gh pr list`, git fetch of the pinned base); no
- * receipts are written, the same as the other gh reads. Comment text reaches
- * output only inside the untrusted-content envelope.
+ * Reads GitHub only (REST GETs, `gh pr list`). Git fetches the base branch,
+ * and the PR head only when the checkout lacks its commit, into the private
+ * refs/pr-prep namespace (pinBranch may drop an older nested pin there). It
+ * writes the PR's state.json (latched signals and acks) and watch.json; no
+ * receipts, the same as the other gh reads. Comment text reaches output
+ * only inside the untrusted-content envelope.
  */
 
 import fs from 'node:fs';
@@ -55,7 +58,10 @@ trailer on a commit not linked to this PR).
 
 Exit codes: 0 quiet (no unacknowledged P0/P1), 1 error, 2 usage,
 10 unacknowledged P0, 11 unacknowledged P1, 12 UNVERIFIED (an endpoint
-did not answer: never read as quiet).`;
+did not answer: never read as quiet), 30 precondition (this topic's
+state or watch belongs to another PR; size: no remote for the repo),
+40 size: the base branch is gone from the remote, 45 the PR lock is
+busy (another poll or write is running; try again).`;
 
 // ── classification ──────────────────────────────────────────────────────────
 
