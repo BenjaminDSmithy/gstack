@@ -12,8 +12,8 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { classifyActor, signalsFrom, sizeVerdict, percentile, watchMain, pollForWrite, absorptionOf, SEED_PROXIES } from '../lib/pr-watch';
-import { prStateDir, topicFor, readStateFor, writeState, defaultGit, type GhRunner } from '../lib/pr-context';
+import { classifyActor, signalsFrom, sizeVerdict, percentile, watchMain, poll, pollForWrite, absorptionOf, SEED_PROXIES } from '../lib/pr-watch';
+import { prStateDir, topicFor, readStateFor, writeState, withPrLock, defaultGit, type GhRunner } from '../lib/pr-context';
 
 setDefaultTimeout(120_000);
 
@@ -44,6 +44,10 @@ describe('classification', () => {
     expect(s.find(x => x.id === 'xref:3057')).toBeTruthy();
     expect(s.find(x => x.id === 'xref:3066')).toBeUndefined();
     expect(s.filter(x => x.kind === 'infra-comment').length).toBeGreaterThan(0);
+    // The three `referenced` events: the version-queue note and the release (garrytan), the wave (capy-ai[bot]).
+    expect(s.filter(x => x.level === 'P1').map(x => [x.id, x.kind])).toEqual([
+      ['ref:9acfdfe4b801', 'maintainer-commit-reference'], ['ref:5885157a90e5', 'maintainer-commit-reference'], ['ref:28f1385eac65', 'maintainer-commit-reference'],
+    ]);
   });
 
   test('#3032 at the moment of the warning, still open: P0 from the bot comment alone', () => {
@@ -76,6 +80,7 @@ describe('classification', () => {
     const referenced = [{ event: 'referenced', actor: { login: 'capy-ai[bot]', type: 'Bot' }, commit_id: sha }];
     expect(signalsFrom({ ...base, comments: [], timeline: referenced, absorbed: [{ sha, credit: true, cites: false }] }).find(s => s.id.startsWith('absorbed:'))).toMatchObject({ level: 'P0', kind: 'absorbed-with-credit' });
     expect(signalsFrom({ ...base, comments: [], pull: { state: 'open', mergeable_state: 'dirty', head: { sha: 'b'.repeat(40) } } })[0]).toMatchObject({ level: 'P1', kind: 'mergeable-dirty' });
+    expect(signalsFrom({ ...base, comments: [], pull: { state: 'open', mergeable_state: 'behind', head: { sha: 'b'.repeat(40) } } })[0]).toMatchObject({ level: 'P1', kind: 'mergeable-behind', id: `mergeable:behind:${'b'.repeat(12)}` });
     expect(signalsFrom({ ...base, comments: [], pull: { state: 'open', mergeable_state: 'blocked' } })).toEqual([]);
   });
 });
@@ -234,7 +239,7 @@ function topology(name: string, mainMsg: string | null) {
   return { base, clone, fork };
 }
 
-interface FakeData { comments?: unknown[]; reviews?: unknown[]; timeline?: unknown[]; pull?: Record<string, unknown>; failComments?: boolean; headOid?: string; merged?: unknown[] }
+interface FakeData { comments?: unknown[]; reviews?: unknown[]; timeline?: unknown[]; pull?: Record<string, unknown>; failComments?: boolean; headOid?: string; merged?: unknown[]; rawComments?: unknown }
 
 /** Answers list endpoints the way GitHub does: one page per call (per_page capped at 100, default 30), oldest first. */
 function fakeGh(t: { fork: string }, data: FakeData): GhRunner & { calls: string[][] } {
@@ -256,7 +261,10 @@ function fakeGh(t: { fork: string }, data: FakeData): GhRunner & { calls: string
     }
     if (args[0] === 'api' && args[1] === 'user') return ok('me\n');
     if (args[0] === 'api' && route === 'repos/acme/gw/pulls/7') return ok({ state: 'open', merged: false, mergeable_state: 'clean', head: { sha: 'x' }, ...data.pull });
-    if (args[0] === 'api' && route === 'repos/acme/gw/issues/7/comments') return data.failComments ? { status: 1, stdout: '', stderr: 'HTTP 502' } : page(data.comments);
+    if (args[0] === 'api' && route === 'repos/acme/gw/issues/7/comments') {
+      if (data.failComments) return { status: 1, stdout: '', stderr: 'HTTP 502' };
+      return data.rawComments !== undefined ? ok(data.rawComments) : page(data.comments);
+    }
     if (args[0] === 'api' && route === 'repos/acme/gw/pulls/7/reviews') return page(data.reviews);
     if (args[0] === 'api' && route === 'repos/acme/gw/issues/7/timeline') return page(data.timeline);
     if (args[0] === 'pr' && args[1] === 'list') return ok(data.merged ?? [{ mergedBy: { login: 'app/capy-ai', is_bot: true } }]); // gh's shape for a bot merger, read 2026-10-09
@@ -450,6 +458,49 @@ describe('poll, ack and the write gate', () => {
     const code = await watchMain(['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone], { gh: fakeGh(t, { comments: [], failComments: true }), env: { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') }, out: l => out.push(l) });
     expect(code).toBe(12);
     expect(out[0]).toContain('RESULT UNVERIFIED');
+  });
+
+  test('a list past 30 pages of 100, or a page that is not a list, is UNVERIFIED, never a partial read', async () => {
+    const t = topology('overflow', null);
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') };
+    const argv = ['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone];
+    const many = Array.from({ length: 3001 }, (_, i) => ({ id: 5000 + i, user: { login: 'rando' }, author_association: 'NONE', created_at: '2026-10-01T00:00:00Z', body: 'nice' }));
+    const out: string[] = [];
+    expect(await watchMain(argv, { gh: fakeGh(t, { comments: many }), env, out: l => out.push(l) })).toBe(12);
+    expect(out[0]).toMatch(/^RESULT UNVERIFIED .*more than 3000 items/);
+    out.length = 0;
+    expect(await watchMain(argv, { gh: fakeGh(t, { rawComments: {} }), env, out: l => out.push(l) })).toBe(12);
+    expect(out[0]).toMatch(/^RESULT UNVERIFIED .*not a list/);
+  });
+
+  test('a head commit the checkout lacks is pinned from the head remote before the base scan', async () => {
+    // The fork's pr/w moves after the clone fetched it; GitHub's headRefOid is the new tip.
+    const t = topology('head-pin', null);
+    const seed = path.join(t.base, 'seed');
+    fs.writeFileSync(path.join(seed, 'd.txt'), 'd\n');
+    git(seed, 'add', '-A'); git(seed, 'commit', '-q', '-m', 'feat: d'); git(seed, 'push', '-q', t.fork, 'pr/w');
+    const out: string[] = [];
+    const code = await watchMain(['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone], { gh: fakeGh(t, {}), env: { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') }, out: l => out.push(l) });
+    expect(code, out.join('\n')).toBe(0);
+    expect(out[0]).not.toContain('error=');
+  });
+
+  test('a poll that meets a held PR lock is busy (45), never UNVERIFIED, and the write gate throws it', () => {
+    const t = topology('lock45', null);
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') };
+    const deps = { gh: fakeGh(t, {}), git: defaultGit, env, now: () => new Date(), out: () => {} };
+    const codes: unknown[] = [];
+    withPrLock(prStateDir({ cwd: t.clone, topic: topicFor('pr/w'), env }), () => {
+      for (const f of [() => poll(deps, 'acme/gw', 7, t.clone), () => pollForWrite(deps, 'acme/gw', 7, t.clone)]) {
+        try {
+          f();
+          codes.push('returned');
+        } catch (error) {
+          codes.push((error as { code?: number }).code);
+        }
+      }
+    });
+    expect(codes).toEqual([45, 45]);
   });
 
   const gateDeps = (gh: GhRunner, env: NodeJS.ProcessEnv) => ({ gh, git: defaultGit, env, now: () => new Date(), out: () => {} });
@@ -743,14 +794,17 @@ describe('LaunchAgent runner', () => {
     fs.mkdirSync(fakeBin, { recursive: true });
     const sh = (p: string, body: string) => { fs.writeFileSync(p, `#!/bin/bash\n${body}\n`); fs.chmodSync(p, 0o755); };
     sh(path.join(bin, 'gstack-paths'), `echo "${root}"`);
-    sh(path.join(bin, 'gstack-pr-watch'), 'case "$3" in 7) exit 10 ;; 8) exit 0 ;; 9) exit 11 ;; esac; exit 1');
+    sh(path.join(bin, 'gstack-pr-watch'), `printf '%s|%s\\n' "$#" "$7" >> "${base}/args"; case "$3" in 7) exit 10 ;; 8) exit 0 ;; 9) exit 11 ;; esac; exit 1`);
     sh(path.join(fakeBin, 'osascript'), `printf '%s\\n' "$2" >> "${base}/notified"`);
     const enable = (topic: string, v: Record<string, unknown>) => {
       const d = path.join(root, 'projects', 'me-gw', 'pr-drafts', topic);
       fs.mkdirSync(d, { recursive: true });
       fs.writeFileSync(path.join(d, 'watch.json'), JSON.stringify(v));
     };
-    enable('a', { repo: 'acme/gw', number: 7, cwd: base });
+    // The cwd is the one field passed through unvalidated: a space and a glob must arrive as one argument.
+    const spaced = path.join(base, 'wt dir', '*');
+    fs.mkdirSync(spaced, { recursive: true });
+    enable('a', { repo: 'acme/gw', number: 7, cwd: spaced });
     enable('b', { repo: 'acme/gw', number: 8, cwd: base });
     enable('c', { repo: 'acme/gw', number: 9, cwd: base });
     enable('d', { repo: 'acme/gw', number: '7; touch pwned', cwd: base });
@@ -764,6 +818,7 @@ describe('LaunchAgent runner', () => {
     const log = fs.readFileSync(path.join(root, 'analytics', 'pr-watch.log'), 'utf8');
     expect(log.match(/skip /g)).toHaveLength(2);
     expect(fs.existsSync(path.join(base, 'pwned'))).toBe(false);
+    expect(fs.readFileSync(path.join(base, 'args'), 'utf8').trim().split('\n')).toEqual([`7|${spaced}`, `7|${base}`, `7|${base}`]);
   });
 
   test('a watch that cannot verify, or whose worktree is gone, notifies on its second failed run in a row', () => {
