@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { validationEnv, selectTests, uncoveredCode, judgeBunRun, bunPinFrom, macosNamedFrom, validateMain, defaultTool, bunfigPreload, writeCiGitConfig, shellcheckTargetsFrom, type ValidateDeps, type ToolRunner } from '../lib/pr-validate';
+import { validationEnv, selectTests, uncoveredCode, relativeImports, judgeBunRun, bunPinFrom, macosNamedFrom, validateMain, defaultTool, bunfigPreload, writeCiGitConfig, shellcheckTargetsFrom, type ValidateDeps, type ToolRunner } from '../lib/pr-validate';
 import { prStateDir, topicFor, readStateFor, type GhRunner } from '../lib/pr-context';
 
 setDefaultTimeout(180_000);
@@ -193,6 +193,28 @@ describe('selectTests', () => {
     expect(bunfigPreload('[test]\n# comment\npreload = [\n  "./test-setup.ts",\n  "./test/helpers/b.ts",\n]\n')).toEqual(['test-setup.ts', 'test/helpers/b.ts']);
     expect(bunfigPreload('[test]\npreload = "./one.ts"\n')).toEqual(['one.ts']);
     expect(bunfigPreload(null)).toEqual([]);
+  });
+
+  test('the free runner\'s whole import closure and its workflow are FULL; the pure E2E touchfile data is not', () => {
+    // Walk the runner's relative imports in this repo, the way the selection resolves them.
+    const REPO = path.resolve(import.meta.dir, '..');
+    const resolve = (spec: string) => [spec, `${spec}.ts`, `${spec}/index.ts`].find(c => fs.existsSync(path.join(REPO, c)) && fs.statSync(path.join(REPO, c)).isFile());
+    const seen = new Set<string>();
+    const queue = ['scripts/test-free-shards.ts'];
+    while (queue.length) {
+      const f = queue.pop()!;
+      if (seen.has(f)) continue;
+      seen.add(f);
+      for (const spec of relativeImports(f, fs.readFileSync(path.join(REPO, f), 'utf8')).imports) {
+        const hit = resolve(spec);
+        if (hit) queue.push(hit);
+      }
+    }
+    const closure = [...seen].filter(f => f !== 'test/helpers/touchfiles-data.ts').sort();
+    expect(closure).toContain('lib/state-root.ts');
+    expect(closure).toContain('test/helpers/test-selection.ts');
+    for (const f of [...closure, '.github/workflows/free-tests.yml']) expect(sel([f]).full, f).toEqual([f]);
+    expect(sel(['test/helpers/touchfiles-data.ts']).full).toEqual([]);
   });
 
   test('declared files always run; files outside the free universe never do', () => {
