@@ -64,12 +64,19 @@ export const SUPERSEDE_RE = /will be closed when|clos(?:e|ed|ing) in favou?r of 
 
 export type ActorClass = 'self' | 'maintainer' | 'proxy' | 'infra' | 'bot' | 'external';
 
+/** GitHub logins are case-insensitive: `--repo Acme/gw` names the same owner as `acme`. */
+function hasLogin(set: ReadonlySet<string> | readonly string[], login: string): boolean {
+  const key = login.replace(/\[bot\]$/, '').toLowerCase();
+  for (const x of set) if (x.toLowerCase() === key) return true;
+  return false;
+}
+
 export function classifyActor(a: { login?: string; type?: string; assoc?: string }, proxies: ReadonlySet<string>, self: string): ActorClass {
   const login = (a.login ?? '').replace(/\[bot\]$/, '');
   if (!login) return 'external';
   if (login.toLowerCase() === self.toLowerCase()) return 'self';
-  if (proxies.has(login)) return 'proxy';
-  if (INFRA_BOTS.includes(login)) return 'infra';
+  if (hasLogin(proxies, login)) return 'proxy';
+  if (hasLogin(INFRA_BOTS, login)) return 'infra';
   if (a.assoc && MAINTAINER_ASSOC.has(a.assoc)) return 'maintainer';
   if (a.type === 'Bot' || /\[bot\]$/.test(a.login ?? '')) return 'bot';
   return 'external';
@@ -112,11 +119,11 @@ export function signalsFrom(x: SignalInput): Signal[] {
   }
   for (const e of x.timeline) {
     const actor = e.actor?.login ?? '';
-    const who = classifyActor({ login: actor, type: e.actor?.type, assoc: x.maintainers.has(actor) ? 'OWNER' : undefined }, x.proxies, x.self);
+    const who = classifyActor({ login: actor, type: e.actor?.type, assoc: hasLogin(x.maintainers, actor) ? 'OWNER' : undefined }, x.proxies, x.self);
     const at = e.created_at ?? '';
     if (e.event === 'cross-referenced') {
       const src = e.source?.issue;
-      const srcWho = classifyActor({ login: src?.user?.login, assoc: x.maintainers.has(src?.user?.login ?? '') ? 'OWNER' : undefined }, x.proxies, x.self);
+      const srcWho = classifyActor({ login: src?.user?.login, assoc: hasLogin(x.maintainers, src?.user?.login ?? '') ? 'OWNER' : undefined }, x.proxies, x.self);
       if (src?.number && src.number !== x.number && (srcWho === 'maintainer' || srcWho === 'proxy')) {
         out.push({ id: `xref:${src.number}`, level: 'P0', kind: 'maintainer-cross-reference', at, ref: `#${src.number}`, who: `${src.user?.login ?? '?'} (${srcWho})` });
       }
@@ -330,7 +337,7 @@ export function poll(d: WatchDeps, repo: string, n: number, cwd: string): PollRe
     const proxies = new Set<string>(SEED_PROXIES);
     for (const m of merged) {
       const login = (m.mergedBy?.login ?? '').replace(/\[bot\]$/, '').replace(/^app\//, '');
-      if (login && login.toLowerCase() !== owner.toLowerCase() && !INFRA_BOTS.includes(login)) proxies.add(login);
+      if (login && login.toLowerCase() !== owner.toLowerCase() && !hasLogin(INFRA_BOTS, login)) proxies.add(login);
     }
     const maintainers = new Set<string>([owner]);
     for (const c of comments) if (c.author_association && MAINTAINER_ASSOC.has(c.author_association) && c.user?.login) maintainers.add(c.user.login);
