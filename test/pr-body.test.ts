@@ -230,7 +230,7 @@ function write(dir: string, rel: string, text: string): void {
 const pkgJson = (version: string, extra: Record<string, unknown> = {}) => `${JSON.stringify({ name: 'gx', version, private: true, ...extra }, null, 2)}\n`;
 
 function fixture(name: string, liveInitial: string, opts: {
-  state?: string; viewer?: string; webEditDropsImages?: boolean; headLag?: boolean | 'first'; sideMerge?: boolean; comments?: unknown[];
+  state?: string; viewer?: string; author?: string; webEditDropsImages?: boolean; headLag?: boolean | 'first'; sideMerge?: boolean; comments?: unknown[];
   storeEdit?: (sent: string) => string; ciChangesTree?: boolean;
   // gh pr edit applies the body, then exits with this status (a timeout or a 502 after GitHub took it).
   editExit?: number;
@@ -288,7 +288,7 @@ function fixture(name: string, liveInitial: string, opts: {
     const ok = (stdout: string) => ({ status: 0, stdout, stderr: '' });
     log.push(args[0] === 'api' && args[1] === 'repos/acme/gx/pulls/9' && args.includes('--jq') ? 'gh body-read' : args[0] === 'pr' && args[1] === 'edit' ? 'gh pr-edit' : `gh ${args.slice(0, 2).join(' ')}`);
     if (args[0] === 'pr' && args[1] === 'view') {
-      return ok(JSON.stringify({ number: 9, state: opts.state ?? 'OPEN', isDraft: false, headRefOid: git(fork, 'rev-parse', opts.headLag === true || (opts.headLag === 'first' && views++ === 0) ? 'refs/heads/pr/b^' : 'refs/heads/pr/b'), url: 'https://github.com/acme/gx/pull/9', headRepositoryOwner: { login: 'me' }, headRepository: { name: 'gx' }, headRefName: 'pr/b', baseRefName: 'main' }));
+      return ok(JSON.stringify({ number: 9, state: opts.state ?? 'OPEN', isDraft: false, headRefOid: git(fork, 'rev-parse', opts.headLag === true || (opts.headLag === 'first' && views++ === 0) ? 'refs/heads/pr/b^' : 'refs/heads/pr/b'), url: 'https://github.com/acme/gx/pull/9', author: { login: opts.author ?? 'me' }, headRepositoryOwner: { login: 'me' }, headRepository: { name: 'gx' }, headRefName: 'pr/b', baseRefName: 'main' }));
     }
     if (args[0] === 'api' && args[1] === 'user') return ok(`${opts.viewer ?? 'me'}\n`);
     if (args[0] === 'api' && args[1] === 'repos/acme/gx/pulls/9' && args.includes('--jq')) {
@@ -927,7 +927,16 @@ describe('check (liveness)', () => {
     const done = TEMPLATE.replace('Screenshot to follow from @me.', IMG66).replace(BOX1_OPEN, BOX1_DONE);
     expect(await fixture('c2', done).call(['check'])).toBe(0);
     expect(await fixture('c3', done.replace('a3f4ccb0-1111', 'deadbeef-dead')).call(['check'])).toBe(40);
-    expect(await fixture('c4', TEMPLATE, { viewer: 'garrytan' }).call(['check'])).toBe(0);
+  });
+
+  test('the owner exemption follows the PR author, not who runs the check', async () => {
+    const own = fixture('c4', TEMPLATE, { author: 'garrytan' });
+    expect(await own.call(['check'])).toBe(0);
+    expect(own.out[0]).toMatch(/^RESULT EXEMPT /);
+    // garrytan checking an external contributor's PR: the screenshot is still required.
+    const theirs = fixture('c5', TEMPLATE, { viewer: 'garrytan' });
+    expect(await theirs.call(['check'])).toBe(40);
+    expect(theirs.out[0]).toMatch(/^RESULT PENDING /);
   });
 
   test('each asset GET is receipted before it is sent, and its status recorded after', async () => {

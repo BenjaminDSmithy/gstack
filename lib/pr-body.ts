@@ -64,7 +64,8 @@ The PR description is an owner template plus one regenerated facts block.
             earlier edit whose read-back failed) is recorded with no
             edit: RESULT PUBLISHED ... already-live=yes
   check     liveness: screenshot attached, box 1 ticked, no placeholder,
-            every asset URL answers 200
+            every asset URL answers 200; exempt when the PR's author is
+            garrytan
 
 Options:
   --pr N|URL                the upstream PR (required)
@@ -1082,10 +1083,24 @@ function lintContext(c: Ctx, head: string, base: string | null): LintCtx {
 
 // ── check ───────────────────────────────────────────────────────────────────
 
+/**
+ * The PR author's login. The template's box 1 exempts a PR whose author is
+ * @garrytan; who runs the check does not matter (garrytan checking an
+ * external contributor's PR was told no screenshot was required).
+ */
+function prAuthor(c: Ctx): string {
+  const r = c.d.gh(['pr', 'view', String(c.pr.number), '--repo', c.repo, '--json', 'author']);
+  if (r.status !== 0) throw new PrContextError(`could not read PR #${c.pr.number}'s author: ${(r.error ?? r.stderr).trim().split('\n').at(-1)}`, 1);
+  try {
+    const login = (JSON.parse(r.stdout) as { author?: { login?: unknown } }).author?.login;
+    if (typeof login === 'string' && login) return login;
+  } catch { /* reported below */ }
+  throw new PrContextError(`gh pr view returned no author login for PR #${c.pr.number}`, 1);
+}
+
 async function cmdCheck(c: Ctx): Promise<number> {
   const { d } = c;
-  const login = viewerLogin(d.gh);
-  if (login === 'garrytan') {
+  if (prAuthor(c) === 'garrytan') {
     d.out('RESULT EXEMPT the PR author is the repo owner; no liveness screenshot is required');
     return BODY_EXIT.OK;
   }
