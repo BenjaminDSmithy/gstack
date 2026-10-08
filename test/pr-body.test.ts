@@ -238,6 +238,10 @@ function fixture(name: string, liveInitial: string, opts: {
   editFails?: boolean;
   // The next N body reads after an edit fail with a 502.
   failReadsAfterEdit?: number;
+  // The subject of the PR head's empty commit (default: a ci: re-run).
+  lastSubject?: string;
+  // Upstream main releases this version after the PR's last merge of it.
+  baseRelease?: string;
 } = {}) {
   const base = path.join(ROOT, name);
   const up = path.join(base, 'up', 'acme', 'gx.git');
@@ -272,14 +276,24 @@ function fixture(name: string, liveInitial: string, opts: {
   git(seed, 'checkout', '-q', 'pr/b');
   git(seed, 'merge', '-q', '--no-edit', 'main');
   if (opts.ciChangesTree) { write(seed, '.github/ci.yml', 'bun: 1.4.2\n'); git(seed, 'add', '-A'); }
-  git(seed, 'commit', '-q', '--allow-empty', '-m', opts.ciChangesTree ? 'ci: bump bun' : 'ci: re-run after a Bun IOCP crash');
+  git(seed, 'commit', '-q', '--allow-empty', '-m', opts.lastSubject ?? (opts.ciChangesTree ? 'ci: bump bun' : 'ci: re-run after a Bun IOCP crash'));
   git(seed, 'push', '-q', fork, 'pr/b');
+  if (opts.baseRelease) {
+    git(seed, 'checkout', '-q', 'main');
+    write(seed, 'VERSION', `${opts.baseRelease}\n`);
+    write(seed, 'CHANGELOG.md', `# Changelog\n\n## [${opts.baseRelease}] - 2026-10-07\n\n- upstream\n\n## [1.0.0.0] - 2026-10-01\n\n- base\n`);
+    git(seed, 'add', '-A'); git(seed, 'commit', '-q', '-m', `release ${opts.baseRelease} (#3)`);
+    git(seed, 'push', '-q', up, 'main');
+    git(seed, 'checkout', '-q', 'pr/b');
+  }
   const clone = path.join(base, 'clone');
   git(base, 'clone', '-q', fork, clone);
   git(clone, 'remote', 'add', 'upstream', up);
   git(clone, 'checkout', '-q', 'pr/b');
   let live = liveInitial;
   const edits: string[] = [];
+  // The newest pr-prep receipt as each gh pr edit was sent.
+  const receiptAtEdit: ({ payload_class: string; status: string | null } | null)[] = [];
   // Every gh and git call in order: `gh body-read`, `gh pr-edit`, `git fetch`, ...
   const log: string[] = [];
   let views = 0;
@@ -306,6 +320,8 @@ function fixture(name: string, liveInitial: string, opts: {
     if (args[0] === 'pr' && args[1] === 'list') return ok('[]');
     if (args[0] === 'pr' && args[1] === 'checks') return ok(JSON.stringify([{ name: 'free', bucket: 'pass', link: '' }, { name: 'win', bucket: 'fail', link: '' }, { name: 'docs', bucket: 'skipping', link: '' }]));
     if (args[0] === 'pr' && args[1] === 'edit') {
+      const last = listReceipts(path.join(base, 'home')).filter(r => r.sink === 'pr-prep').at(-1);
+      receiptAtEdit.push(last ? { payload_class: last.payload_class, status: last.status } : null);
       if (opts.editFails) return { status: 1, stdout: '', stderr: 'GraphQL: Something went wrong (updatePullRequest)' };
       const file = args[args.indexOf('--body-file') + 1];
       const sent = fs.readFileSync(file, 'utf8');
@@ -336,7 +352,7 @@ function fixture(name: string, liveInitial: string, opts: {
     return git(seed, 'rev-parse', 'HEAD');
   };
   const pushCommit = (text: string) => pushFiles({ 'lib/x.ts': `export const x = ${JSON.stringify(text)};\n` }, `fix: ${text}`);
-  return { base, up, fork, clone, out, call, publish, acceptLive, shaOf, pushCommit, pushFiles, dir, edits, log, deps, getLive: () => live, setLive: (text: string) => { live = text; }, env };
+  return { base, up, fork, clone, out, call, publish, acceptLive, shaOf, pushCommit, pushFiles, dir, edits, receiptAtEdit, log, deps, getLive: () => live, setLive: (text: string) => { live = text; }, env };
 }
 const prRef = { repo: 'acme/gx', number: 9, headRef: 'pr/b', headOwner: 'me' };
 
@@ -385,6 +401,14 @@ describe('facts and render', () => {
 
   test('a ci: commit that changes the tree is code, not an empty re-run', async () => {
     const f = fixture('facts-ci-tree', TEMPLATE, { ciChangesTree: true });
+    expect(await f.call(['facts'])).toBe(0);
+    const facts = JSON.parse(fs.readFileSync(path.join(f.dir, 'facts.json'), 'utf8')) as Facts;
+    expect(facts.emptyCi).toEqual([]);
+    expect(facts.codeSha).toBe(facts.head);
+  });
+
+  test('an empty commit that is not a ci: re-run is the code commit', async () => {
+    const f = fixture('facts-empty-chore', TEMPLATE, { lastSubject: 'chore: retrigger' });
     expect(await f.call(['facts'])).toBe(0);
     const facts = JSON.parse(fs.readFileSync(path.join(f.dir, 'facts.json'), 'utf8')) as Facts;
     expect(facts.emptyCi).toEqual([]);
@@ -517,6 +541,8 @@ describe('publish', () => {
     expect(st.lastPublishedBodySha256).toBe(sha256(normalizeBody(f.getLive())));
     expect(st.bodyStaleSince).toBeNull();
     expect(listReceipts(home).filter(r => r.sink === 'pr-prep').at(-1)).toMatchObject({ payload_class: 'pr-body-edit', status: 'exit:0' });
+    // The edit's receipt was written before the edit was sent, its outcome after.
+    expect(f.receiptAtEdit).toEqual([{ payload_class: 'pr-body-edit', status: null }]);
     // Publishing the same bytes again sends nothing: GitHub already holds them.
     f.out.length = 0;
     expect(await f.publish(file)).toBe(0);
@@ -885,6 +911,16 @@ describe('publish', () => {
     expect(f.edits).toHaveLength(1);
   });
 
+  test('a version the base branch released after the PR\'s last merge of it is no redaction finding', async () => {
+    const f = fixture('base-ahead', TEMPLATE, { baseRelease: '1.0.2.0' });
+    const file = await rendered(f);
+    expect(fs.readFileSync(file, 'utf8')).toContain('`VERSION` 1.0.1.0, at or below `main`\'s 1.0.2.0 (needs a sync).');
+    f.out.length = 0;
+    expect(await f.publish(file, ...f.acceptLive(file))).toBe(0);
+    expect(f.out.filter(l => l.startsWith('REDACTION'))).toEqual([]);
+    expect(f.edits).toHaveLength(1);
+  });
+
   test('each MEDIUM finding needs its own confirmation, even two of one kind', async () => {
     const f = fixture('redact2', TEMPLATE);
     const file = await rendered(f, TEMPLATE.replace('Because.', 'Because 8.8.8.8 answers.\n\nAnd 8.8.4.4 too.'));
@@ -941,6 +977,15 @@ describe('check (liveness)', () => {
     const done = TEMPLATE.replace('Screenshot to follow from @me.', IMG66).replace(BOX1_OPEN, BOX1_DONE);
     expect(await fixture('c2', done).call(['check'])).toBe(0);
     expect(await fixture('c3', done.replace('a3f4ccb0-1111', 'deadbeef-dead')).call(['check'])).toBe(40);
+  });
+
+  test('ATTACHED needs every condition: an image with box 1 unticked, or with the placeholder left, is pending', async () => {
+    const unticked = fixture('c6', TEMPLATE.replace('Screenshot to follow from @me.', IMG66));
+    expect(await unticked.call(['check'])).toBe(40);
+    expect(unticked.out[0]).toMatch(/^RESULT PENDING attachments=1 box1=unticked placeholder=gone reachable=yes /);
+    const placeholder = fixture('c7', TEMPLATE.replace('Screenshot to follow from @me.', `Screenshot to follow from @me.\n\n${IMG66}`).replace(BOX1_OPEN, BOX1_DONE));
+    expect(await placeholder.call(['check'])).toBe(40);
+    expect(placeholder.out[0]).toMatch(/^RESULT PENDING attachments=1 box1=ticked placeholder=present reachable=yes /);
   });
 
   test('the owner exemption follows the PR author, not who runs the check', async () => {
