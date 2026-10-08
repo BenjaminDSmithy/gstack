@@ -143,9 +143,21 @@ export function listAuditCommits(g: GitRunner, cwd: string, base: string, prior:
   return out;
 }
 
-/** `updated:>=YYYY-MM-DD` for a CARRY commit's searches; null means a full search. */
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * `updated:>=YYYY-MM-DD` for a CARRY commit's searches; null means a full
+ * search. `since` is when the last report was STAMPED, which is after its
+ * searches ran: an audit that searched at 23:45Z and stamped at 00:05Z
+ * would otherwise never search items updated in between. The window starts
+ * a full day earlier, which covers any audit shorter than 24 h at the cost
+ * of one extra day of results. A `since` that is not a date gives a full
+ * search, never a qualifier built from its text.
+ */
 export function searchQualifier(c: AuditCommit): string | null {
-  return c.mode === 'CARRY' && c.since ? `updated:>=${c.since.slice(0, 10)}` : null;
+  if (c.mode !== 'CARRY' || !c.since) return null;
+  const t = Date.parse(c.since);
+  return Number.isFinite(t) ? `updated:>=${new Date(t - DAY_MS).toISOString().slice(0, 10)}` : null;
 }
 
 export interface AgentReport { summary: string; worst?: string; commits: { sha: string; subject?: string; bucket: string; topScore?: number; hits?: unknown[] }[] }
@@ -231,7 +243,8 @@ export const COMMITS_USAGE = `gstack-pr-prep-commits <list|stamp|self|paths> [op
 
   list    commits to audit between --base and HEAD (merges excluded):
           NEW (full searches), CARRY (audited before with a verdict: search
-          only items updated since, keep the old verdict), RECHECK (audited
+          only items updated since the day before that audit's stamp, keep
+          the old verdict), RECHECK (audited
           before as UNVERIFIED or EXACT_DUP, or under another subject:
           full searches, the verdict is re-derived); release-only commits
           (only VERSION, CHANGELOG.md, the agents digest, and package.json
