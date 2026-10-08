@@ -8,8 +8,9 @@
  *   gstack-pr-ci-triage onset [--repo o/r] [--cwd <dir>] [--limit 200]
  *
  * Measured on #3032 (2026-10-05..07): exit 3 with no failing test and
- * "GetQueuedCompletionStatusEx: (735) ERROR_ABANDONED_WAIT_0" at the end of
- * the shard-log artifact (a Bun abort on Windows); a hang to the shard's
+ * "GetQueuedCompletionStatusEx: (735) ERROR_ABANDONED_WAIT_0" or "(6) The
+ * handle is invalid." at the end of the shard-log artifact (a Bun abort on
+ * Windows); a hang to the shard's
  * deadline with every test of the in-flight file passed; and a GLib abort
  * (exit 9). The step log does not show any of this; the artifacts do.
  *
@@ -50,7 +51,14 @@ Exit codes: 0 drafted, 1 error, 2 usage, 10 triaged without a draft
 (REAL, UNKNOWN, a stale run, or evidence missing), 11 nothing failed.`;
 
 export const SHARD_JOB_RE = /^windows-free-shard \((\d+)(?:, \d+)?\)$/;
-const IOCP_RE = /GetQueuedCompletionStatusEx: \(735\) ERROR_ABANDONED_WAIT_0/;
+/**
+ * Bun's Windows event loop aborting in its IOCP wait. The error code varies:
+ * 735 (ERROR_ABANDONED_WAIT_0) and 6 (ERROR_INVALID_HANDLE) are both measured
+ * on upstream runs, so the call is the signature, not one code. Only the
+ * digits are kept: the rest of the line is log text.
+ */
+const IOCP_RE = /GetQueuedCompletionStatusEx: \((\d{1,10})\)/;
+const IOCP_NAMES: Record<string, string> = { 6: 'ERROR_INVALID_HANDLE', 735: 'ERROR_ABANDONED_WAIT_0' };
 const GLIB_RE = /GLib-ERROR[^\n]*g_system_thread_free/;
 
 export type ShardClass = 'REAL' | 'CRASH' | 'HANG' | 'INFRA' | 'UNKNOWN';
@@ -81,9 +89,11 @@ export function classifyShard(shard: number, outcome: ShardOutcome | null, log: 
   if (outcome.status === 'timed-out' && failing.length === 0) return { ...base, klass: 'HANG', why: `timed out after ${Math.round((outcome.elapsedMs ?? 0) / 1000)} s` };
   if (outcome.status === 'failed' && (outcome.exitCode === 3 || outcome.exitCode === 9) && failing.length === 0) {
     if (!log) return { ...base, klass: 'UNKNOWN', why: `exit ${outcome.exitCode} with no failing test, but no shard log to read` };
-    const signature = IOCP_RE.test(log) ? 'IOCP' : GLIB_RE.test(log) ? 'GLib' : null;
+    const iocp = IOCP_RE.exec(log);
+    const signature = iocp ? 'IOCP' : GLIB_RE.test(log) ? 'GLib' : null;
     if (!signature) return { ...base, klass: 'UNKNOWN', why: `exit ${outcome.exitCode} with no failing test and no known abort signature` };
-    return { ...base, signature, klass: 'CRASH', why: signature === 'IOCP' ? 'Bun aborted: GetQueuedCompletionStatusEx (735) ERROR_ABANDONED_WAIT_0' : 'GLib abort in g_system_thread_free' };
+    const code = iocp ? String(Number(iocp[1])) : '';
+    return { ...base, signature, klass: 'CRASH', why: iocp ? `Bun aborted: GetQueuedCompletionStatusEx error ${code}${IOCP_NAMES[code] ? ` (${IOCP_NAMES[code]})` : ''}` : 'GLib abort in g_system_thread_free' };
   }
   return { ...base, klass: 'UNKNOWN', why: `status ${outcome.status ?? '?'} exit ${outcome.exitCode ?? '?'} failing ${failing.length}` };
 }
