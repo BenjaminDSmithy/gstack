@@ -14,7 +14,10 @@
  * Every merge happens in a detached scratch worktree at H0 (the PR head as
  * the remote has it), `<root>/<topic>-sync`, so the owner's PR worktree is
  * never left mid-merge. Any failure after the scratch worktree exists
- * removes it. `merge` leaves a committed sync in the scratch worktree and a
+ * removes it. Only a scratch merge made (a detached worktree of this
+ * repository whose admin dir carries merge's marker) is ever removed, and
+ * only through `git worktree remove`; anything else at that path is left
+ * alone and named. `merge` leaves a committed sync in the scratch worktree and a
  * `sync.json` beside the PR state; `push` publishes exactly that commit.
  *
  * gstack-shaped trees only: the merged tree must carry bin/gstack-next-version,
@@ -54,7 +57,8 @@ exact commit.
            (<worktree-root>/<topic>-sync); nothing is pushed
   push     publishes the staged sync commit (needs --yes); then fast-
            forwards the local PR branch and removes the scratch worktree
-  abort    removes the staged sync
+  abort    removes the staged sync, or the scratch worktree an interrupted
+           merge left; only a worktree gstack-pr-sync made is removed
   status   prints the staged sync and whether it may be pushed
   retrigger  pushes ONE empty commit on top of the PR head with the
            message file gstack-pr-ci-triage drafted (needs --yes and
@@ -78,8 +82,9 @@ Exit codes: 0 synced/pushed/ok, 1 error, 2 usage or approval missing,
 missing or red for the staged commit, 32 PR body still stale from an earlier
 push, 40 remote moved or not fast-forward, 41 a pre-push hook or the
 remote refused the push (stop and report; never --no-verify),
-45 lock busy, 50 a sync is already staged or the local branch has unpushed
-commits, 60 the version queue could not be read (never guessed).`;
+45 lock busy, 50 a sync is already staged, the scratch path holds something
+gstack-pr-sync did not make, or the local branch has unpushed commits,
+60 the version queue could not be read (never guessed).`;
 
 // ── pure helpers ────────────────────────────────────────────────────────────
 
@@ -477,10 +482,81 @@ function cmdPlan(c: Ctx): number {
 
 // ── merge ───────────────────────────────────────────────────────────────────
 
-function removeScratch(c: Ctx, scratch: string): void {
-  const r = c.d.git(['worktree', 'remove', '--force', scratch], { cwd: c.cwd });
-  if (r.status !== 0 && fs.existsSync(scratch)) fs.rmSync(scratch, { recursive: true, force: true });
+/** Written into a scratch worktree's admin dir (`<common>/worktrees/<id>`) by merge: proof that this tool made it. */
+const SCRATCH_MARKER = 'gstack-pr-sync.json';
+
+function defaultScratch(c: Ctx): string {
+  const root = c.f.worktreeRoot ?? path.join(os.homedir(), 'worktrees', c.repo.split('/')[1]);
+  return path.join(root, `${c.topic}-sync`);
+}
+
+/**
+ * The worktree of this repository registered at `dir`: whether it is
+ * detached, and its admin dir under `<common>/worktrees/`. Null when `dir`
+ * is not a worktree of this repository (another repo, a plain directory).
+ */
+function worktreeAt(c: Ctx, dir: string): { detached: boolean; admin: string } | null {
+  const real = (p: string) => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  const list = c.d.git(['worktree', 'list', '--porcelain'], { cwd: c.cwd });
+  if (list.status !== 0) return null;
+  const want = real(dir);
+  const block = list.stdout.split('\n\n').map(b => b.split('\n')).find(b => b[0]?.startsWith('worktree ') && real(b[0].slice(9)) === want);
+  if (!block) return null;
+  let dotgit = '';
+  try {
+    dotgit = fs.readFileSync(path.join(dir, '.git'), 'utf8');
+  } catch {
+    return null;
+  }
+  const m = /^gitdir: (.+)$/m.exec(dotgit);
+  const common = c.d.git(['rev-parse', '--git-common-dir'], { cwd: c.cwd });
+  if (!m || common.status !== 0) return null;
+  const admin = real(path.resolve(dir, m[1].trim()));
+  if (path.dirname(admin) !== path.join(real(path.resolve(c.cwd, common.stdout.trim())), 'worktrees')) return null;
+  return { detached: block.includes('detached'), admin };
+}
+
+function markScratch(c: Ctx, scratch: string, h0: string): void {
+  const wt = worktreeAt(c, scratch);
+  if (!wt) throw new PrContextError(`git worktree add did not register ${scratch}`, 1);
+  fs.writeFileSync(path.join(wt.admin, SCRATCH_MARKER), JSON.stringify({ tool: 'gstack-pr-sync', repo: c.repo, number: c.pr.number, headRef: c.pr.headRef, h0 }) + '\n');
+}
+
+/** A detached worktree of this repository carrying merge's marker for this PR. */
+function isOurScratch(c: Ctx, dir: string): boolean {
+  const wt = worktreeAt(c, dir);
+  if (!wt?.detached) return false;
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(wt.admin, SCRATCH_MARKER), 'utf8')) as Record<string, unknown>;
+    return m.tool === 'gstack-pr-sync' && m.repo === c.repo && m.number === c.pr.number;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remove a scratch worktree, only through `git worktree remove` and only one
+ * this tool made: `made` (this run created it) or isOurScratch. Anything
+ * else at the path (another repository, the owner's own worktree, a plain
+ * directory) is left as it is: 'foreign'. Never a recursive delete.
+ */
+function removeScratch(c: Ctx, scratch: string, made = false): 'removed' | 'absent' | 'foreign' | 'failed' {
+  if (!fs.existsSync(scratch)) {
+    c.d.git(['worktree', 'prune'], { cwd: c.cwd });
+    return 'absent';
+  }
+  if (!made && !isOurScratch(c, scratch)) return 'foreign';
+  c.d.git(['worktree', 'remove', '--force', scratch], { cwd: c.cwd });
   c.d.git(['worktree', 'prune'], { cwd: c.cwd });
+  if (!fs.existsSync(scratch)) return 'removed';
+  c.d.err(`gstack-pr-sync: git worktree remove left ${scratch} in place; remove it by hand`);
+  return 'failed';
 }
 
 function patchId(d: SyncDeps, cwd: string, a: string, b: string, file: string | null, unified: number): string {
@@ -577,27 +653,29 @@ function cmdMerge(c: Ctx): number {
     generatedConflicts = cls.generated;
   }
   const existing = readStagedSync(c.stateDir, c.pr);
-  const root = c.f.worktreeRoot ?? path.join(os.homedir(), 'worktrees', c.repo.split('/')[1]);
-  const scratch = path.join(root, `${c.topic}-sync`);
-  if (existing || fs.existsSync(scratch)) {
-    throw new PrContextError(`a sync is already staged at ${existing?.scratch ?? scratch}: push it or run \`gstack-pr-sync abort\``, SYNC_EXIT.DIRTY);
+  const scratch = defaultScratch(c);
+  if (existing) throw new PrContextError(`a sync is already staged at ${existing.scratch}: push it or run \`gstack-pr-sync abort\``, SYNC_EXIT.DIRTY);
+  if (fs.existsSync(scratch)) {
+    if (isOurScratch(c, scratch)) throw new PrContextError(`an interrupted merge left its scratch worktree at ${scratch}: run \`gstack-pr-sync abort\` to remove it`, SYNC_EXIT.DIRTY);
+    throw new PrContextError(`${scratch} already exists and is not a scratch worktree gstack-pr-sync made: move it or pass --worktree-root (nothing was touched)`, SYNC_EXIT.DIRTY);
   }
-  fs.mkdirSync(root, { recursive: true });
+  fs.mkdirSync(path.dirname(scratch), { recursive: true });
   gitOk(d, c.cwd, ['worktree', 'add', '--detach', scratch, p.h0], 'git worktree add');
   let done = false;
   const onSignal = () => {
-    if (!done) removeScratch(c, scratch);
+    if (!done) removeScratch(c, scratch, true);
     process.exit(130);
   };
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
   try {
+    markScratch(c, scratch, p.h0);
     const r = stageSync(c, p, pre, scratch, upToDate, dry, generatedConflicts);
     done = r.staged !== null;
-    if (!done) removeScratch(c, scratch);
+    if (!done) removeScratch(c, scratch, true);
     return r.code;
   } catch (error) {
-    removeScratch(c, scratch);
+    removeScratch(c, scratch, true);
     throw error;
   } finally {
     process.removeListener('SIGINT', onSignal);
@@ -851,6 +929,7 @@ function cmdPush(c: Ctx): number {
     if (!state?.validation || state.validation.sha !== staged.sha) throw new PrContextError(`no validation recorded for ${staged.sha.slice(0, 12)}: run gstack-pr-validate in ${staged.scratch}`, SYNC_EXIT.VALIDATION);
     if (state.validation.worst !== 0) throw new PrContextError(`validation of ${staged.sha.slice(0, 12)} is red (${state.validation.summary})`, SYNC_EXIT.VALIDATION);
     if (staged.proof === 'CHANGED' && !c.f.acceptDiffChange) throw new PrContextError(`the code-diff proof says CHANGED (${staged.changedFiles.join(', ')}); review, then pass --accept-diff-change`, SYNC_EXIT.DIFF_CHANGED);
+    if (!isOurScratch(c, staged.scratch)) throw new PrContextError(`${staged.scratch} is no longer the scratch worktree this sync was staged in: abort and re-sync`, SYNC_EXIT.PRECONDITION);
     const head = gitOk(d, staged.scratch, ['rev-parse', 'HEAD'], 'git rev-parse').trim();
     if (head !== staged.sha) throw new PrContextError(`the scratch worktree moved to ${head.slice(0, 12)} after the sync was staged`, SYNC_EXIT.PRECONDITION);
     const parent = gitOk(d, staged.scratch, ['rev-parse', `${staged.sha}^1`], 'git rev-parse').trim();
@@ -868,10 +947,10 @@ function cmdPush(c: Ctx): number {
       const ff = d.git(['merge', '--ff-only', '-q', staged.sha], { cwd: c.cwd });
       if (ff.status === 0) local = `local ${c.pr.headRef} fast-forwarded`;
     }
-    removeScratch(c, staged.scratch);
+    const gone = removeScratch(c, staged.scratch);
     const rb = readback(c, staged.sha);
     d.out(`RESULT PUSHED sha=${staged.sha.slice(0, 12)} pr=${c.pr.number} readback=${rb.word}`);
-    d.out(`NOTE ${local}; scratch removed; the PR body is stale until gstack-pr-body publish`);
+    d.out(`NOTE ${local}; scratch ${gone === 'removed' || gone === 'absent' ? 'removed' : `left at ${staged.scratch}`}; the PR body is stale until gstack-pr-body publish`);
     for (const line of rb.detail) d.out(line);
     return SYNC_EXIT.SYNCED;
   });
@@ -930,14 +1009,20 @@ function cmdRetrigger(c: Ctx): number {
   });
 }
 
+/**
+ * Removes the staged sync, or the scratch an interrupted merge left behind.
+ * Refuses (50, nothing touched) when the path holds anything this tool did
+ * not make.
+ */
 function cmdAbort(c: Ctx): number {
   return withPrLock(c.stateDir, () => {
     const staged = readStagedSync(c.stateDir, c.pr);
-    const root = c.f.worktreeRoot ?? path.join(os.homedir(), 'worktrees', c.repo.split('/')[1]);
-    const scratch = staged?.scratch ?? path.join(root, `${c.topic}-sync`);
-    if (fs.existsSync(scratch)) removeScratch(c, scratch);
+    const scratch = staged?.scratch ?? defaultScratch(c);
+    const gone = removeScratch(c, scratch);
+    if (gone === 'foreign') throw new PrContextError(`${scratch} is not a scratch worktree gstack-pr-sync made: nothing was touched (move it away, then re-run abort)`, SYNC_EXIT.DIRTY);
+    if (gone === 'failed') throw new PrContextError(`git worktree remove could not remove ${scratch}; the staged sync is kept`, SYNC_EXIT.ERROR);
     fs.rmSync(syncFile(c.stateDir), { force: true });
-    c.d.out(`RESULT ABORTED scratch=${scratch}`);
+    c.d.out(`RESULT ABORTED scratch=${scratch} (${gone})`);
     return SYNC_EXIT.SYNCED;
   });
 }
