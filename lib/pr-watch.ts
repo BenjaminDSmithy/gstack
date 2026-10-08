@@ -431,6 +431,22 @@ function printSignals(d: WatchDeps, r: PollResult, n: number): void {
   }
 }
 
+/**
+ * The PR an existing watch.json names when that is another PR, else null
+ * (absent, this PR, or unreadable: the runner skips an unreadable one, so
+ * replacing or removing it loses nothing).
+ */
+function watchedElsewhere(file: string, repo: string, n: number): string | null {
+  let w: { repo?: unknown; number?: unknown };
+  try {
+    w = JSON.parse(fs.readFileSync(file, 'utf8')) as typeof w;
+  } catch {
+    return null;
+  }
+  if (typeof w?.repo !== 'string' || typeof w.number !== 'number') return null;
+  return w.repo.toLowerCase() === repo.toLowerCase() && w.number === n ? null : `${w.repo}#${w.number}`;
+}
+
 function cmdSize(d: WatchDeps, f: Flags): number {
   const repo = f.repo ?? upstreamRepoFromGh(d.gh, f.cwd);
   let ours: SizeSample & { commits: number };
@@ -513,16 +529,23 @@ export async function watchMain(argv: string[], deps: Partial<WatchDeps> = {}): 
         return 0;
       });
     }
+    // One watch.json per topic dir, and topicFor folds `pr/x` and `x` together
+    // (a fork PR and its upstream PR from one checkout): never replace or
+    // remove a watch that names another PR.
     const watchFile = path.join(dir, 'watch.json');
-    if (f.sub === 'enable') {
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(watchFile, JSON.stringify({ v: 1, repo, number: n, cwd: f.cwd }, null, 2) + '\n', { mode: 0o600 });
-      d.out(`RESULT ENABLED ${watchFile}`);
-    } else {
-      fs.rmSync(watchFile, { force: true });
-      d.out(`RESULT DISABLED ${watchFile}`);
-    }
-    return 0;
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    return withPrLock(dir, () => {
+      const other = watchedElsewhere(watchFile, repo, n);
+      if (other) throw new PrContextError(`${watchFile} watches ${other}, not ${repo}#${n}; disable that one first`, 30);
+      if (f.sub === 'enable') {
+        fs.writeFileSync(watchFile, JSON.stringify({ v: 1, repo, number: n, cwd: f.cwd }, null, 2) + '\n', { mode: 0o600 });
+        d.out(`RESULT ENABLED ${watchFile}`);
+      } else {
+        fs.rmSync(watchFile, { force: true });
+        d.out(`RESULT DISABLED ${watchFile}`);
+      }
+      return 0;
+    });
   } catch (error) {
     if (error instanceof PrContextError) {
       d.out(`RESULT ${error.code === 2 ? 'USAGE' : 'ERROR'} ${error.message}`);
