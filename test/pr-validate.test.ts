@@ -63,6 +63,17 @@ describe('validationEnv', () => {
     expect(cfg.stdout.trim()).toBe('free-tests-ci@gstack.test');
   });
 
+  test('the caller\'s gh login and git\'s system credential helper are out of reach, as in CI\'s free lane', () => {
+    const dir = path.join(ROOT, 'creds');
+    fs.mkdirSync(dir, { recursive: true });
+    const env = validationEnv({ ...process.env, GH_CONFIG_DIR: path.join(dir, 'real-gh'), GIT_CONFIG_NOSYSTEM: '0' }, dir, null, writeCiGitConfig(dir));
+    expect(env.GH_CONFIG_DIR).toBe(path.join(dir, 'gh-config'));
+    // Homebrew's system gitconfig carries credential.helper=osxkeychain; CI's global config has no helper.
+    const r = spawnSync('git', ['config', '--get-all', 'credential.helper'], { cwd: dir, env, encoding: 'utf8', timeout: 30_000 });
+    expect(r.stdout.trim()).toBe('');
+    expect(env.GIT_CONFIG_NOSYSTEM).toBe('1');
+  });
+
   test('drops every bun agent-mode trigger and every credential-shaped name; keeps look-alike metadata', () => {
     const gone = ['AGENT', 'REPL_ID', 'ANTHROPIC_AUTH_TOKEN', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'GITHUB_TOKEN_1', 'GH_PAT',
       'GOOGLE_APPLICATION_CREDENTIALS', 'NPM_TOKEN', 'HF_TOKEN', 'SSH_AUTH_SOCK', 'HOMEBREW_GITHUB_API_TOKEN', 'DB_PASSWORD'];
