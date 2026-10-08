@@ -595,8 +595,8 @@ function cmdPublish(c: Ctx): number {
     const live = liveBody(c);
     const lost = lostOwnerContent(live, body);
     if (lost.length) {
-      printOwnerContent(d, 'LOST', lost, c.pr.number);
       d.out('RESULT REFUSED the outgoing body would drop live owner content');
+      printOwnerContent(d, 'LOST', lost, c.pr.number);
       return BODY_EXIT.REFUSED;
     }
     if (count(body, FACTS_BEGIN) !== 1 || count(body, FACTS_END) !== 1) {
@@ -606,13 +606,13 @@ function cmdPublish(c: Ctx): number {
     const revs = pinnedRevs(c);
     const lint = lintBody(body, lintContext(c, c.pr.headOid, revs[1] ?? null));
     if (lint.length) {
-      for (const l of lint) d.out(`LINT ${l}`);
       d.out('RESULT REFUSED lint');
+      for (const l of lint) d.out(`LINT ${l}`);
       return BODY_EXIT.REFUSED;
     }
     if (liveChanged(c, live) && !c.f.acceptLiveDiff) {
+      d.out('RESULT REFUSED the live body is not the one we last published (owner edit, or the first publish over a hand-written body): show the owner the diff below, then pass --accept-live-diff');
       d.out(envelope(diffLines(live, body), `pr-${c.pr.number}-live-vs-new`));
-      d.out('RESULT REFUSED the live body is not the one we last published (owner edit, or the first publish over a hand-written body): show the owner the diff above, then pass --accept-live-diff');
       return BODY_EXIT.REFUSED;
     }
     // Scan exactly the bytes that will be sent.
@@ -621,14 +621,14 @@ function cmdPublish(c: Ctx): number {
     const high = result.findings.filter(f => f.severity === 'HIGH');
     const medium = result.findings.filter(f => f.severity === 'MEDIUM');
     if (high.length || result.oversize) {
+      d.out(`RESULT REDACTION blocked (${result.oversize ? 'too large to scan' : 'HIGH'})`);
       for (const f of high) d.out(`REDACTION HIGH ${findingKey(f)} ${f.description} ${f.preview}`);
-      d.out('RESULT REDACTION blocked (HIGH)');
       return BODY_EXIT.REDACTION;
     }
     const unconfirmed = medium.filter(f => !c.f.confirm.includes(findingKey(f)));
     if (unconfirmed.length) {
-      for (const f of unconfirmed) d.out(`REDACTION MEDIUM ${findingKey(f)} ${f.description} ${f.preview}`);
       d.out('RESULT REDACTION each MEDIUM finding needs the owner\'s confirmation: --confirm-redaction <key,...>');
+      for (const f of unconfirmed) d.out(`REDACTION MEDIUM ${findingKey(f)} ${f.description} ${f.preview}`);
       return BODY_EXIT.REDACTION;
     }
     const state = readStateFor(c.stateDir, c.pr);
@@ -647,8 +647,8 @@ function cmdPublish(c: Ctx): number {
     const facts = /<!-- pr-prep:facts:begin v1 -->[\s\S]*?<!-- pr-prep:facts:end -->/.exec(body)?.[0] ?? '';
     if (vanished.length || (facts && !after.includes(facts))) {
       fs.writeFileSync(restore, live, { mode: 0o600 });
-      printOwnerContent(d, 'VANISHED', vanished, c.pr.number);
       d.out(`RESULT ERROR the read-back does not hold what was sent (a concurrent web edit?). The pre-publish body is saved at ${restore}; do not re-edit automatically, tell the owner.`);
+      printOwnerContent(d, 'VANISHED', vanished, c.pr.number);
       return BODY_EXIT.ERROR;
     }
     writeState(c.stateDir, { ...(state ?? freshState(c.pr)), lastPublishedBodySha256: sha256(after), bodyStaleSince: null });

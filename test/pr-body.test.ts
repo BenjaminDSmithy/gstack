@@ -352,6 +352,7 @@ describe('publish', () => {
     expect(await f.call(['publish', '--body', file])).toBe(2);
     f.out.length = 0;
     expect(await f.call(['publish', '--body', file, '--yes'])).toBe(20);
+    expect(f.out[0]).toMatch(/^RESULT REFUSED /);
     expect(f.out.join('\n')).toContain('BEGIN UNTRUSTED TRACKER CONTENT');
     expect(f.edits).toHaveLength(0);
     const home = path.join(f.base, 'home');
@@ -373,6 +374,7 @@ describe('publish', () => {
     const file = await rendered(f, tmpl);
     f.out.length = 0;
     expect(await f.call(['publish', '--body', file, '--yes', '--accept-live-diff'])).toBe(22);
+    expect(f.out[0]).toMatch(/^RESULT REDACTION /);
     const keys = f.out.filter(l => l.startsWith('REDACTION MEDIUM')).map(l => l.split(' ')[2]);
     expect(keys).toHaveLength(1);
     expect(keys[0]).toStartWith('pii.ip_public@');
@@ -389,7 +391,10 @@ describe('publish', () => {
     expect(f.out.some(l => l.startsWith('LINT') && l.includes('version claim'))).toBe(true);
     const bad = path.join(f.base, 'bad.md');
     fs.writeFileSync(bad, normalizeBody(spliceFacts(TEMPLATE.replace('Because.', 'Because 1.0.2.0 is claimed by #12.'), renderFactsBlock(FACTS))));
+    f.out.length = 0;
     expect(await f.call(['publish', '--body', bad, '--yes', '--accept-live-diff'])).toBe(20);
+    expect(f.out[0]).toMatch(/^RESULT REFUSED /);
+    expect(f.out.some(l => l.startsWith('LINT') && l.includes('version claim'))).toBe(true);
     expect(f.edits).toHaveLength(0);
     const two = path.join(f.base, 'two.md');
     fs.writeFileSync(two, normalizeBody(`${renderFactsBlock({ ...FACTS, head: '0'.repeat(40) })}\n\n${spliceFacts(TEMPLATE, renderFactsBlock(FACTS))}`));
@@ -407,6 +412,7 @@ describe('publish', () => {
     const wfile = await rendered(web);
     web.out.length = 0;
     expect(await web.call(['publish', '--body', wfile, '--yes', '--accept-live-diff'])).toBe(1);
+    expect(web.out[0]).toMatch(/^RESULT ERROR /);
     expect(web.edits).toHaveLength(1);
     expect(web.out.some(l => l.startsWith('VANISHED attachment'))).toBe(true);
     expect(fs.readdirSync(web.dir).some(n => n.startsWith('pr-body-restore-'))).toBe(true);

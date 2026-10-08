@@ -1,4 +1,7 @@
 #!/usr/bin/env bun
 import { bodyMain } from '../lib/pr-body';
 
-process.exit(await bodyMain(process.argv.slice(2)));
+// process.exit() discards stdout still buffered in a pipe: past 64 KiB (a
+// large live-vs-new diff) a slow reader lost the envelope's END marker. Set
+// the code and let the runtime drain stdout, as bin/gstack-redact does.
+process.exitCode = await bodyMain(process.argv.slice(2));
