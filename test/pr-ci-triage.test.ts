@@ -35,6 +35,16 @@ describe('pure classification', () => {
     expect(draftable(t)).toBe(true);
   });
 
+  test('every GetQueuedCompletionStatusEx abort is an IOCP crash: error 6 (#3032 run 37265273040) and CRLF endings', () => {
+    const t = classifyShard(1, result('37265273040'), read('37265273040-shard.log.txt'));
+    expect(t).toMatchObject({ klass: 'CRASH', signature: 'IOCP', inFlight: 'browse/test/handoff.test.ts', failLines: 0 });
+    expect(t.why).toMatch(/GetQueuedCompletionStatusEx error 6\b/);
+    expect(t.why).not.toContain('735');
+    expect(draftable(t)).toBe(true);
+    const crlf = '::group::test\\a.test.ts:\r\n(pass) x [1.00ms]\r\nGetQueuedCompletionStatusEx: (735) ERROR_ABANDONED_WAIT_0\r\r\n';
+    expect(classifyShard(4, result('37346036310'), crlf)).toMatchObject({ klass: 'CRASH', signature: 'IOCP', inFlight: 'test/a.test.ts' });
+  });
+
   test('a hang is HANG, but draftable only with same-tree evidence', () => {
     const t = classifyShard(5, result('37347305098'), read('37347305098-shard.log.txt'));
     expect(t.klass).toBe('HANG');

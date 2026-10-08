@@ -1,0 +1,40 @@
+
+::endgroup::
+
+::group::browse\test\extension-token.test.ts:
+[browse] Parent-process watchdog disabled (BROWSE_PARENT_PID=0)
+(pass) GET /health never carries a token (IRON RULE) > headed mode: no token field in the body [44.71ms]
+(pass) GET /health never carries a token (IRON RULE) > chrome-extension Origin (even the pinned one): no token field [42.65ms]
+(pass) GET /health never carries a token (IRON RULE) > headed mode AND pinned chrome-extension Origin together: still no token [43.06ms]
+(pass) GET /health is liveness-only > default mode: no token, security, browsing-state or chat fields; terminal port survives [42.47ms]
+(pass) GET /health is liveness-only > headed mode + pinned extension Origin: no token, security, browsing-state or chat fields; terminal port survives [42.30ms]
+(pass) POST /extension-token pinned-origin bootstrap > pinned Origin + Host with port → 200 with the token [46.46ms]
+(pass) POST /extension-token pinned-origin bootstrap > Host 'localhost:34567' is accepted too (C9 hostname parse) [46.82ms]
+(pass) POST /extension-token pinned-origin bootstrap > wrong extension Origin → 403, no token, no detail [43.18ms]
+(pass) POST /extension-token pinned-origin bootstrap > gstack-config browse_extension_id moves the token to the configured extension; the env var does not [45.63ms]
+(pass) POST /extension-token pinned-origin bootstrap > missing Origin → 403 [43.60ms]
+(pass) POST /extension-token pinned-origin bootstrap > web-page Origin → 403 (DNS-rebinding page cannot mint a token) [42.18ms]
+(pass) POST /extension-token pinned-origin bootstrap > non-loopback Host → 403 even with the pinned Origin [42.23ms]
+(pass) POST /extension-token pinned-origin bootstrap > malformed Host → 403, not a crash [42.76ms]
+(pass) POST /extension-token pinned-origin bootstrap > tunnel surface 404s /extension-token (not in TUNNEL_PATHS) [60.66ms]
+
+::endgroup::
+
+::group::browse\test\find-browse.test.ts:
+(pass) locateBinary > returns null when no binary exists at known paths [33.80ms]
+(pass) locateBinary > returns string path when binary exists [0.82ms]
+(pass) locateBinary > priority chain checks .codex, .agents, .claude markers [0.27ms]
+(pass) locateBinary > function signature accepts no arguments [0.04ms]
+(pass) locateBinary > source-checkout fallback resolves <git-root>/browse/dist/browse[.exe] [0.16ms]
+
+::endgroup::
+
+::group::browse\test\handoff.test.ts:
+(pass) failure tracking > getFailureHint returns null when below threshold [0.11ms]
+(pass) failure tracking > getFailureHint returns hint after 3 consecutive failures [0.06ms]
+(pass) failure tracking > hint suppressed when already headed [0.04ms]
+(pass) failure tracking > resetFailures clears the counter [0.06ms]
+(pass) failure tracking > getIsHeaded returns false by default [0.04ms]
+(pass) saveState > captures cookies and page URLs [90.23ms]
+(pass) saveState > captures localStorage and sessionStorage [32.44ms]
+GetQueuedCompletionStatusEx: (6) The handle is invalid.
