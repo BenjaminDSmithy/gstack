@@ -12,7 +12,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { classifyActor, signalsFrom, sizeVerdict, percentile, watchMain, pollForWrite, SEED_PROXIES } from '../lib/pr-watch';
+import { classifyActor, signalsFrom, sizeVerdict, percentile, watchMain, pollForWrite, absorptionOf, SEED_PROXIES } from '../lib/pr-watch';
 import { prStateDir, topicFor, readStateFor, defaultGit, type GhRunner } from '../lib/pr-context';
 
 setDefaultTimeout(120_000);
@@ -77,6 +77,41 @@ describe('classification', () => {
     expect(signalsFrom({ ...base, comments: [], timeline: referenced, absorbed: [{ sha, credit: true, cites: false }] }).find(s => s.id.startsWith('absorbed:'))).toMatchObject({ level: 'P0', kind: 'absorbed-with-credit' });
     expect(signalsFrom({ ...base, comments: [], pull: { state: 'open', mergeable_state: 'dirty', head: { sha: 'b'.repeat(40) } } })[0]).toMatchObject({ level: 'P1', kind: 'mergeable-dirty' });
     expect(signalsFrom({ ...base, comments: [], pull: { state: 'open', mergeable_state: 'blocked' } })).toEqual([]);
+  });
+});
+
+describe('absorption wording and credit (absorptionOf)', () => {
+  const ids = { login: 'BenjaminDSmithy', emails: ['benjamin.smith@binarysword.com'], names: ['Benjamin D. Smith'] };
+  // ad8400543 (v1.69.0.0) absorbed garrytan/gstack#2640: subject, its two `Absorbed from PR` lines and
+  // part of its trailer block (the owner's name-form line kept, personal addresses of others dropped).
+  const ad8400543 = fs.readFileSync(path.join(FX, 'commit-ad8400543.txt'), 'utf8');
+
+  test("ad8400543 names #2640 as `PR #2640` and credits the owner by git name and email", () => {
+    expect(absorptionOf(ad8400543, 2640, ids)).toEqual({ cites: false, mentions: true, credit: true });
+    expect(absorptionOf(ad8400543, 264, ids).mentions).toBe(false);
+    expect(absorptionOf(ad8400543, 2640, { login: 'BenjaminDSmithy', emails: [], names: [] }).credit).toBe(false);
+  });
+
+  test('credit forms: the login as the name, the noreply address with or without its id, never a longer login', () => {
+    const trailer = (t: string) => absorptionOf(`fix: x (#5)\n\nCo-authored-by: ${t}`, 5, { login: 'dgrant', emails: [], names: [] });
+    expect(trailer('dgrant <dgrant@users.noreply.github.com>')).toEqual({ cites: true, mentions: false, credit: true });
+    expect(trailer('D Grant <123456+DGrant@users.noreply.github.com>').credit).toBe(true);
+    expect(trailer('dgrantham <dgrantham@users.noreply.github.com>').credit).toBe(false);
+    expect(trailer('dgrant-bot <99+dgrant-bot@users.noreply.github.com>').credit).toBe(false);
+  });
+
+  test('signals: named with our credit is P0, named without it is P1 attention, (#N) alone is P0', () => {
+    const base = { number: 1, self: 'me', proxies, maintainers, pull: { state: 'open' }, comments: [], reviews: [], timeline: [] };
+    const sha = 'a'.repeat(40);
+    const one = (a: { credit: boolean; cites?: boolean; mentions?: boolean }) => signalsFrom({ ...base, absorbed: [{ sha, ...a }] }).map(s => [s.level, s.kind]);
+    expect(one({ credit: true, mentions: true })).toEqual([['P0', 'absorbed-with-credit']]);
+    expect(one({ credit: false, mentions: true })).toEqual([['P1', 'named-on-base']]);
+    expect(one({ credit: false, cites: true })).toEqual([['P0', 'cited-on-base']]);
+  });
+
+  test("the maintainer's 'Absorbed into the wave' notice on #2640 is a supersede notice (P0)", () => {
+    const s = signalsFrom({ number: 2640, self: 'BenjaminDSmithy', proxies, maintainers, pull: { state: 'open' }, comments: load('comments-2640.json'), reviews: [], timeline: [], absorbed: [] });
+    expect(s.map(x => [x.level, x.kind, x.id])).toEqual([['P0', 'superseded-comment', 'comment:5401509698']]);
   });
 });
 
@@ -367,6 +402,29 @@ describe('poll, ack and the write gate', () => {
     const elsewhere = await poll('credited-elsewhere', 'fix: wave (#99)\n\nCo-authored-by: me <me@example.com>');
     expect(elsewhere.code, elsewhere.text).toBe(0);
     expect(elsewhere.text).toMatch(/INFO\tabsorbed:[0-9a-f]{12}\tcredited-elsewhere/);
+  });
+
+  test("upstream's other absorption form, 'Absorbed from PR #N' with a name-form trailer, is ABSORBED-WITH-CREDIT", async () => {
+    // ad8400543's shape: the owner credited by git name and email, the PR named as `PR #N` (no `(#N)`).
+    const poll = async (name: string, msg: string) => {
+      const t = topology(name, msg);
+      git(t.clone, 'config', 'user.name', 'Owner Name');
+      git(t.clone, 'config', 'user.email', 'owner@example.com');
+      const out: string[] = [];
+      const code = await watchMain(['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone], { gh: fakeGh(t, { comments: [] }), env: { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') }, out: l => out.push(l) });
+      return { code, text: out.join('\n') };
+    };
+    const absorbed = await poll('absorbed-from', 'fix: the wave (#99)\n\nAbsorbed from PR #7 with authorship preserved.\n\nCo-authored-by: Owner Name <owner@example.com>');
+    expect(absorbed.code, absorbed.text).toBe(10);
+    expect(absorbed.text).toMatch(/SIGNAL\tP0\tabsorbed:[0-9a-f]{12}\tabsorbed-with-credit/);
+    // A version-queue note names a PR the same way without absorbing it: attention, not SUPERSEDED.
+    const queued = await poll('named-only', 'chore: queue\n\nVERSION drift: PR #7 claims v1.2.0.0');
+    expect(queued.code, queued.text).toBe(11);
+    expect(queued.text).toMatch(/SIGNAL\tP1\tabsorbed:[0-9a-f]{12}\tnamed-on-base/);
+    // Credit is the owner's login exactly, never a login it prefixes (dgrant is not dgrantham).
+    const prefix = await poll('login-prefix', 'fix: other (#99)\n\nCo-authored-by: meow <meow@users.noreply.github.com>');
+    expect(prefix.code, prefix.text).toBe(0);
+    expect(prefix.text).not.toContain('absorbed:');
   });
 
   test('an endpoint that does not answer is UNVERIFIED, never quiet', async () => {
