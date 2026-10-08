@@ -36,7 +36,7 @@ import path from 'node:path';
 import {
   PrContextError, RELEASE_FILES, defaultGh, defaultGit, parsePrRefFor, upstreamRepoFromGh, remoteForRepo,
   pinBranch, readPr, viewerLogin, assertWritableIdentity, topicFor, prStateDir, readStateFor, writeState,
-  withPrLock, receiptedSend, requireApproval, envelope,
+  withPrLock, receiptedSend, requireApproval, envelope, stripControl,
   type GhResult, type GhRunner, type GitRunner, type PrInfo, type PrState,
 } from './pr-context';
 import { parseChecks, bucketClass } from './ci-gate';
@@ -59,7 +59,10 @@ The PR description is an owner template plus one regenerated facts block.
   publish   re-fetch, re-check (the facts block must be the one facts or
             render last generated for the head), redaction-scan the exact
             bytes, then gh pr edit --body-file (needs --yes and
-            --body-sha256); read back and verify
+            --body-sha256); read back and verify, whatever gh exited
+            with. A live body that already is the outgoing body (an
+            earlier edit whose read-back failed) is recorded with no
+            edit: RESULT PUBLISHED ... already-live=yes
   check     liveness: screenshot attached, box 1 ticked, no placeholder,
             every asset URL answers 200
 
@@ -931,6 +934,10 @@ function cmdPublish(c: Ctx): number {
       if (r.status !== 0) throw new PrContextError(`the body has been stale since the push of ${s12(stale)}, which is not in the PR head's history (${s12(now.headOid)}); find out what replaced that push before publishing`, BODY_EXIT.PRECONDITION);
     }
     const live = liveBody(c);
+    // GitHub already holds exactly the approved bytes: an earlier publish
+    // whose edit landed but whose read-back failed, or gh pr edit exiting
+    // non-zero after GitHub took the body. Record it; there is nothing to send.
+    if (live === body) return recordPublished(c, state, body, factsHead, stale, ['already-live=yes']);
     const lost = lostOwnerContent(live, body);
     if (lost.length) {
       d.out('RESULT REFUSED the outgoing body would drop live owner content');
@@ -942,9 +949,8 @@ function cmdPublish(c: Ctx): number {
     if (liveChanged(c, live) && !(c.f.acceptLiveDiff && key.startsWith(c.f.acceptLiveDiff))) {
       const again = c.f.acceptLiveDiff ? ' (the live body or the outgoing body changed after the diff the owner accepted)' : '';
       d.out(`RESULT REFUSED live-diff=${pair} the live body (sha256 ${sha256(live).slice(0, 12)}) is not the one we last published${again} (an owner or maintainer edit, or the first publish over a hand-written body): show the owner the diff below; on their yes pass --accept-live-diff ${pair}`);
-      const diff = lineDiff(live, body);
-      if (!diff) throw new PrContextError('the live body differs from the outgoing one but their diff is empty', 1);
-      d.out(envelope(diff, `pr-${c.pr.number}-live-vs-new`));
+      // Never empty: lineDiff is '' only for equal texts, handled above.
+      d.out(envelope(lineDiff(live, body), `pr-${c.pr.number}-live-vs-new`));
       return BODY_EXIT.REFUSED;
     }
     const waited = d.now().getTime() - gateAt;
@@ -954,36 +960,68 @@ function cmdPublish(c: Ctx): number {
     }
     const sendFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-pr-body-')), 'body.md');
     fs.writeFileSync(sendFile, body, { mode: 0o600 });
+    // A failed gh pr edit is not proof that nothing changed (a timeout or a
+    // 502 after GitHub took the body), so the body is read back either way
+    // and the read-back decides.
+    let editFailure: string | null = null;
     try {
       const r: GhResult = receiptedSend({ host: 'github.com', payloadClass: 'pr-body-edit', consent: 'user ran /pr-prep', payload: Buffer.from(body), env: d.env }, () =>
         d.gh(['pr', 'edit', String(c.pr.number), '--repo', c.repo, '--body-file', sendFile]));
-      if (r.status !== 0) throw new PrContextError(`gh pr edit failed: ${(r.error ?? r.stderr).trim().split('\n').at(-1)}`, 1);
+      if (r.status !== 0) editFailure = stripControl((r.error ?? r.stderr).trim().split('\n').at(-1) || `exit ${r.status}`);
     } finally {
       fs.rmSync(path.dirname(sendFile), { recursive: true, force: true });
+    }
+    let after: string;
+    try {
+      after = liveBody(c);
+    } catch (error) {
+      if (!(error instanceof PrContextError)) throw error;
+      const restore = saveRestore(c, live);
+      d.out(`RESULT ERROR the edit was sent${editFailure ? ` (gh pr edit reported: ${editFailure})` : ''} but the read-back failed (${error.message}), so what GitHub holds is unknown. The pre-publish body is saved at ${restore}. Tell the owner; with their yes, run this publish again: it records the publish with no second edit when GitHub holds exactly this body ${staleField(c)}`);
+      return BODY_EXIT.ERROR;
+    }
+    if (after === body) return recordPublished(c, state, body, factsHead, stale, [], editFailure ? [`NOTE gh pr edit reported "${editFailure}", but the read-back is exactly the body sent`] : []);
+    if (editFailure && after === live) {
+      d.out(`RESULT ERROR gh pr edit failed: ${editFailure}; the read-back shows the live body unchanged ${staleField(c)}`);
+      return BODY_EXIT.ERROR;
     }
     // The read-back must hold exactly the bytes sent. Anything else (a web
     // save or a bot edit in the window) is reported, and the stored body is
     // NOT recorded as ours, so the next publish shows the difference.
-    const after = liveBody(c);
-    if (after !== body) {
-      const restore = path.join(c.stateDir, `pr-body-restore-${d.now().toISOString().replace(/[:.]/g, '-')}.md`);
-      fs.writeFileSync(restore, live, { mode: 0o600 });
-      d.out(`RESULT ERROR the read-back is not the body sent (a concurrent web edit?). The pre-publish body is saved at ${restore}; do not re-edit automatically, tell the owner. The difference, sent -> stored, follows.`);
-      printOwnerContent(d, 'VANISHED', lostOwnerContent(live, after), c.pr.number);
-      d.out(envelope(lineDiff(body, after), `pr-${c.pr.number}-sent-vs-stored`));
-      return BODY_EXIT.ERROR;
-    }
-    writeState(c.stateDir, { ...(state ?? freshState(c.pr)), lastPublishedBodySha256: sha256(body), bodyStaleSince: null });
-    const block = body.match(FACTS_BLOCK_RE)?.[0] ?? '';
-    const published: PublishedFacts = {
-      v: 1, at: d.now().toISOString(), head: factsHead, patchId: /patch-id `([0-9a-f]{12})`/.exec(block)?.[1] ?? '', bodySha256: sha256(body),
-    };
-    fs.writeFileSync(path.join(c.stateDir, PUBLISHED_FACTS), JSON.stringify(published, null, 2) + '\n', { mode: 0o600 });
-    fs.writeFileSync(path.join(c.stateDir, `pr-body-${today(d)}.published.md`), body, { mode: 0o600 });
-    d.out(`RESULT PUBLISHED pr=${c.pr.number} sha256=${sha256(body).slice(0, 12)} head=${factsHead} body-stale-since=none cleared-stale=${stale ? s12(stale) : 'none'}`);
-    d.out('WARNING if the owner has the PR description open for editing in a browser tab, they must cancel that edit: saving it overwrites this body and its screenshot.');
-    return BODY_EXIT.OK;
+    const restore = saveRestore(c, live);
+    d.out(`RESULT ERROR the read-back is not the body sent (a concurrent web edit?${editFailure ? `; gh pr edit reported: ${editFailure}` : ''}). The pre-publish body is saved at ${restore}; do not re-edit automatically, tell the owner. The difference, sent -> stored, follows. ${staleField(c)}`);
+    printOwnerContent(d, 'VANISHED', lostOwnerContent(live, after), c.pr.number);
+    d.out(envelope(lineDiff(body, after), `pr-${c.pr.number}-sent-vs-stored`));
+    return BODY_EXIT.ERROR;
   });
+}
+
+/** The live body as it was before this publish, for the owner to restore by hand. */
+function saveRestore(c: Ctx, live: string): string {
+  const restore = path.join(c.stateDir, `pr-body-restore-${c.d.now().toISOString().replace(/[:.]/g, '-')}.md`);
+  fs.mkdirSync(c.stateDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(restore, live, { mode: 0o600 });
+  return restore;
+}
+
+/**
+ * GitHub holds exactly `body`: record it as ours (state, the published facts
+ * the next "since the last publish" compares with, a copy) and clear the
+ * stale mark, then print the one RESULT line.
+ */
+function recordPublished(c: Ctx, state: PrState | null, body: string, factsHead: string, stale: string | null, fields: string[], notes: string[] = []): number {
+  const { d } = c;
+  writeState(c.stateDir, { ...(state ?? freshState(c.pr)), lastPublishedBodySha256: sha256(body), bodyStaleSince: null });
+  const block = body.match(FACTS_BLOCK_RE)?.[0] ?? '';
+  const published: PublishedFacts = {
+    v: 1, at: d.now().toISOString(), head: factsHead, patchId: /patch-id `([0-9a-f]{12})`/.exec(block)?.[1] ?? '', bodySha256: sha256(body),
+  };
+  fs.writeFileSync(path.join(c.stateDir, PUBLISHED_FACTS), JSON.stringify(published, null, 2) + '\n', { mode: 0o600 });
+  fs.writeFileSync(path.join(c.stateDir, `pr-body-${today(d)}.published.md`), body, { mode: 0o600 });
+  d.out(`RESULT PUBLISHED pr=${c.pr.number} sha256=${sha256(body).slice(0, 12)} head=${factsHead} ${[...fields, 'body-stale-since=none'].join(' ')} cleared-stale=${stale ? s12(stale) : 'none'}`);
+  for (const n of notes) d.out(n);
+  d.out('WARNING if the owner has the PR description open for editing in a browser tab, they must cancel that edit: saving it overwrites this body and its screenshot.');
+  return BODY_EXIT.OK;
 }
 
 /** VERSION and CHANGELOG at the given revisions, from git objects only. */

@@ -202,7 +202,16 @@ function write(dir: string, rel: string, text: string): void {
 /** A package.json whose `version` sits between two keys no test changes. */
 const pkgJson = (version: string, extra: Record<string, unknown> = {}) => `${JSON.stringify({ name: 'gx', version, private: true, ...extra }, null, 2)}\n`;
 
-function fixture(name: string, liveInitial: string, opts: { state?: string; viewer?: string; webEditDropsImages?: boolean; headLag?: boolean | 'first'; sideMerge?: boolean; comments?: unknown[]; storeEdit?: (sent: string) => string; ciChangesTree?: boolean } = {}) {
+function fixture(name: string, liveInitial: string, opts: {
+  state?: string; viewer?: string; webEditDropsImages?: boolean; headLag?: boolean | 'first'; sideMerge?: boolean; comments?: unknown[];
+  storeEdit?: (sent: string) => string; ciChangesTree?: boolean;
+  // gh pr edit applies the body, then exits with this status (a timeout or a 502 after GitHub took it).
+  editExit?: number;
+  // gh pr edit fails without applying anything.
+  editFails?: boolean;
+  // The next N body reads after an edit fail with a 502.
+  failReadsAfterEdit?: number;
+} = {}) {
   const base = path.join(ROOT, name);
   const up = path.join(base, 'up', 'acme', 'gx.git');
   const fork = path.join(base, 'fork', 'me', 'gx.git');
@@ -247,6 +256,7 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
   // Every gh and git call in order: `gh body-read`, `gh pr-edit`, `git fetch`, ...
   const log: string[] = [];
   let views = 0;
+  let failReads = opts.failReadsAfterEdit ?? 0;
   const gh = ((args: string[]) => {
     const ok = (stdout: string) => ({ status: 0, stdout, stderr: '' });
     log.push(args[0] === 'api' && args[1] === 'repos/acme/gx/pulls/9' && args.includes('--jq') ? 'gh body-read' : args[0] === 'pr' && args[1] === 'edit' ? 'gh pr-edit' : `gh ${args.slice(0, 2).join(' ')}`);
@@ -254,7 +264,13 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
       return ok(JSON.stringify({ number: 9, state: opts.state ?? 'OPEN', isDraft: false, headRefOid: git(fork, 'rev-parse', opts.headLag === true || (opts.headLag === 'first' && views++ === 0) ? 'refs/heads/pr/b^' : 'refs/heads/pr/b'), url: 'https://github.com/acme/gx/pull/9', headRepositoryOwner: { login: 'me' }, headRepository: { name: 'gx' }, headRefName: 'pr/b', baseRefName: 'main' }));
     }
     if (args[0] === 'api' && args[1] === 'user') return ok(`${opts.viewer ?? 'me'}\n`);
-    if (args[0] === 'api' && args[1] === 'repos/acme/gx/pulls/9' && args.includes('--jq')) return ok(live.endsWith('\n') ? live : `${live}\n`);
+    if (args[0] === 'api' && args[1] === 'repos/acme/gx/pulls/9' && args.includes('--jq')) {
+      if (edits.length && failReads > 0) {
+        failReads--;
+        return { status: 1, stdout: '', stderr: 'HTTP 502: Bad Gateway (https://api.github.com/repos/acme/gx/pulls/9)' };
+      }
+      return ok(live.endsWith('\n') ? live : `${live}\n`);
+    }
     // gstack-pr-watch's poll, run by the default pre-write gate: a quiet PR.
     if (args[0] === 'api' && args[1] === 'repos/acme/gx/pulls/9') return ok(JSON.stringify({ state: 'open', merged: false, mergeable_state: 'clean', head: { sha: 'x' } }));
     if (args[0] === 'api' && args[1]?.startsWith('repos/acme/gx/issues/9/comments')) return ok(JSON.stringify(opts.comments ?? []));
@@ -263,11 +279,12 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
     if (args[0] === 'pr' && args[1] === 'list') return ok('[]');
     if (args[0] === 'pr' && args[1] === 'checks') return ok(JSON.stringify([{ name: 'free', bucket: 'pass', link: '' }, { name: 'win', bucket: 'fail', link: '' }, { name: 'docs', bucket: 'skipping', link: '' }]));
     if (args[0] === 'pr' && args[1] === 'edit') {
+      if (opts.editFails) return { status: 1, stdout: '', stderr: 'GraphQL: Something went wrong (updatePullRequest)' };
       const file = args[args.indexOf('--body-file') + 1];
       const sent = fs.readFileSync(file, 'utf8');
       edits.push(sent);
       live = opts.storeEdit ? opts.storeEdit(sent) : opts.webEditDropsImages ? sent.replace(/<img[^>]*>/g, '') : sent;
-      return ok('');
+      return opts.editExit ? { status: opts.editExit, stdout: '', stderr: 'gh: HTTP 502: Bad Gateway' } : ok('');
     }
     return { status: 1, stdout: '', stderr: `unexpected gh ${args.join(' ')}` };
   }) as GhRunner;
@@ -473,8 +490,14 @@ describe('publish', () => {
     expect(st.lastPublishedBodySha256).toBe(sha256(normalizeBody(f.getLive())));
     expect(st.bodyStaleSince).toBeNull();
     expect(listReceipts(home).filter(r => r.sink === 'pr-prep').at(-1)).toMatchObject({ payload_class: 'pr-body-edit', status: 'exit:0' });
-    // The second publish of an unchanged live body needs no live-diff acceptance.
+    // Publishing the same bytes again sends nothing: GitHub already holds them.
+    f.out.length = 0;
     expect(await f.publish(file)).toBe(0);
+    expect(f.out[0]).toMatch(/^RESULT PUBLISHED .*already-live=yes/);
+    expect(f.edits).toHaveLength(1);
+    // A new body over the live body we last published needs no live-diff acceptance.
+    const next = await rendered(f, TEMPLATE.replace('Because.', 'Because, reworded.'));
+    expect(await f.publish(next)).toBe(0);
     expect(f.edits).toHaveLength(2);
   });
 
@@ -533,6 +556,47 @@ describe('publish', () => {
     const gfile = await rendered(g);
     expect(await g.publish(gfile, ...g.acceptLive(gfile))).toBe(1);
     expect(fs.readdirSync(g.dir).some(n => n.startsWith('pr-body-restore-'))).toBe(true);
+  });
+
+  test('an edit that landed but was never read back is recorded by the next run, with no second edit', async () => {
+    const f = fixture('landed', TEMPLATE, { failReadsAfterEdit: 1 });
+    const file = await rendered(f);
+    const results = () => f.out.filter(l => l.startsWith('RESULT '));
+    f.out.length = 0;
+    expect(await f.publish(file, ...f.acceptLive(file))).toBe(1);
+    expect(results()).toHaveLength(1);
+    expect(f.out[0]).toMatch(/^RESULT ERROR the edit was sent .*read-back failed .*HTTP 502/);
+    expect(f.out[0]).toContain('body-stale-since=');
+    expect(f.edits).toHaveLength(1);
+    expect(fs.readdirSync(f.dir).some(n => n.startsWith('pr-body-restore-'))).toBe(true);
+    expect(readStateFor(f.dir, prRef)?.lastPublishedBodySha256 ?? null).toBeNull();
+    // The same publish again, as the owner's yes allows: GitHub holds exactly this body.
+    f.out.length = 0;
+    expect(await f.publish(file)).toBe(0);
+    expect(results()).toHaveLength(1);
+    expect(f.out[0]).toMatch(/^RESULT PUBLISHED .*already-live=yes/);
+    expect(f.edits).toHaveLength(1);
+    expect(readStateFor(f.dir, prRef)!.lastPublishedBodySha256).toBe(sha256(fs.readFileSync(file, 'utf8')));
+  });
+
+  test('gh pr edit failing after GitHub took the body is settled by the read-back; one that changed nothing is an error', async () => {
+    const f = fixture('edit-exit', TEMPLATE, { editExit: 1 });
+    const file = await rendered(f);
+    f.out.length = 0;
+    expect(await f.publish(file, ...f.acceptLive(file))).toBe(0);
+    expect(f.out.filter(l => l.startsWith('RESULT '))).toHaveLength(1);
+    expect(f.out[0]).toMatch(/^RESULT PUBLISHED /);
+    expect(f.out.some(l => l.startsWith('NOTE ') && l.includes('HTTP 502'))).toBe(true);
+    expect(readStateFor(f.dir, prRef)!.lastPublishedBodySha256).toBe(sha256(fs.readFileSync(file, 'utf8')));
+
+    const g = fixture('edit-fails', TEMPLATE, { editFails: true });
+    const gfile = await rendered(g);
+    g.out.length = 0;
+    expect(await g.publish(gfile, ...g.acceptLive(gfile))).toBe(1);
+    expect(g.out.filter(l => l.startsWith('RESULT '))).toHaveLength(1);
+    expect(g.out[0]).toMatch(/^RESULT ERROR gh pr edit failed: .*unchanged/);
+    expect(g.getLive()).toBe(TEMPLATE);
+    expect(readStateFor(g.dir, prRef)?.lastPublishedBodySha256 ?? null).toBeNull();
   });
 
   test('"changed/unchanged since the last publish" compares with the last publish, not the last render', async () => {
