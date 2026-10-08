@@ -180,7 +180,7 @@ function write(dir: string, rel: string, text: string): void {
   fs.writeFileSync(path.join(dir, rel), text);
 }
 
-function fixture(name: string, liveInitial: string, opts: { state?: string; viewer?: string; webEditDropsImages?: boolean; headLag?: boolean; sideMerge?: boolean; comments?: unknown[]; storeEdit?: (sent: string) => string } = {}) {
+function fixture(name: string, liveInitial: string, opts: { state?: string; viewer?: string; webEditDropsImages?: boolean; headLag?: boolean | 'first'; sideMerge?: boolean; comments?: unknown[]; storeEdit?: (sent: string) => string; ciChangesTree?: boolean } = {}) {
   const base = path.join(ROOT, name);
   const up = path.join(base, 'up', 'acme', 'gx.git');
   const fork = path.join(base, 'fork', 'me', 'gx.git');
@@ -211,7 +211,8 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
   git(seed, 'push', '-q', up, 'main');
   git(seed, 'checkout', '-q', 'pr/b');
   git(seed, 'merge', '-q', '--no-edit', 'main');
-  git(seed, 'commit', '-q', '--allow-empty', '-m', 'ci: re-run after a Bun IOCP crash');
+  if (opts.ciChangesTree) { write(seed, '.github/ci.yml', 'bun: 1.4.2\n'); git(seed, 'add', '-A'); }
+  git(seed, 'commit', '-q', '--allow-empty', '-m', opts.ciChangesTree ? 'ci: bump bun' : 'ci: re-run after a Bun IOCP crash');
   git(seed, 'push', '-q', fork, 'pr/b');
   const clone = path.join(base, 'clone');
   git(base, 'clone', '-q', fork, clone);
@@ -221,11 +222,12 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
   const edits: string[] = [];
   // Every gh and git call in order: `gh body-read`, `gh pr-edit`, `git fetch`, ...
   const log: string[] = [];
+  let views = 0;
   const gh = ((args: string[]) => {
     const ok = (stdout: string) => ({ status: 0, stdout, stderr: '' });
     log.push(args[0] === 'api' && args[1] === 'repos/acme/gx/pulls/9' && args.includes('--jq') ? 'gh body-read' : args[0] === 'pr' && args[1] === 'edit' ? 'gh pr-edit' : `gh ${args.slice(0, 2).join(' ')}`);
     if (args[0] === 'pr' && args[1] === 'view') {
-      return ok(JSON.stringify({ number: 9, state: opts.state ?? 'OPEN', isDraft: false, headRefOid: git(fork, 'rev-parse', opts.headLag ? 'refs/heads/pr/b^' : 'refs/heads/pr/b'), url: 'https://github.com/acme/gx/pull/9', headRepositoryOwner: { login: 'me' }, headRepository: { name: 'gx' }, headRefName: 'pr/b', baseRefName: 'main' }));
+      return ok(JSON.stringify({ number: 9, state: opts.state ?? 'OPEN', isDraft: false, headRefOid: git(fork, 'rev-parse', opts.headLag === true || (opts.headLag === 'first' && views++ === 0) ? 'refs/heads/pr/b^' : 'refs/heads/pr/b'), url: 'https://github.com/acme/gx/pull/9', headRepositoryOwner: { login: 'me' }, headRepository: { name: 'gx' }, headRefName: 'pr/b', baseRefName: 'main' }));
     }
     if (args[0] === 'api' && args[1] === 'user') return ok(`${opts.viewer ?? 'me'}\n`);
     if (args[0] === 'api' && args[1] === 'repos/acme/gx/pulls/9' && args.includes('--jq')) return ok(live.endsWith('\n') ? live : `${live}\n`);
@@ -282,6 +284,14 @@ describe('facts and render', () => {
     expect(facts.ci).toEqual({ pass: 1, fail: 1, pending: 0, skipping: 1, error: null });
   });
 
+  test('a ci: commit that changes the tree is code, not an empty re-run', async () => {
+    const f = fixture('facts-ci-tree', TEMPLATE, { ciChangesTree: true });
+    expect(await f.call(['facts'])).toBe(0);
+    const facts = JSON.parse(fs.readFileSync(path.join(f.dir, 'facts.json'), 'utf8')) as Facts;
+    expect(facts.emptyCi).toEqual([]);
+    expect(facts.codeSha).toBe(facts.head);
+  });
+
   test('only merges that bring in the base branch are listed as merges of it', async () => {
     const f = fixture('facts-side', TEMPLATE, { sideMerge: true });
     expect(await f.call(['facts'])).toBe(0);
@@ -298,6 +308,11 @@ describe('facts and render', () => {
     expect(facts.ci).toMatchObject({ pass: 0, fail: 0 });
     expect(facts.ci.error).toContain(`GitHub's PR head is ${git(f.clone, 'rev-parse', 'HEAD^').slice(0, 12)}`);
     expect(f.out.join('\n')).toContain(`- CI at \`${facts.head.slice(0, 12)}\`: not read (`);
+    // GitHub caught up only after the checks were read: still another head's counts.
+    const g = fixture('facts-lag-first', TEMPLATE, { headLag: 'first' });
+    expect(await g.call(['facts'])).toBe(0);
+    const gf = JSON.parse(fs.readFileSync(path.join(g.dir, 'facts.json'), 'utf8')) as Facts;
+    expect(gf.ci.error).toContain('not the pinned head');
   });
 
   test('render carries the attached liveness section; refuses when a live top image would be lost', async () => {
@@ -457,6 +472,54 @@ describe('publish', () => {
     expect(diffLine(r2)).toContain(', changed since the last publish');
     expect(await f.publish(r2)).toBe(0);
     expect(diffLine(await rendered(f))).toContain(', unchanged since the last publish');
+  });
+
+  test('publish re-checks the outgoing bytes: a hand-made body that drops a live screenshot is refused', async () => {
+    const f = fixture('pub-lost', TEMPLATE.replace('Screenshot to follow from @me.', IMG66).replace(BOX1_OPEN, BOX1_DONE));
+    const file = await rendered(f);
+    const hand = path.join(f.base, 'hand.md');
+    fs.writeFileSync(hand, normalizeBody(fs.readFileSync(file, 'utf8').replace(IMG66, 'Screenshot to follow from @me.')));
+    f.out.length = 0;
+    expect(await f.publish(hand, ...f.acceptLive())).toBe(20);
+    expect(f.out[0]).toMatch(/^RESULT REFUSED .*drop live owner content/);
+    expect(f.out).toContain('LOST attachment https://github.com/user-attachments/assets/a3f4ccb0-1111-2222-3333-444455556666');
+    expect(f.edits).toHaveLength(0);
+  });
+
+  test('a refusing pre-write gate stops an OPEN PR\'s publish: injected, and the real watch poll on a maintainer comment', async () => {
+    const f = fixture('gate-no', TEMPLATE);
+    const file = await rendered(f);
+    f.deps.preWriteGate = () => ({ ok: false, reason: 'unacknowledged P0 superseded [x1]' });
+    f.out.length = 0;
+    expect(await f.publish(file, ...f.acceptLive())).toBe(30);
+    expect(f.out[0]).toMatch(/^RESULT PRECONDITION pre-write gate: unacknowledged P0/);
+    expect(f.edits).toHaveLength(0);
+    expect(listReceipts(path.join(f.base, 'home')).filter(r => r.sink === 'pr-prep')).toEqual([]);
+
+    const comment = { id: 41, user: { login: 'garrytan', type: 'User' }, author_association: 'OWNER', created_at: '2026-10-08T00:30:00Z', html_url: 'https://github.com/acme/gx/pull/9#issuecomment-41', body: 'Please split this PR before review.' };
+    const g = fixture('gate-watch', TEMPLATE, { comments: [comment] });
+    const gfile = await rendered(g);
+    g.out.length = 0;
+    expect(await g.publish(gfile, ...g.acceptLive())).toBe(30);
+    expect(g.out[0]).toMatch(/^RESULT PRECONDITION pre-write gate: unacknowledged P1/);
+    expect(g.edits).toHaveLength(0);
+  });
+
+  test('a stale body is refused before the gate runs; a push during the gate is caught under the lock', async () => {
+    const f = fixture('stale-gate', TEMPLATE);
+    const h1file = await rendered(f);
+    f.pushCommit('two');
+    let gates = 0;
+    f.deps.preWriteGate = () => { gates++; return { ok: true, reason: 'ok' }; };
+    expect(await f.publish(h1file, ...f.acceptLive())).toBe(30);
+    expect(gates).toBe(0);
+    const h2file = await rendered(f);
+    f.deps.preWriteGate = () => { gates++; f.pushCommit('three'); return { ok: true, reason: 'ok' }; };
+    f.out.length = 0;
+    expect(await f.publish(h2file, ...f.acceptLive())).toBe(30);
+    expect(gates).toBe(1);
+    expect(f.out[0]).toMatch(/^RESULT PRECONDITION .*re-render/);
+    expect(f.edits).toHaveLength(0);
   });
 
   test('the yes is bound to the body sha256 and the live-diff acceptance to the live body that was shown', async () => {
