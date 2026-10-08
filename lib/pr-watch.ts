@@ -559,6 +559,24 @@ export function pollForWrite(d: WatchDeps, repo: string, n: number, cwd: string)
   return { ok: true, reason: 'ok' };
 }
 
+/** The P0/P1 latches in a PR state the owner has not acknowledged. */
+export function unackedLatches(state: PrState | null): Latched[] {
+  return state ? state.signals.latched.filter(l => !state.signals.acked.includes(l.id)) : [];
+}
+
+/**
+ * For writers, under the PR lock, on the state they just re-read: refuse
+ * (30) while any latch is unacknowledged. The pre-write gate runs before
+ * the lock (its poll takes the lock itself), so another poll (the
+ * LaunchAgent, another session's poll or gate) can latch a P0 in between;
+ * without this the write went out with it in state. It names each latch.
+ */
+export function refuseUnackedLatches(state: PrState | null): void {
+  const open = unackedLatches(state);
+  if (!open.length) return;
+  throw new PrContextError(`unacknowledged ${open.map(l => `${l.level} ${l.kind} [${l.id}]`).join(', ')}, latched by another poll after this write's pre-write gate: nothing was sent; poll, show the owner, ack, then run again`, 30);
+}
+
 // ── subcommands ─────────────────────────────────────────────────────────────
 
 /** The ack token for a signal, as the NEXT line prints it: `<id>@<level>`. */

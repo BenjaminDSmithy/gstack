@@ -776,6 +776,25 @@ describe('publish', () => {
     expect(g.edits).toHaveLength(0);
   });
 
+  test('a P0 another poll latches after the gate passed stops the edit under the lock: no edit, no receipt', async () => {
+    const f = fixture('latch-window', TEMPLATE);
+    const file = await rendered(f);
+    // This publish's gate saw a quiet PR; a concurrent poll (the LaunchAgent, another session) then latches a P0.
+    f.deps.preWriteGate = () => {
+      writeState(f.dir, {
+        v: 1, topic: topicFor('pr/b'), repo: 'acme/gx', number: 9, headRef: 'pr/b', headOwner: 'me', headRemote: null, upstreamRemote: null,
+        defaultBranch: 'main', focused: null, validation: null, bodyStaleSince: null, lastPublishedBodySha256: null, audit: null,
+        signals: { latched: [{ id: 'comment:900', level: 'P0', kind: 'superseded-comment', at: '2026-10-08T00:59:00Z', ref: 'issuecomment-900' }], acked: [] },
+      });
+      return { ok: true, reason: 'ok' };
+    };
+    f.out.length = 0;
+    expect(await f.publish(file, ...f.acceptLive(file))).toBe(30);
+    expect(f.out[0]).toMatch(/^RESULT PRECONDITION .*P0 superseded-comment \[comment:900\]/);
+    expect(f.edits).toHaveLength(0);
+    expect(listReceipts(path.join(f.base, 'home')).filter(r => r.sink === 'pr-prep')).toEqual([]);
+  });
+
   test('a stale body is refused before the gate runs; a push during the gate is caught under the lock', async () => {
     const f = fixture('stale-gate', TEMPLATE);
     const h1file = await rendered(f);

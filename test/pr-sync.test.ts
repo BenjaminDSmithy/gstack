@@ -732,6 +732,34 @@ describe('push', () => {
     expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
   });
 
+  test('a P0 another poll latches after the gate passed stops push and retrigger under the lock: nothing sent', async () => {
+    const t = topology('p19', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    recordValidation(t, s.sha, 0);
+    // This write's gate saw a quiet PR; a concurrent poll (the LaunchAgent, another session) then latches a P0.
+    const latchAfterGate = () => {
+      const st = readStateFor(stateDir(t), pr)!;
+      writeState(stateDir(t), { ...st, signals: { latched: [{ id: 'comment:900', level: 'P0', kind: 'superseded-comment', at: NOW.toISOString(), ref: 'issuecomment-900' }], acked: [] } });
+      return { ok: true, reason: 'ok' };
+    };
+    const sent = () => listReceipts(path.join(t.base, 'home')).filter(x => x.sink === 'pr-prep').length;
+    const before = sent();
+    const r = await run(t, ['push', '--yes'], { preWriteGate: latchAfterGate });
+    expect(r.code, r.out.join('\n')).toBe(30);
+    expect(r.out[0]).toContain('P0 superseded-comment [comment:900]');
+    expect(forkHead(t)).toBe(s.h0);
+    expect(sent()).toBe(before);
+    expect(readStagedSync(stateDir(t), pr)?.sha).toBe(s.sha);
+    expect((await run(t, ['abort'])).code).toBe(0);
+    const rt = await run(t, ['retrigger', '--message', ciDraft(t), '--yes'], { preWriteGate: latchAfterGate });
+    expect(rt.code, rt.out.join('\n')).toBe(30);
+    expect(rt.out[0]).toContain('[comment:900]');
+    expect(forkHead(t)).toBe(s.h0);
+    expect(retriggerReceipts(t)).toBe(0);
+  });
+
   test('a read-back failure after a landed push still records it: body stale, staged sync gone, branch forwarded', async () => {
     const t = topology('p7', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
     queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
