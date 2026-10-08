@@ -708,6 +708,8 @@ Two soft checks ride along, because they cost one more pass over commits you hav
 
 `/ship` runs the audit at Step 1.5, before it pushes anything. No upstream repo means the gate skips and costs nothing. `EXACT_DUP` aborts the ship. `UNVERIFIED` does not abort, but ship says plainly that the audit did not clear the branch. `UNVERIFIED`, `OVERLAP` and `SIBLING` all ride along into the PR body as collapsed context so the reviewer sees the neighbourhood without digging.
 
+`/ship` never pushes to, edits or opens a PR on someone else's repo. When `origin` is your fork, it pushes a branch that has no PR yet and leaves opening it to `/pr-prep open`. Once that PR is open, `/ship` pushes nothing and edits nothing. It hands you the watch poll to clear before your own push, and `/pr-prep body` for the description.
+
 The audit is incremental. It walks the branch against upstream's base pinned by SHA, never a stale local branch. It skips merges, release-only commits and empty `ci:` re-runs. A commit it already judged only searches for what is new since then and keeps its old verdict, so a re-run is cheap and `worst` never drops. It never scores the branch's own open PR against itself.
 
 ### After it opens
