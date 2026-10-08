@@ -147,7 +147,8 @@ function fakeGh(t: { fork: string }, data: FakeData): GhRunner & { calls: string
     calls.push(args);
     const ok = (v: unknown) => ({ status: 0, stdout: typeof v === 'string' ? v : JSON.stringify(v), stderr: '' });
     const ep = args.find(a => a.startsWith('repos/')) ?? '';
-    const [route, query = ''] = ep.split('?');
+    const [rawRoute, query = ''] = ep.split('?');
+    const route = rawRoute.toLowerCase(); // GitHub matches owner and name without regard to case
     const page = (items: unknown[] = []) => {
       const q = new URLSearchParams(query);
       const per = Math.min(Number(q.get('per_page') ?? 30), 100);
@@ -270,6 +271,17 @@ describe('poll, ack and the write gate', () => {
     expect(await watchMain(['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone], { gh, env: { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') }, out: l => out.push(l) }), out.join('\n')).toBe(10);
     expect(out[0]).not.toContain('error=');
     for (const kind of ['superseded-comment', 'closed-unmerged', 'cited-on-base']) expect(out.join('\n')).toContain(kind);
+  });
+
+  test('maintainer logins match without regard to case, so --repo Acme/gw still sees acme', async () => {
+    const t = topology('case', null);
+    const xref = { event: 'cross-referenced', actor: { login: 'acme', type: 'User' }, created_at: '2026-10-02T00:00:00Z', source: { issue: { number: 99, user: { login: 'acme' }, pull_request: { url: 'https://api.github.com/repos/acme/gw/pulls/99' } } } };
+    const out: string[] = [];
+    const code = await watchMain(['poll', '--pr', '7', '--repo', 'Acme/gw', '--cwd', t.clone], { gh: fakeGh(t, { timeline: [xref] }), env: { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') }, out: l => out.push(l) });
+    expect(code, out.join('\n')).toBe(10);
+    expect(out.join('\n')).toContain('SIGNAL\tP0\txref:99\tmaintainer-cross-reference');
+    expect(classifyActor({ login: 'Capy-AI[bot]', type: 'Bot', assoc: 'CONTRIBUTOR' }, proxies, 'me')).toBe('proxy');
+    expect(classifyActor({ login: 'Trunk-IO[bot]', type: 'Bot' }, proxies, 'me')).toBe('infra');
   });
 
   test('a signal past the first hundred comments or timeline events is still read (GitHub lists oldest first)', async () => {
