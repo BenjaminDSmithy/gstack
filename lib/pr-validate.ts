@@ -38,6 +38,7 @@ import {
 } from './pr-context';
 import { collectFreeTestFiles } from '../scripts/test-free-shards';
 import { parseBunTerminalSummary, stripAnsiLine } from '../scripts/lib/shard-engine';
+import { FREE_HOME_SURFACES, privateFreeHome, type FreeHomeGuard } from '../scripts/lib/free-home-guard';
 
 export const VALIDATE_EXIT = { GREEN: 0, RED: 1, USAGE: 2, PRECONDITION: 30 } as const;
 
@@ -50,7 +51,10 @@ Runs the free tests a PR touches after CI's local preconditions in CI's
 order (bun install --frozen-lockfile, gen:skill-docs --host all + the
 freshness check, vendor:xterm, the browse node-server build, build:gates,
 build:cso; GSTACK_EXPECT_BINARIES=1 for the tests when build:gates ran),
-one bun process per file,
+one bun process per file in a CI shard's sandbox (a private HOME, its
+own TMPDIR, Chromium profile and browse state; a write to the private
+HOME's ~/.gstack, ~/.claude, ~/.codex, ~/.agents or ~/.config/gstack is
+red, as CI's home guard makes it, and never reaches yours),
 with agent markers (CLAUDECODE, AI_AGENT, AGENT, REPL_ID, CLAUDE*)
 stripped, every credential-shaped variable unset, CI=true (as GitHub
 Actions sets it: a committed test.only fails) and a real-path
@@ -145,6 +149,39 @@ export function validationEnv(base: NodeJS.ProcessEnv, tmpdir: string, seedBase:
   env.TMPDIR = tmpdir.endsWith('/') ? tmpdir : `${tmpdir}/`;
   if (seedBase) env.GSTACK_FREE_SEED_BASE = seedBase;
   return env;
+}
+
+// Pointers into the caller's gstack, agent and config state. CI has none of
+// them, and a test that honours one writes the owner's live install.
+const STATE_POINTER_RE = /^(GSTACK_HOME|GSTACK_STATE_ROOT|GSTACK_USER_RENDER_DIR|CODEX_HOME|XDG_(CONFIG|DATA|STATE|CACHE)_HOME)$/;
+
+/**
+ * The env one test file runs with, as a CI shard's (runFreeShard): HOME
+ * redirected to `<stateDir>/home` by the free runner's own
+ * privateFreeHome (the browser cache still comes from the real home), its
+ * own TMPDIR, Chromium profile and browse state file, and no variable
+ * pointing into the caller's gstack, agent or config state (the named
+ * pointers, and any single path inside a home surface the runner's guard
+ * watches). The guard reports a write to the private HOME's watched
+ * surfaces, which CI's home guard fails a shard for; with the real HOME
+ * the write would land in the owner's live install.
+ */
+export function testFileEnv(base: NodeJS.ProcessEnv, stateDir: string, file: string, tmpdir?: string): { env: NodeJS.ProcessEnv; guard: FreeHomeGuard } {
+  const realHome = base.HOME || os.homedir();
+  const surfaces = FREE_HOME_SURFACES.map(s => path.join(realHome, s));
+  const intoState = (v: string) => path.isAbsolute(v) && !v.includes(path.delimiter) && surfaces.some(s => v === s || v.startsWith(`${s}/`));
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(base)) {
+    if (v !== undefined && !STATE_POINTER_RE.test(k) && !intoState(v)) env[k] = v;
+  }
+  const tmp = tmpdir ?? path.join(stateDir, 'tmp');
+  fs.mkdirSync(tmp, { recursive: true });
+  env.TMPDIR = tmp.endsWith('/') ? tmp : `${tmp}/`;
+  env.TEMP = env.TMP = tmp;
+  env.CHROMIUM_PROFILE = path.join(stateDir, 'chromium-profile');
+  env.BROWSE_STATE_FILE = path.join(stateDir, '.gstack', 'browse.json');
+  const guard = privateFreeHome([file], env, stateDir);
+  return { env, guard };
 }
 
 // ── selection ───────────────────────────────────────────────────────────────
@@ -641,17 +678,23 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   let green = 0;
   const unverified: string[] = [];
   const verdict = (v: FileVerdict) => (v.ok ? 'ok' : v.unverified ? `UNVERIFIED: ${v.why}` : `RED: ${v.why}`);
-  for (const s of sel.files) {
-    const abs = path.join(c.tree, s.file);
-    const v = judgeBunRun(s.file, d.tool('bun', ['test', abs, '--timeout=30000', '--max-concurrency=1'], { cwd: c.tree, env: testEnv, timeoutMs: 900_000 }));
+  // One run in its own CI-shard sandbox; a write to its private HOME is red, as CI's home guard makes it.
+  const runFile = (file: string, stateDir: string, tmpdir?: string): FileVerdict => {
+    const { env: fileEnv, guard } = testFileEnv(testEnv, stateDir, file, tmpdir);
+    const v = judgeBunRun(file, d.tool('bun', ['test', path.join(c.tree, file), '--timeout=30000', '--max-concurrency=1'], { cwd: c.tree, env: fileEnv, timeoutMs: 900_000 }));
+    const wrote = guard.verify();
+    return wrote ? { ...v, ok: false, unverified: false, why: `home write: ${wrote}` } : v;
+  };
+  sel.files.forEach((s, i) => {
+    const v = runFile(s.file, path.join(tmp, `file-${i}`));
     if (v.ok) green++;
     if (v.unverified) unverified.push(s.file);
     line(`${s.file} rc=${v.rc} ${v.pass} pass ${v.fail} fail ${v.skip} skip ran=${v.ran ? 1 : 0} ${verdict(v)} [${s.rules.join(',')}]`, !v.ok && !v.unverified);
     if (macos.has(s.file)) {
-      const sys = judgeBunRun(s.file, d.tool('bun', ['test', abs, '--timeout=30000', '--max-concurrency=1'], { cwd: c.tree, env: { ...testEnv, TMPDIR: sysTmp.endsWith('/') ? sysTmp : `${sysTmp}/` }, timeoutMs: 900_000 }));
+      const sys = runFile(s.file, path.join(tmp, `file-${i}-default-temp`), sysTmp);
       line(`${s.file} (default temp root) rc=${sys.rc} ran=${sys.ran ? 1 : 0} ${verdict(sys)}`, !sys.ok && !sys.unverified);
     }
-  }
+  });
 
   // Changed code with no passing selected test is unverified, never GREEN 0/0.
   const code = untestedCode(changed, sel, f => fs.existsSync(path.join(c.tree, f)));
