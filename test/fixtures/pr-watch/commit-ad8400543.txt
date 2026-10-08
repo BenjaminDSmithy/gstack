@@ -1,0 +1,11 @@
+v1.69.0.0 fix: the silent-failure wave — 6 fixes, 5 community PRs absorbed, tracker closed with receipts (#2666)
+
+Absorbed from PR #2615 with authorship preserved; the PR-thread liveness screenshot (docs/images/gstack-pr-liveness-2255.png) is dropped — referenced by nothing in the tree.
+Absorbed from PR #2640 with authorship preserved. Wave adaptations: the pipe-probe test skips on minimal-/dev environments without /dev/stdin (it would report OTHER for an unobservable fd), and one caveat verified during review: on bash 4.3/4.4 (e.g. Git Bash), assigning BASH_COMPAT=50 prints a non-fatal 'invalid value' warning to stderr — those bashes are already on tempfiles, so the guard is a no-op there; windows-setup-e2e exercises this empirically.
+
+---------
+
+Co-authored-by: CommandCodeBot <noreply@commandcode.ai>
+Co-authored-by: Lockyer <135391289+Lockyer228@users.noreply.github.com>
+Co-authored-by: Benjamin D. Smith <benjamin.smith@binarysword.com>
+Co-authored-by: Claude Fable 5 <noreply@anthropic.com>

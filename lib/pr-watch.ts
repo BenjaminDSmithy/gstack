@@ -49,12 +49,16 @@ export const WATCH_USAGE = `gstack-pr-watch <poll|ack|enable|disable|size> --pr 
            such PRs, the 2026-10-07 static thresholds
 
 Signals: P0 SUPERSEDED (a maintainer or maintainer-proxy bot says the work
-was rewritten, replaced or will be closed; a maintainer or proxy references
-it from a maintainer PR; while it is unmerged, upstream's base branch cites
-it, or carries our trailer on a commit linked to it; closed unmerged).
+was rewritten, replaced, absorbed or will be closed; a maintainer or proxy
+references it from a maintainer PR; while it is unmerged, upstream's base
+branch cites it as (#N), or carries our trailer on a commit linked to it
+or naming it as PR #N; closed unmerged). Our trailer is Co-authored-by
+with the GitHub login as the name or its noreply address, or this
+worktree's git user.name or user.email.
 P1 ATTENTION (any other maintainer or proxy comment or review, a maintainer
 mention from an issue or another contributor's PR, changes requested, a
-merge conflict or a behind base, an owner commit referencing this PR).
+merge conflict or a behind base, an owner commit referencing this PR, a
+base commit naming it as PR #N without our trailer).
 P2 informational (an external user's comment or cross-reference, our
 trailer on a commit not linked to this PR). A latched P0/P1 keeps its
 level until acknowledged, even when a later poll reads it lower (an
@@ -74,7 +78,7 @@ busy (another poll or write is running; try again).`;
 export const SEED_PROXIES = ['capy-ai'];
 export const INFRA_BOTS = ['github-actions', 'trunk-io', 'dependabot'];
 const MAINTAINER_ASSOC = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
-export const SUPERSEDE_RE = /will be closed when|clos(?:e|ed|ing) in favou?r of #\d+|superseded by #\d+|landed in v[\d.]+ via #\d+|rewr(?:ote|itten) (?:the fix|this|it)|fix[- ]wave|much smaller version|not part of the wave|replac(?:ed|es|ing) this PR|duplicate of #\d+|co-authored-by/i;
+export const SUPERSEDE_RE = /will be closed when|clos(?:e|ed|ing) in favou?r of #\d+|superseded by #\d+|landed in v[\d.]+ via #\d+|rewr(?:ote|itten) (?:the fix|this|it)|fix[- ]wave|much smaller version|not part of the wave|replac(?:ed|es|ing) this PR|duplicate of #\d+|absorbed (?:into|from|in|by) |co-authored-by/i;
 
 export type ActorClass = 'self' | 'maintainer' | 'proxy' | 'infra' | 'bot' | 'external';
 
@@ -110,12 +114,51 @@ interface TimelineEvent {
 }
 interface PullState { state?: string; merged?: boolean; mergeable_state?: string; head?: { sha?: string }; closed_at?: string | null }
 
-export interface Absorbed { sha: string; credit: boolean; cites?: boolean }
+/**
+ * A base commit that concerns this PR: `cites` the squash-merge form
+ * `(#N)`, `mentions` upstream's absorption wording `PR #N` ("Absorbed from
+ * PR #2640", "Contributed by @x (PR #N)", but also "VERSION drift: PR #N
+ * claims v..."), `credit` our Co-authored-by trailer.
+ */
+export interface Absorbed { sha: string; credit: boolean; cites?: boolean; mentions?: boolean }
+
+/**
+ * Who the owner is in a Co-authored-by trailer: the GitHub login (as the
+ * trailer's name, or as `[<id>+]<login>@users.noreply.github.com`), and the
+ * git user.email and user.name of the PR worktree. Upstream credits both
+ * ways: 28f1385ea as `BenjaminDSmithy <BenjaminDSmithy@users.noreply...>`,
+ * ad8400543 (which absorbed #2640) as `Benjamin D. Smith <...@binarysword.com>`.
+ */
+export interface OwnerIds { login: string; emails: string[]; names: string[] }
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Pure: does a commit message cite PR #n, name it as `PR #n`, and credit the owner (exact identities, never a login prefix)? */
+export function absorptionOf(body: string, n: number, ids: OwnerIds): { cites: boolean; mentions: boolean; credit: boolean } {
+  const cites = new RegExp(`\\(#${n}\\)`).test(body);
+  const mentions = new RegExp(`\\bPR #${n}(?![0-9])`, 'i').test(body);
+  const login = ids.login.toLowerCase();
+  const noreply = new RegExp(`^(?:[0-9]+\\+)?${escapeRe(login)}@users\\.noreply\\.github\\.com$`, 'i');
+  const emails = new Set(ids.emails.map(e => e.trim().toLowerCase()).filter(Boolean));
+  const names = new Set([login, ...ids.names.map(x => x.trim().toLowerCase())].filter(Boolean));
+  let credit = false;
+  for (const line of body.split('\n')) {
+    const m = /^\s*co-authored-by:\s*(.*?)\s*<([^<>]*)>\s*$/i.exec(line.replace(/\r$/, ''));
+    if (!m) continue;
+    const name = m[1].trim().toLowerCase();
+    const email = m[2].trim().toLowerCase();
+    if ((login && noreply.test(email)) || emails.has(email) || names.has(name)) {
+      credit = true;
+      break;
+    }
+  }
+  return { cites, mentions, credit };
+}
 
 export interface SignalInput {
   number: number; self: string; proxies: ReadonlySet<string>; maintainers: ReadonlySet<string>;
   pull: PullState; comments: Comment[]; reviews: Review[]; timeline: TimelineEvent[];
-  /** Base commits since the merge base that cite `(#N)` or carry our Co-authored-by trailer. */
+  /** Base commits since the merge base that cite `(#N)`, name `PR #N`, or carry our Co-authored-by trailer. */
   absorbed: Absorbed[];
 }
 
@@ -173,13 +216,18 @@ export function signalsFrom(x: SignalInput): Signal[] {
   }
   // Our trailer alone is not this PR's absorption: upstream credits the owner
   // per PR, so 28f1385ea's credit for #3032 sits on the base of every other
-  // open PR too. It counts only when the commit cites (#N) or GitHub linked
-  // it to this PR with a `referenced` event; otherwise it is information.
+  // open PR too. It counts only when the commit cites (#N), names `PR #N`
+  // (ad8400543: "Absorbed from PR #2640"), or GitHub linked it to this PR
+  // with a `referenced` event; otherwise it is information. `PR #N` without
+  // our credit is attention, not SUPERSEDED: upstream also writes version
+  // queue notes that way ("VERSION drift: PR #N claims v...").
   const linked = new Set(x.timeline.filter(e => e.event === 'referenced' && e.commit_id).map(e => e.commit_id as string));
   for (const a of x.absorbed) {
     const id = `absorbed:${a.sha.slice(0, 12)}`;
-    if (a.cites || (a.credit && linked.has(a.sha))) {
+    if (a.cites || (a.credit && (a.mentions || linked.has(a.sha)))) {
       out.push({ id, level: 'P0', kind: a.credit ? 'absorbed-with-credit' : 'cited-on-base', at: '', ref: a.sha.slice(0, 12), who: '' });
+    } else if (a.mentions) {
+      out.push({ id, level: 'P1', kind: 'named-on-base', at: '', ref: a.sha.slice(0, 12), who: '' });
     } else if (a.credit) {
       out.push({ id, level: 'P2', kind: 'credited-elsewhere', at: '', ref: a.sha.slice(0, 12), who: '' });
     }
@@ -372,7 +420,24 @@ function headCommit(d: WatchDeps, cwd: string, pr: PrInfo): string {
   return pinBranch(d.git, cwd, head, pr.headRef).sha;
 }
 
-/** Upstream base commits citing `(#N)` or carrying our trailer, since the PR's merge base. */
+/** The owner's identities for the credit match: the GitHub login, plus the PR worktree's git user.email and user.name when set. */
+function ownerIds(d: WatchDeps, cwd: string, login: string): OwnerIds {
+  const get = (key: string) => {
+    const r = d.git(['config', '--get', key], { cwd });
+    return !r.error && r.status === 0 ? r.stdout.trim() : '';
+  };
+  const email = get('user.email');
+  const name = get('user.name');
+  return { login, emails: email ? [email] : [], names: name ? [name] : [] };
+}
+
+/**
+ * Upstream base commits since the PR's merge base that cite `(#N)`, name
+ * `PR #N`, or credit the owner. git pre-filters with two fixed strings
+ * (`#N`, `co-authored-by:`), and absorptionOf reads each message exactly:
+ * a fixed `co-authored-by: <login>` grep also matched longer logins
+ * (dgrant hit dgrantham) and missed the name-form trailer.
+ */
 function absorbedOnBase(d: WatchDeps, cwd: string, repo: string, pr: PrInfo, self: string): Absorbed[] {
   const up = remoteForRepo(d.git, cwd, repo);
   if (!up) throw new UnverifiedError(`no git remote for ${repo} in ${cwd}`);
@@ -380,14 +445,19 @@ function absorbedOnBase(d: WatchDeps, cwd: string, repo: string, pr: PrInfo, sel
   const h = headCommit(d, cwd, pr);
   const mb = d.git(['merge-base', h, b], { cwd });
   if (mb.status !== 0) throw new UnverifiedError('git merge-base failed');
-  const log = (grep: string, fixed: boolean) => {
-    const r = d.git(['log', fixed ? '-F' : '-E', '-i', `--grep=${grep}`, '--format=%H', `${mb.stdout.trim()}..${b}`], { cwd });
-    if (r.status !== 0) throw new UnverifiedError('git log failed');
-    return r.stdout.split('\n').filter(Boolean);
-  };
-  const cites = new Set(log(`\\(#${pr.number}\\)`, false));
-  const credit = new Set(log(`co-authored-by: ${self}`, true));
-  return [...new Set([...cites, ...credit])].map(sha => ({ sha, credit: credit.has(sha), cites: cites.has(sha) }));
+  const r = d.git(['log', '-F', '-i', `--grep=#${pr.number}`, '--grep=co-authored-by:', '--format=%H%x00%B%x1e', `${mb.stdout.trim()}..${b}`], { cwd });
+  if (r.error || r.status !== 0) throw new UnverifiedError('git log failed');
+  const ids = ownerIds(d, cwd, self);
+  const out: Absorbed[] = [];
+  for (const rec of r.stdout.split('\x1e')) {
+    const at = rec.indexOf('\0');
+    if (at === -1) continue;
+    const sha = rec.slice(0, at).trim();
+    if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha)) continue;
+    const a = absorptionOf(rec.slice(at + 1), pr.number, ids);
+    if (a.cites || a.mentions || a.credit) out.push({ sha, ...a });
+  }
+  return out;
 }
 
 export function poll(d: WatchDeps, repo: string, n: number, cwd: string): PollResult {
