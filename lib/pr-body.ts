@@ -648,39 +648,68 @@ export function lineDiff(a: string, b: string): string {
   return out.join('\n');
 }
 
+/** The pre-write gate must have run within this long of the edit (plan: "within 60 s of the write"). */
+export const GATE_MAX_AGE_MS = 60_000;
+
+/**
+ * Order matters. Every check that needs the network, except the live-body
+ * read, runs BEFORE the pre-write gate: the base and head pins (git fetch,
+ * up to 300 s each), lint against this PR's commits, the redaction scan
+ * of the exact bytes (so no diff ever prints an unscanned secret). Inside
+ * the lock the live body is read last, its checks are pure, and the edit
+ * follows at once: a web save can still land in that window (GitHub has no
+ * compare-and-swap for a PR body), but no fetch widens it. The edit is
+ * refused when the gate ran more than GATE_MAX_AGE_MS before it.
+ */
 function cmdPublish(c: Ctx): number {
   const { d } = c;
   requireApproval(c.f.argv, { valueFlags: VALUE_FLAGS });
   if (!c.f.body || !fs.existsSync(c.f.body)) throw new PrContextError('--body <rendered file> is required', 2);
   if (!c.f.bodySha) throw new PrContextError('--body-sha256 <the sha256 the owner approved> is required', 2);
   assertWritableIdentity(c.pr, viewerLogin(d.gh));
+  const raw = fs.readFileSync(c.f.body, 'utf8');
+  const body = normalizeBody(raw);
+  if (body !== raw) throw new PrContextError('the body file is not normalised (render it with gstack-pr-body render)', 2);
+  if (!sha256(body).startsWith(c.f.bodySha)) {
+    d.out(`RESULT REFUSED the body's sha256 is ${sha256(body).slice(0, 12)}, not the ${c.f.bodySha} the owner approved: show the owner this body and ask again`);
+    return BODY_EXIT.REFUSED;
+  }
+  if (count(body, FACTS_BEGIN) !== 1 || count(body, FACTS_END) !== 1) {
+    d.out(`RESULT REFUSED the body must hold exactly one facts block; it has ${count(body, FACTS_BEGIN)} (render it with gstack-pr-body render)`);
+    return BODY_EXIT.REFUSED;
+  }
+  const revs = pinnedRevs(c);
+  const lint = lintBody(body, lintContext(c, c.pr.headOid, revs[1] ?? null));
+  if (lint.length) {
+    d.out('RESULT REFUSED lint');
+    for (const l of lint) d.out(`LINT ${l}`);
+    return BODY_EXIT.REFUSED;
+  }
+  // Scan exactly the bytes that will be sent, before anything prints them.
+  const result = scanOutgoing(body, publishedVersions(gitTexts(c, revs)));
+  const high = result.findings.filter(f => f.severity === 'HIGH');
+  const medium = result.findings.filter(f => f.severity === 'MEDIUM');
+  if (high.length || result.oversize) {
+    d.out(`RESULT REDACTION blocked (${result.oversize ? 'too large to scan' : 'HIGH'})`);
+    for (const f of high) d.out(`REDACTION HIGH ${findingKey(f)} ${f.description} ${f.preview}`);
+    return BODY_EXIT.REDACTION;
+  }
+  const unconfirmed = medium.filter(f => !c.f.confirm.includes(findingKey(f)));
+  if (unconfirmed.length) {
+    d.out('RESULT REDACTION each MEDIUM finding needs the owner\'s confirmation: --confirm-redaction <key,...>');
+    for (const f of unconfirmed) d.out(`REDACTION MEDIUM ${findingKey(f)} ${f.description} ${f.preview}`);
+    return BODY_EXIT.REDACTION;
+  }
   // The gate polls gstack-pr-watch, which takes the PR lock itself: run it just before taking the lock.
+  const gateAt = d.now().getTime();
   const gate = d.preWriteGate({ gh: d.gh, git: d.git, env: d.env, cwd: c.f.cwd, repo: c.repo, number: c.pr.number, state: readStateFor(c.stateDir, c.pr) });
   if (!gate.ok) throw new PrContextError(`pre-write gate: ${gate.reason}`, BODY_EXIT.PRECONDITION);
   return withPrLock(c.stateDir, () => {
-    const raw = fs.readFileSync(c.f.body!, 'utf8');
-    const body = normalizeBody(raw);
-    if (body !== raw) throw new PrContextError('the body file is not normalised (render it with gstack-pr-body render)', 2);
-    if (!sha256(body).startsWith(c.f.bodySha!)) {
-      d.out(`RESULT REFUSED the body's sha256 is ${sha256(body).slice(0, 12)}, not the ${c.f.bodySha} the owner approved: show the owner this body and ask again`);
-      return BODY_EXIT.REFUSED;
-    }
     const live = liveBody(c);
     const lost = lostOwnerContent(live, body);
     if (lost.length) {
       d.out('RESULT REFUSED the outgoing body would drop live owner content');
       printOwnerContent(d, 'LOST', lost, c.pr.number);
-      return BODY_EXIT.REFUSED;
-    }
-    if (count(body, FACTS_BEGIN) !== 1 || count(body, FACTS_END) !== 1) {
-      d.out(`RESULT REFUSED the body must hold exactly one facts block; it has ${count(body, FACTS_BEGIN)} (render it with gstack-pr-body render)`);
-      return BODY_EXIT.REFUSED;
-    }
-    const revs = pinnedRevs(c);
-    const lint = lintBody(body, lintContext(c, c.pr.headOid, revs[1] ?? null));
-    if (lint.length) {
-      d.out('RESULT REFUSED lint');
-      for (const l of lint) d.out(`LINT ${l}`);
       return BODY_EXIT.REFUSED;
     }
     const liveSha = sha256(live);
@@ -692,21 +721,10 @@ function cmdPublish(c: Ctx): number {
       d.out(envelope(diff, `pr-${c.pr.number}-live-vs-new`));
       return BODY_EXIT.REFUSED;
     }
-    // Scan exactly the bytes that will be sent.
-    const pubv = publishedVersions(gitTexts(c, revs));
-    const result = scanOutgoing(body, pubv);
-    const high = result.findings.filter(f => f.severity === 'HIGH');
-    const medium = result.findings.filter(f => f.severity === 'MEDIUM');
-    if (high.length || result.oversize) {
-      d.out(`RESULT REDACTION blocked (${result.oversize ? 'too large to scan' : 'HIGH'})`);
-      for (const f of high) d.out(`REDACTION HIGH ${findingKey(f)} ${f.description} ${f.preview}`);
-      return BODY_EXIT.REDACTION;
-    }
-    const unconfirmed = medium.filter(f => !c.f.confirm.includes(findingKey(f)));
-    if (unconfirmed.length) {
-      d.out('RESULT REDACTION each MEDIUM finding needs the owner\'s confirmation: --confirm-redaction <key,...>');
-      for (const f of unconfirmed) d.out(`REDACTION MEDIUM ${findingKey(f)} ${f.description} ${f.preview}`);
-      return BODY_EXIT.REDACTION;
+    const waited = d.now().getTime() - gateAt;
+    if (waited > GATE_MAX_AGE_MS) {
+      d.out(`RESULT PRECONDITION the pre-write gate ran ${Math.round(waited / 1000)} s before the edit (limit ${GATE_MAX_AGE_MS / 1000} s): run publish again`);
+      return BODY_EXIT.PRECONDITION;
     }
     const state = readStateFor(c.stateDir, c.pr);
     const sendFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-pr-body-')), 'body.md');
@@ -729,7 +747,7 @@ function cmdPublish(c: Ctx): number {
       return BODY_EXIT.ERROR;
     }
     writeState(c.stateDir, { ...(state ?? freshState(c.pr)), lastPublishedBodySha256: sha256(after), bodyStaleSince: null });
-    fs.copyFileSync(c.f.body!, path.join(c.stateDir, `pr-body-${today(d)}.published.md`));
+    fs.writeFileSync(path.join(c.stateDir, `pr-body-${today(d)}.published.md`), body, { mode: 0o600 });
     d.out(`RESULT PUBLISHED pr=${c.pr.number} sha256=${sha256(after).slice(0, 12)}`);
     d.out('WARNING if the owner has the PR description open for editing in a browser tab, they must cancel that edit: saving it overwrites this body and its screenshot.');
     return BODY_EXIT.OK;

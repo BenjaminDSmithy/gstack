@@ -13,9 +13,9 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   normalizeBody, renderFactsBlock, spliceFacts, stripFacts, carryLiveness, lostOwnerContent, lintBody, livenessOf,
-  publishedVersions, scanOutgoing, lineDiff, bodyMain, FACTS_BEGIN, FACTS_END, sha256, type Facts,
+  publishedVersions, scanOutgoing, lineDiff, bodyMain, FACTS_BEGIN, FACTS_END, sha256, type Facts, type BodyDeps,
 } from '../lib/pr-body';
-import { prStateDir, topicFor, readStateFor, type GhRunner } from '../lib/pr-context';
+import { prStateDir, topicFor, readStateFor, defaultGit, type GhRunner } from '../lib/pr-context';
 import { listReceipts } from '../lib/egress-receipt';
 import { scan } from '../lib/redact-engine';
 
@@ -180,7 +180,7 @@ function write(dir: string, rel: string, text: string): void {
   fs.writeFileSync(path.join(dir, rel), text);
 }
 
-function fixture(name: string, liveInitial: string, opts: { state?: string; viewer?: string; webEditDropsImages?: boolean; headLag?: boolean; sideMerge?: boolean } = {}) {
+function fixture(name: string, liveInitial: string, opts: { state?: string; viewer?: string; webEditDropsImages?: boolean; headLag?: boolean; sideMerge?: boolean; comments?: unknown[] } = {}) {
   const base = path.join(ROOT, name);
   const up = path.join(base, 'up', 'acme', 'gx.git');
   const fork = path.join(base, 'fork', 'me', 'gx.git');
@@ -219,8 +219,11 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
   git(clone, 'checkout', '-q', 'pr/b');
   let live = liveInitial;
   const edits: string[] = [];
+  // Every gh and git call in order: `gh body-read`, `gh pr-edit`, `git fetch`, ...
+  const log: string[] = [];
   const gh = ((args: string[]) => {
     const ok = (stdout: string) => ({ status: 0, stdout, stderr: '' });
+    log.push(args[0] === 'api' && args[1] === 'repos/acme/gx/pulls/9' && args.includes('--jq') ? 'gh body-read' : args[0] === 'pr' && args[1] === 'edit' ? 'gh pr-edit' : `gh ${args.slice(0, 2).join(' ')}`);
     if (args[0] === 'pr' && args[1] === 'view') {
       return ok(JSON.stringify({ number: 9, state: opts.state ?? 'OPEN', isDraft: false, headRefOid: git(fork, 'rev-parse', opts.headLag ? 'refs/heads/pr/b^' : 'refs/heads/pr/b'), url: 'https://github.com/acme/gx/pull/9', headRepositoryOwner: { login: 'me' }, headRepository: { name: 'gx' }, headRefName: 'pr/b', baseRefName: 'main' }));
     }
@@ -228,7 +231,8 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
     if (args[0] === 'api' && args[1] === 'repos/acme/gx/pulls/9' && args.includes('--jq')) return ok(live.endsWith('\n') ? live : `${live}\n`);
     // gstack-pr-watch's poll, run by the default pre-write gate: a quiet PR.
     if (args[0] === 'api' && args[1] === 'repos/acme/gx/pulls/9') return ok(JSON.stringify({ state: 'open', merged: false, mergeable_state: 'clean', head: { sha: 'x' } }));
-    if (args[0] === 'api' && (args[1]?.startsWith('repos/acme/gx/issues/9/comments') || args[1]?.startsWith('repos/acme/gx/pulls/9/reviews'))) return ok('[]');
+    if (args[0] === 'api' && args[1]?.startsWith('repos/acme/gx/issues/9/comments')) return ok(JSON.stringify(opts.comments ?? []));
+    if (args[0] === 'api' && args[1]?.startsWith('repos/acme/gx/pulls/9/reviews')) return ok('[]');
     if (args[0] === 'api' && args.some(a => a.startsWith('repos/acme/gx/issues/9/timeline'))) return ok('[]');
     if (args[0] === 'pr' && args[1] === 'list') return ok('[]');
     if (args[0] === 'pr' && args[1] === 'checks') return ok(JSON.stringify([{ name: 'free', bucket: 'pass', link: '' }, { name: 'win', bucket: 'fail', link: '' }, { name: 'docs', bucket: 'skipping', link: '' }]));
@@ -244,14 +248,16 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
   const env = { ...process.env, GSTACK_STATE_ROOT: path.join(base, 'home') };
   const out: string[] = [];
   const http = async (url: string) => (url.includes('dead') ? 404 : 200);
-  const call = (argv: string[]) => bodyMain([...argv, '--pr', '9', '--repo', 'acme/gx', '--cwd', clone], { gh, env, out: l => out.push(l), now: () => new Date('2026-10-08T01:00:00Z'), http });
+  // Per-test overrides of the injected deps (clock, gate, git).
+  const deps: Partial<BodyDeps> = { git: (args, o) => { log.push(`git ${args[0]}`); return defaultGit(args, o); } };
+  const call = (argv: string[]) => bodyMain([...argv, '--pr', '9', '--repo', 'acme/gx', '--cwd', clone], { gh, env, out: l => out.push(l), now: () => new Date('2026-10-08T01:00:00Z'), http, ...deps });
   const dir = prStateDir({ cwd: clone, topic: topicFor('pr/b'), env });
   const shaOf = (file: string) => sha256(fs.readFileSync(file, 'utf8')).slice(0, 12);
   // publish as the skill runs it: the owner's yes bound to the body's sha256.
   const publish = (file: string, ...extra: string[]) => call(['publish', '--body', file, '--body-sha256', shaOf(file), '--yes', ...extra]);
   // The owner accepted the live body as it is right now.
   const acceptLive = () => ['--accept-live-diff', sha256(normalizeBody(live)).slice(0, 12)];
-  return { base, clone, out, call, publish, acceptLive, shaOf, dir, edits, getLive: () => live, setLive: (text: string) => { live = text; }, env };
+  return { base, clone, out, call, publish, acceptLive, shaOf, dir, edits, log, deps, getLive: () => live, setLive: (text: string) => { live = text; }, env };
 }
 const prRef = { repo: 'acme/gx', number: 9, headRef: 'pr/b', headOwner: 'me' };
 
@@ -400,6 +406,38 @@ describe('publish', () => {
     expect(f.out.join('\n')).toContain('OWNER-NOTE-B');
     expect(f.edits).toHaveLength(0);
     expect(await f.publish(file, '--accept-live-diff', 'zz')).toBe(2);
+  });
+
+  test('nothing but the edit follows the last live-body read, and the gate runs within 60 s of the edit', async () => {
+    const f = fixture('order', TEMPLATE);
+    const file = await rendered(f);
+    let t = Date.parse('2026-10-08T01:00:00Z');
+    f.deps.now = () => new Date(t);
+    // A gate whose poll took 61 s.
+    f.deps.preWriteGate = () => { t += 61_000; return { ok: true, reason: 'ok' }; };
+    f.out.length = 0;
+    expect(await f.publish(file, ...f.acceptLive())).toBe(30);
+    expect(f.out[0]).toMatch(/^RESULT PRECONDITION .*61 s/);
+    expect(f.edits).toHaveLength(0);
+    f.deps.preWriteGate = () => { t += 10_000; return { ok: true, reason: 'ok' }; };
+    f.log.length = 0;
+    expect(await f.publish(file, ...f.acceptLive())).toBe(0);
+    const edit = f.log.indexOf('gh pr-edit');
+    expect(f.log[edit - 1]).toBe('gh body-read');
+    expect(f.log.slice(0, edit - 1)).not.toContain('gh body-read');
+    expect(f.log.slice(0, edit).filter(l => l.startsWith('git fetch')).length).toBeGreaterThan(0);
+  });
+
+  test('a HIGH finding blocks before any live diff prints the body, with no edit and no receipt', async () => {
+    const f = fixture('high', TEMPLATE);
+    const token = 'ghp_' + '1234567890abcdefghijklmnopqrstuvwxyz';
+    const file = await rendered(f, TEMPLATE.replace('Because.', `Because ${token} leaked.`));
+    f.out.length = 0;
+    expect(await f.publish(file)).toBe(22);
+    expect(f.out[0]).toMatch(/^RESULT REDACTION blocked \(HIGH\)/);
+    expect(f.out.join('\n')).not.toContain(token);
+    expect(f.edits).toHaveLength(0);
+    expect(listReceipts(path.join(f.base, 'home')).filter(r => r.sink === 'pr-prep')).toEqual([]);
   });
 
   test('the live-vs-new diff is a real line diff: a moved section and a dropped duplicate show', async () => {
