@@ -566,6 +566,27 @@ describe('publish', () => {
     expect(f.edits).toHaveLength(0);
   });
 
+  test('publish sends only the facts block render generated: a hand-patched validation or CI line is refused', async () => {
+    const f = fixture('hand-facts', TEMPLATE);
+    const file = await rendered(f);
+    const text = fs.readFileSync(file, 'utf8');
+    expect(text).toContain('- Validation: not run at this head.');
+    const patched = path.join(f.base, 'patched.md');
+    for (const edit of [
+      (t: string) => t.replace('- Validation: not run at this head.', '- Validation at `0123456789ab`: 15/15 selected files green.'),
+      (t: string) => t.replace(/(- CI at `[0-9a-f]{12}`): .*\./, '$1: 46 pass, 0 fail, 0 pending, 7 skipping.'),
+    ]) {
+      fs.writeFileSync(patched, edit(text));
+      expect(fs.readFileSync(patched, 'utf8')).not.toBe(text);
+      f.out.length = 0;
+      expect(await f.publish(patched, ...f.acceptLive())).toBe(20);
+      expect(f.out[0]).toMatch(/^RESULT REFUSED .*facts block .*render/);
+    }
+    expect(f.edits).toHaveLength(0);
+    expect(listReceipts(path.join(f.base, 'home')).filter(r => r.sink === 'pr-prep')).toEqual([]);
+    expect(await f.publish(file, ...f.acceptLive())).toBe(0);
+  });
+
   test('a refusing pre-write gate stops an OPEN PR\'s publish: injected, and the real watch poll on a maintainer comment', async () => {
     const f = fixture('gate-no', TEMPLATE);
     const file = await rendered(f);
