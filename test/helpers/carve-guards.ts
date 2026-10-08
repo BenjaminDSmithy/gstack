@@ -591,7 +591,7 @@ do not launch the downstream skill or open a browser.`,
       mustMoveToSection: ['gstack-pr-sync merge', 'gstack-pr-body publish --pr', 'gstack-pr-ci-triage run', 'gstack-pr-watch ack', 'gstack-pr-body check'],
     },
     behavioral: 'none',
-    maxSkeletonBytes: 68_500, // measured 67,195 (2026-10-08, v1.91.33.0 + fork)
+    maxSkeletonBytes: 70_000, // measured 68,935 (2026-10-09: + the flag dispatch row, registered question ids and accept-flag rule in Write safety); was 67,195 (2026-10-08, v1.91.33.0 + fork)
     minUnionBytes: 78_000, // measured union 79,353
     mustContain: ['EXACT_DUP', 'UNVERIFIED', 'gstack-pr-sync push', 'gstack-pr-sync retrigger', '--accept-live-diff', 'Screenshot to follow'],
   },
