@@ -30,10 +30,12 @@ Run from the PR's worktree:
 ```
 
 `disable` with the same arguments stops it. After reading a signal,
-acknowledge it so the notifications and the write gate stop:
+acknowledge it at the level the poll showed you (its NEXT line spells
+each one as `<id>@<level>`), so the notifications and the write gate
+stop. An ack refuses a signal that has risen since; poll again first.
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-pr-watch ack --pr <number> --repo <owner/name> <signal id>
+~/.claude/skills/gstack/bin/gstack-pr-watch ack --pr <number> --repo <owner/name> <signal id>@<level>
 ```
 
 ## Install

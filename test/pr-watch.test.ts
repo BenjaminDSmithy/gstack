@@ -244,8 +244,13 @@ describe('poll, ack and the write gate', () => {
     expect(out.join('\n')).toContain('BEGIN UNTRUSTED TRACKER CONTENT');
     const gate = pollForWrite({ gh: deps.gh, git: defaultGit, env, now: () => new Date(), out: () => {} }, 'acme/gw', 7, t.clone);
     expect(gate.ok).toBe(false);
-    expect(await watchMain(argv('ack', 'comment:99'), deps)).toBe(2);
-    expect(await watchMain(argv('ack', 'comment:11'), deps)).toBe(0);
+    // The NEXT line spells the ack as <id>@<level>, the level the owner is shown.
+    expect(out.find(l => l.startsWith('NEXT '))).toContain('gstack-pr-watch ack comment:11@P0');
+    expect(await watchMain(argv('ack', 'comment:99@P0'), deps)).toBe(2);
+    expect(await watchMain(argv('ack', 'comment:11'), deps)).toBe(2);
+    out.length = 0;
+    expect(await watchMain(argv('ack', 'comment:11@P0'), deps)).toBe(0);
+    expect(out[0]).toBe('RESULT ACKED comment:11@P0 superseded-comment');
     expect(await watchMain(argv('poll'), deps)).toBe(0);
     const dir = prStateDir({ cwd: t.clone, topic: topicFor('pr/w'), env });
     expect(readStateFor(dir, { repo: 'acme/gw', headRef: 'pr/w' })!.signals).toMatchObject({ acked: ['comment:11'] });
@@ -272,14 +277,36 @@ describe('poll, ack and the write gate', () => {
     const out: string[] = [];
     const argv = (sub: string, ...rest: string[]) => [sub, '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone, ...rest];
     expect(await watchMain(argv('poll'), { gh, env, out: l => out.push(l) })).toBe(11);
-    expect(await watchMain(argv('ack', 'comment:77'), { gh, env, out: l => out.push(l) })).toBe(0);
+    expect(await watchMain(argv('ack', 'comment:77@P1'), { gh, env, out: l => out.push(l) })).toBe(0);
     data.comments = [{ ...(data.comments![0] as object), body: 'Closing in favour of #9: the fix wave rewrote the fix.' }];
     out.length = 0;
     expect(await watchMain(argv('poll'), { gh, env, out: l => out.push(l) }), out.join('\n')).toBe(10);
     expect(out.join('\n')).toContain('SIGNAL\tP0\tcomment:77\tsuperseded-comment');
     expect(pollForWrite({ gh, git: defaultGit, env, now: () => new Date(), out: () => {} }, 'acme/gw', 7, t.clone).ok).toBe(false);
-    expect(await watchMain(argv('ack', 'comment:77'), { gh, env, out: () => {} })).toBe(0);
+    expect(await watchMain(argv('ack', 'comment:77@P0'), { gh, env, out: () => {} })).toBe(0);
     expect(await watchMain(argv('poll'), { gh, env, out: () => {} })).toBe(0);
+  });
+
+  test('an ack names the level the owner was shown: a signal that rose since is refused until shown again', async () => {
+    // The owner's poll shows a P1; the comment is then edited into a supersede
+    // notice and an unattended poll (the LaunchAgent, another session's write
+    // gate) latches it at P0 with its output discarded.
+    const t = topology('ack-level', null);
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') };
+    const data: FakeData = { comments: [{ id: 701, user: { login: 'acme' }, author_association: 'OWNER', created_at: '2026-10-01T00:00:00Z', html_url: 'u', body: 'Can you rebase?' }] };
+    const gh = fakeGh(t, data);
+    const argv = (sub: string, ...rest: string[]) => [sub, '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone, ...rest];
+    const out: string[] = [];
+    expect(await watchMain(argv('poll'), { gh, env, out: l => out.push(l) })).toBe(11);
+    expect(out.join('\n')).toContain('SIGNAL\tP1\tcomment:701\tmaintainer-comment');
+    data.comments = [{ ...(data.comments![0] as object), body: 'Closing in favour of #9.' }];
+    expect(await watchMain(argv('poll'), { gh, env, out: () => {} })).toBe(10);
+    out.length = 0;
+    expect(await watchMain(argv('ack', 'comment:701@P1'), { gh, env, out: l => out.push(l) })).toBe(2);
+    expect(out[0]).toMatch(/^RESULT USAGE comment:701 is latched at P0 superseded-comment, not P1/);
+    expect(pollForWrite({ gh, git: defaultGit, env, now: () => new Date(), out: () => {} }, 'acme/gw', 7, t.clone).ok).toBe(false);
+    expect(await watchMain(argv('ack', 'comment:701@P0'), { gh, env, out: () => {} })).toBe(0);
+    expect(pollForWrite({ gh, git: defaultGit, env, now: () => new Date(), out: () => {} }, 'acme/gw', 7, t.clone)).toEqual({ ok: true, reason: 'ok' });
   });
 
   describe('a latch reports at its latched level when a later poll reads the signal lower', () => {
@@ -363,7 +390,7 @@ describe('poll, ack and the write gate', () => {
     const env = { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') };
     const closed = fakeGh(t, { pull: { state: 'closed', merged: false } });
     expect(await watchMain(['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone], { gh: closed, env, out: () => {} })).toBe(10);
-    expect(await watchMain(['ack', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone, 'closed-unmerged'], { gh: closed, env, out: () => {} })).toBe(0);
+    expect(await watchMain(['ack', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone, 'closed-unmerged@P0'], { gh: closed, env, out: () => {} })).toBe(0);
     expect(pollForWrite(gateDeps(closed, env), 'acme/gw', 7, t.clone)).toEqual({ ok: false, reason: 'PR #7 is closed' });
     expect(pollForWrite(gateDeps(fakeGh(t, { pull: { state: 'closed', merged: true } }), env), 'acme/gw', 7, t.clone)).toEqual({ ok: false, reason: 'PR #7 is merged' });
   });
@@ -381,7 +408,7 @@ describe('poll, ack and the write gate', () => {
     data.pull = { mergeable_state: 'clean' };
     expect(await watchMain(argv('poll'), { gh, env, out: () => {} })).toBe(11);
     expect(pollForWrite(gateDeps(gh, env), 'acme/gw', 7, t.clone).ok).toBe(false);
-    expect(await watchMain(argv('ack', `mergeable:dirty:${'b'.repeat(12)}`), { gh, env, out: () => {} })).toBe(0);
+    expect(await watchMain(argv('ack', `mergeable:dirty:${'b'.repeat(12)}@P1`), { gh, env, out: () => {} })).toBe(0);
     expect(pollForWrite(gateDeps(gh, env), 'acme/gw', 7, t.clone)).toEqual({ ok: true, reason: 'ok' });
   });
 
