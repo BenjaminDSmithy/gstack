@@ -41,7 +41,9 @@ export const TRIAGE_USAGE = `gstack-pr-ci-triage <run|onset> [options]
   run     triage the newest failed Windows Free Tests run on the PR's head
           (or --run <id>): per failed shard, read windows-result-<n>, and
           for a no-failing-test exit the shard-log artifact; classify REAL,
-          CRASH (IOCP or GLib signature), HANG, INFRA, AGGREGATE or UNKNOWN
+          CRASH (IOCP or GLib signature), HANG, INFRA, AGGREGATE or UNKNOWN.
+          When no shard log explains a failure, the job log's tail is
+          printed (read-only gh api), inside the untrusted envelope
   onset   count failed shards per UTC day across recent runs (disclosure
           only; never clears a run)
 
@@ -162,7 +164,7 @@ export function classifyShard(shard: number, outcome: ShardOutcome | null, log: 
   const base = { shard, outcome, signature: null, inFlight: log ? inFlightFile(log) : null, ...evidence, logRead: log !== null, sameTreeGreen: null };
   if (!outcome) return { ...base, klass: 'UNKNOWN', why: 'no windows-result artifact' };
   const failing = outcome.failingFiles ?? [];
-  if (outcome.status === 'passed') return { ...base, klass: 'INFRA', why: 'the shard passed but its job failed: read the failing setup step' };
+  if (outcome.status === 'passed') return { ...base, klass: 'INFRA', why: 'the shard passed but its job failed (a setup or upload step): see the job log tail' };
   if (outcome.status === 'failed' && failing.length) {
     const shown = failing.map(safeTestPath).filter((f): f is string => !!f);
     const hidden = failing.length - shown.length;
@@ -279,6 +281,21 @@ async function download(d: TriageDeps, repo: string, run: number, name: string):
 
 const RUN_FIELDS = 'databaseId,headSha,headBranch,event,conclusion,createdAt,status';
 
+/** Lines kept from the end of a job log: the failing step's error is printed last. */
+const JOB_LOG_TAIL = 30;
+
+/**
+ * The tail of one Actions job log (read-only `gh api` GET), enveloped as
+ * untrusted data, or a one-line note when it cannot be read. Used only when
+ * no shard log explains the failure: INFRA, a missing artifact, AGGREGATE.
+ */
+function jobLogTail(d: TriageDeps, repo: string, runId: number, jobId: number | undefined): string {
+  if (!jobId || !Number.isSafeInteger(jobId)) return 'JOBLOG none: the job has no id';
+  const r = d.gh(['api', '--allow-escape-sequences', `repos/${repo}/actions/jobs/${jobId}/logs`]);
+  if (r.status !== 0) return `JOBLOG none: job ${jobId}'s log could not be read`;
+  return envelope(r.stdout.replace(/\s+$/, '').split('\n').slice(-JOB_LOG_TAIL).join('\n'), `ci-run-${runId}-job-${jobId}`);
+}
+
 /** A path as one shell word (single-quoted unless plainly safe). */
 const shq = (s: string): string => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
 
@@ -377,8 +394,9 @@ async function cmdRun(d: TriageDeps, f: Flags): Promise<number> {
   const failed = (run.jobs ?? []).filter(j => j.conclusion === 'failure');
   const shards = failedShards(failed);
   if (!shards.length) {
-    const aggregate = failed.some(j => j.name === 'windows-free-tests');
-    d.out(`RESULT ${aggregate ? 'AGGREGATE' : 'NOTHING'} run=${runId} ${aggregate ? 'windows-free-tests failed with no failed shard: read its job log (plan, verify or a cancelled shard)' : 'no Windows shard failed'}`);
+    const aggregate = failed.find(j => j.name === 'windows-free-tests');
+    d.out(`RESULT ${aggregate ? 'AGGREGATE' : 'NOTHING'} run=${runId} ${aggregate ? 'windows-free-tests failed with no failed shard (plan, verify or a cancelled shard): its job log tail follows' : 'no Windows shard failed'}`);
+    if (aggregate) d.out(jobLogTail(d, repo, runId, aggregate.databaseId));
     return aggregate ? TRIAGE_EXIT.NO_DRAFT : TRIAGE_EXIT.NOTHING;
   }
   // The per-shard detail is held back so the RESULT line prints first.
@@ -397,6 +415,8 @@ async function cmdRun(d: TriageDeps, f: Flags): Promise<number> {
     const hidden = unprintableFailing(t.outcome);
     if (hidden.length) detail.push(envelope(hidden.join('\n'), `ci-run-${runId}-shard-${n}-failing`));
     if (log) detail.push(envelope(log.split('\n').slice(-12).join('\n'), `ci-run-${runId}-shard-${n}`));
+    // No shard log explains it (INFRA, or an artifact missing): the job log's tail is the evidence.
+    else if (t.klass !== 'REAL') detail.push(jobLogTail(d, repo, runId, failed.find(j => SHARD_JOB_RE.exec(j.name)?.[1] === String(n))?.databaseId));
   }
   const ok = triaged.filter(draftable);
   if (ok.length !== triaged.length) {
