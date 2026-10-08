@@ -1,4 +1,8 @@
 #!/usr/bin/env bun
 import { watchMain } from '../lib/pr-watch';
 
-process.exit(await watchMain(process.argv.slice(2)));
+// process.exit() discards stdout still buffered in a pipe: past 64 KiB (many
+// unacknowledged signals, one envelope each) a slow reader lost END markers
+// and the NEXT line. Set the code and let the runtime drain stdout, as
+// bin/gstack-pr-body does.
+process.exitCode = await watchMain(process.argv.slice(2));
