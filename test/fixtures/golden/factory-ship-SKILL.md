@@ -695,17 +695,15 @@ re-derives the path with the same line, and pr-prep's Step 5b does too.
 
 If `PR_PREP_GATE` is `skip`, continue to Step 2.
 
-If it is `run`, execute the pr-prep skill INLINE — there is no CLI
-runner for skills, so read `$GSTACK_ROOT/pr-prep/SKILL.md`
-and follow it step by step in this session, under its `/ship`
-integration contract (its Step 7):
+If it is `run`, invoke the pr-prep skill with the Skill tool and NO
+arguments (that is its audit; a host without a Skill tool reads
+`$GSTACK_ROOT/pr-prep/SKILL.md` and follows the audit), under
+its `/ship` contract (its Step 7):
 
 - Treat `GSTACK_FROM_SHIP` as set: skip pr-prep's own AskUserQuestion
   confirmations, it is ship that owns the gate decision
-- Use `--base "$BASE_BRANCH"` for the commit walk
-- Write pr-prep's machine-readable report through its Step 5b
-  (`{"summary": "...", "worst": "EXACT_DUP|UNVERIFIED|OVERLAP|SIBLING|CLEAN",
-  "commits": [...]}`) before returning here, including on EXACT_DUP
+- Its Step 5b writes the report (`worst`: EXACT_DUP|UNVERIFIED|OVERLAP|
+  SIBLING|CLEAN) before returning here, including on EXACT_DUP
 
 Then enforce the gate on that report:
 
