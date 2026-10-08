@@ -456,6 +456,14 @@ function freshState(pr: PrInfo): PrState {
 
 const prNum = (subject: string) => /\((#\d+)\)\s*$/.exec(subject)?.[1] ?? null;
 
+/**
+ * The PR diff without the release files, anchored at the repository root:
+ * a plain `.` and `:(exclude)` resolve against --cwd, so a run from a
+ * subdirectory measured only that subtree (other counts, another patch-id,
+ * a false "changed since the last publish").
+ */
+const CODE_PATHSPEC: readonly string[] = [':(top)', ...RELEASE_FILES.map(f => `:(top,exclude)${f}`)];
+
 // ── facts ───────────────────────────────────────────────────────────────────
 
 export function collectFacts(c: Ctx): Facts {
@@ -493,10 +501,9 @@ export function collectFacts(c: Ctx): Facts {
     .map(line => line.split(' ')[2])
     .filter((p): p is string => !!p && inBase(p))
     .map(p => ({ upstream: p, version: show(p, 'VERSION'), pr: prNum(gitOut(c, ['log', '-1', '--format=%s', p]).trim()) }));
-  const exclude = RELEASE_FILES.map(f => `:(exclude)${f}`);
-  const stat = gitOut(c, ['diff', '--numstat', mb, head, '--', '.', ...exclude]).split('\n').filter(Boolean);
+  const stat = gitOut(c, ['diff', '--numstat', mb, head, '--', ...CODE_PATHSPEC]).split('\n').filter(Boolean);
   const lines = stat.reduce((n, l) => n + l.split('\t').slice(0, 2).reduce((a, x) => a + (Number(x) || 0), 0), 0);
-  const diffText = gitOut(c, ['diff', '--no-color', mb, head, '--', '.', ...exclude]);
+  const diffText = gitOut(c, ['diff', '--no-color', mb, head, '--', ...CODE_PATHSPEC]);
   const pid = diffText ? (d.git(['patch-id', '--stable'], { cwd: c.f.cwd, input: diffText }).stdout.trim().split(/\s+/)[0] ?? '') : '';
   const previous = readPublishedFacts(c.stateDir);
   const state = readStateFor(c.stateDir, pr);
