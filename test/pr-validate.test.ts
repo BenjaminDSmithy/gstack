@@ -50,7 +50,12 @@ describe('validationEnv', () => {
 describe('selectTests', () => {
   const universe = ['test/a.test.ts', 'test/b.test.ts', 'test/gen-skill-docs.test.ts', 'test/skill-validation.test.ts', 'test/egress-receipt-wiring.test.ts',
     'test/spawnsync-timeout-tripwire.test.ts', 'test/agents-digest.test.ts', 'test/gstack-version-bump.test.ts'];
-  const src: Record<string, string> = { 'test/b.test.ts': "spawnSync(path.join(ROOT, 'bin', 'gstack-thing'))", 'test/a.test.ts': "import '../lib/foo';" };
+  const src: Record<string, string> = {
+    'test/b.test.ts': "spawnSync(path.join(ROOT, 'bin', 'gstack-thing'));\nconst cli = path.resolve(import.meta.dir, '../browse/src/cli.ts');",
+    'test/a.test.ts': "import { foo } from '../lib/foo';\nconst fixture = 'docs/notes.txt';",
+    'test/spawnsync-timeout-tripwire.test.ts': "import { walk } from './helpers/walk.js';\nconst m = await import('../scripts/dir');",
+    'test/agents-digest.test.ts': "import '../lib/side-effect';\nconst { q } = require(\"../lib/req\");",
+  };
   const sel = (changed: string[], extra: Partial<Parameters<typeof selectTests>[0]> = {}) =>
     selectTests({ changed, universe, declared: [], pkgVersionOnly: true, source: f => src[f] ?? '', ...extra });
 
@@ -66,8 +71,20 @@ describe('selectTests', () => {
     expect(s.full).toEqual([]);
   });
 
+  test('a test that imports a changed module selects it, whatever the specifier form', () => {
+    // git diff --name-only prints `lib/foo.ts`; the test imports '../lib/foo'.
+    const rules = (changed: string[]) => Object.fromEntries(sel(changed).files.map(f => [f.file, f.rules]));
+    expect(rules(['lib/foo.ts'])['test/a.test.ts']).toEqual(['imports:lib/foo.ts']);
+    expect(rules(['test/helpers/walk.ts'])['test/spawnsync-timeout-tripwire.test.ts']).toContain('imports:test/helpers/walk.ts');
+    expect(rules(['scripts/dir/index.ts'])['test/spawnsync-timeout-tripwire.test.ts']).toEqual(['imports:scripts/dir/index.ts']);
+    expect(rules(['lib/side-effect.ts'])['test/agents-digest.test.ts']).toEqual(['imports:lib/side-effect.ts']);
+    expect(rules(['lib/req.js'])['test/agents-digest.test.ts']).toEqual(['imports:lib/req.js']);
+    expect(rules(['browse/src/cli.ts'])['test/b.test.ts']).toContain('refs:browse/src/cli.ts');
+    expect(rules(['lib/foobar.ts'])['test/a.test.ts']).toBeUndefined();
+  });
+
   test('a path named in a test source selects it; release files never do', () => {
-    expect(sel(['lib/foo']).files.map(f => f.file)).toContain('test/a.test.ts');
+    expect(sel(['docs/notes.txt']).files.map(f => f.file)).toEqual(['test/a.test.ts']);
     expect(sel(['CHANGELOG.md']).files.map(f => f.file)).not.toContain('test/a.test.ts');
   });
 
@@ -116,7 +133,9 @@ describe('workflow parsing', () => {
 });
 
 describe('run, select and declare against a fixture PR tree', () => {
-  function fixture(name: string, testBody: string) {
+  // test/x.test.ts imports lib/y.ts the way real tests do: no extension, no path comment.
+  const X_HEAD = "import { test, expect } from 'bun:test';\nimport { y } from '../lib/y';\n";
+  function fixture(name: string, testBody: string | null, baseBody = "test('x', () => expect(y).toBe(1));") {
     const base = path.join(ROOT, name);
     const up = path.join(base, 'acme', 'fx.git');
     const tree = path.join(base, 'tree');
@@ -125,7 +144,7 @@ describe('run, select and declare against a fixture PR tree', () => {
     fs.mkdirSync(tree, { recursive: true });
     git(tree, 'init', '-q', '-b', 'main');
     write(tree, 'lib/y.ts', 'export const y = 1;\n');
-    write(tree, 'test/x.test.ts', "import { test, expect } from 'bun:test';\ntest('x', () => expect(1).toBe(1));\n");
+    write(tree, 'test/x.test.ts', `${X_HEAD}${baseBody}\n`);
     write(tree, 'test/z.test.ts', "import { test, expect } from 'bun:test';\ntest('z', () => expect(1).toBe(1));\n");
     git(tree, 'add', '-A');
     git(tree, 'commit', '-q', '-m', 'base');
@@ -133,7 +152,7 @@ describe('run, select and declare against a fixture PR tree', () => {
     git(tree, 'push', '-q', 'upstream', 'main');
     git(tree, 'checkout', '-q', '-b', 'pr/v');
     write(tree, 'lib/y.ts', 'export const y = 2;\n');
-    write(tree, 'test/x.test.ts', `import { test, expect } from 'bun:test';\n// covers lib/y.ts\n${testBody}\n`);
+    if (testBody !== null) write(tree, 'test/x.test.ts', `${X_HEAD}${testBody}\n`);
     git(tree, 'add', '-A');
     git(tree, 'commit', '-q', '-m', 'change y');
     const gh = ((args: string[]) => {
@@ -152,13 +171,13 @@ describe('run, select and declare against a fixture PR tree', () => {
   const pr = { repo: 'acme/fx', number: 5, headRef: 'pr/v', headOwner: 'me' };
 
   test('select prints only the touched test with its rule', async () => {
-    const f = fixture('sel', "test('x', () => expect(2).toBe(2));");
+    const f = fixture('sel', "test('x', () => expect(y).toBe(2));");
     expect(await f.call(['select'])).toBe(0);
-    expect(f.out.filter(l => l.startsWith('SELECT'))).toEqual(['SELECT\ttest/x.test.ts\tchanged,names:lib/y.ts']);
+    expect(f.out.filter(l => l.startsWith('SELECT'))).toEqual(['SELECT\ttest/x.test.ts\tchanged,imports:lib/y.ts']);
   });
 
   test('a green run records the verdict for the exact commit; a red one records worst=1', async () => {
-    const g = fixture('green', "test('x', () => expect(2).toBe(2));");
+    const g = fixture('green', "test('x', () => expect(y).toBe(2));");
     expect(await g.call(['run'])).toBe(0);
     const st = readStateFor(g.dir, pr)!;
     expect(st.validation).toMatchObject({ sha: git(g.tree, 'rev-parse', 'HEAD'), worst: 0 });
@@ -167,13 +186,20 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(summary).toContain('test/x.test.ts rc=0 1 pass 0 fail 0 skip ran=1 ok');
     expect(summary).not.toContain('test/z.test.ts');
 
-    const r = fixture('red', "test('x', () => expect(2).toBe(3));");
+    const r = fixture('red', "test('x', () => expect(y).toBe(3));");
     expect(await r.call(['run'])).toBe(1);
     expect(readStateFor(r.dir, pr)!.validation).toMatchObject({ worst: 1 });
   });
 
+  test('a module change alone runs the unchanged test that imports it, and its failure is red', async () => {
+    const f = fixture('import-red', null);
+    expect(await f.call(['run'])).toBe(1);
+    expect(f.out.find(l => l.startsWith('test/x.test.ts'))).toMatch(/RED: .*\[imports:lib\/y\.ts\]$/);
+    expect(readStateFor(f.dir, pr)!.validation).toMatchObject({ worst: 1 });
+  });
+
   test('a runner/dependency change keeps the run red unless the owner accepts the full-suite risk', async () => {
-    const f = fixture('full', "test('x', () => expect(2).toBe(2));");
+    const f = fixture('full', "test('x', () => expect(y).toBe(2));");
     write(f.tree, 'tsconfig.test.json', '{}\n');
     git(f.tree, 'add', '-A');
     git(f.tree, 'commit', '-q', '-m', 'tsconfig');
@@ -183,7 +209,7 @@ describe('run, select and declare against a fixture PR tree', () => {
   });
 
   test('declare adds a test that always runs; a dirty tree is refused', async () => {
-    const f = fixture('decl', "test('x', () => expect(2).toBe(2));");
+    const f = fixture('decl', "test('x', () => expect(y).toBe(2));");
     expect(await f.call(['declare', 'test/z.test.ts'])).toBe(0);
     expect(readStateFor(f.dir, pr)!.focused?.paths).toEqual(['test/z.test.ts']);
     f.out.length = 0;

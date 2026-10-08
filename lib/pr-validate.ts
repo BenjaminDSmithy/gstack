@@ -95,6 +95,38 @@ const CLASS_RELEASE = ['test/agents-digest.test.ts', 'test/gstack-version-bump.t
 
 export interface Selection { files: { file: string; rules: string[] }[]; full: string[] }
 
+// `from '…'`, `import '…'`, `import('…')`, `require('…')` with a relative specifier.
+const IMPORT_RE = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|^\s*import\s+)(['"])(\.{1,2}\/[^'"\n]+)\1/gm;
+// Any other relative path literal: path.join(import.meta.dir, '../src/x.ts'), new URL('../src/x.ts', import.meta.url).
+const REL_LITERAL_RE = /(['"`])(\.{1,2}\/[^'"`\n$]+)\1/g;
+const IMPORT_EXTS = ['.ts', '.tsx', '.js', '.mjs', '.cjs', '.json'];
+
+/**
+ * Repo-relative targets of a file's relative specifiers, one hop, extension
+ * unresolved: `imports` are import/require specifiers, `refs` every other
+ * relative path literal (resolved against the file's own directory, as
+ * import.meta.dir and __dirname joins are).
+ */
+export function relativeImports(file: string, src: string): { imports: string[]; refs: string[] } {
+  const dir = path.posix.dirname(file);
+  const resolve = (spec: string) => path.posix.normalize(path.posix.join(dir, spec));
+  const imports = new Set<string>();
+  for (const m of src.matchAll(IMPORT_RE)) imports.add(resolve(m[2]));
+  const refs = new Set<string>();
+  for (const m of src.matchAll(REL_LITERAL_RE)) {
+    const r = resolve(m[2]);
+    if (!imports.has(r)) refs.add(r);
+  }
+  return { imports: [...imports], refs: [...refs] };
+}
+
+/** The changed path an import specifier resolves to, the way bun resolves it (extension, /index, .js naming a .ts). */
+function importedChange(spec: string, changed: Set<string>): string | undefined {
+  const stem = spec.replace(/\.[mc]?js$/, '');
+  const candidates = [spec, ...IMPORT_EXTS.map(e => stem + e), ...IMPORT_EXTS.map(e => `${spec}/index${e}`)];
+  return candidates.find(c => changed.has(c));
+}
+
 /**
  * Pure. `changed` is `git diff --name-only <merge base with the pinned
  * upstream> HEAD`; `pkgVersionOnly` says package.json changed only in
@@ -118,18 +150,31 @@ export function selectTests(x: { changed: string[]; universe: string[]; declared
     if (/^(test|browse\/test|design\/test)\//.test(f)) CLASS_TEST.forEach(t => add(t, `class:test(${f})`));
     if (RELEASE_FILES.includes(f)) CLASS_RELEASE.forEach(t => add(t, `class:release(${f})`));
   }
-  // A test that names a changed path, or a changed bin's basename, exercises it.
-  const tokens = x.changed
-    .filter(f => !RELEASE_FILES.includes(f) && !universe.has(f))
+  // A test that imports a changed module (one hop, the way bun resolves the
+  // specifier), points a relative path literal at it, names a changed path,
+  // or names a changed bin's basename, exercises it. Tests import without
+  // the extension ('../lib/foo'), which `git diff --name-only` never
+  // prints, so the edge is resolved rather than searched for as text.
+  const nonRelease = x.changed.filter(f => !RELEASE_FILES.includes(f));
+  const importable = new Set(nonRelease);
+  const tokens = nonRelease
+    .filter(f => !universe.has(f))
     .flatMap(f => {
       const out = [f];
       const base = path.basename(f);
       if (f.startsWith('bin/') && base.length >= 6) out.push(base);
       return out;
     });
-  if (tokens.length) {
+  if (importable.size) {
     for (const t of x.universe) {
       const src = x.source(t);
+      const rel = relativeImports(t, src);
+      for (const [kind, specs] of [['imports', rel.imports], ['refs', rel.refs]] as const) {
+        for (const spec of specs) {
+          const hit = importedChange(spec, importable);
+          if (hit && hit !== t) add(t, `${kind}:${hit}`);
+        }
+      }
       const hit = tokens.find(tok => src.includes(tok));
       if (hit) add(t, `names:${hit}`);
     }
