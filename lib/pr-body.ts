@@ -75,8 +75,10 @@ not OPEN, pre-write gate), 40 liveness pending (check).`;
 export const FACTS_BEGIN = '<!-- pr-prep:facts:begin v1 -->';
 export const FACTS_END = '<!-- pr-prep:facts:end -->';
 const ASSET_RE = /https:\/\/github\.com\/user-attachments\/assets\/[0-9a-fA-F-]{8,}/g;
-const TICKED_RE = /^\s*[-*] \[[xX]\] .+$/gm;
-const BOX1_RE = /^(\s*[-*] \[)([ xX])(\] Liveness screenshot attached.*)$/m;
+// GitHub task-list items: `-`, `*` or `+` bullets and `1.`/`1)` numbers; `[x]` or `[X]`.
+const TICKED_RE = /^\s*(?:[-*+]|\d+[.)]) \[[xX]\] .+$/gm;
+const TICK_PREFIX_RE = /^(?:[-*+]|\d+[.)]) \[[xX]\]/;
+const BOX1_RE = /^(\s*(?:[-*+]|\d+[.)]) \[)([ xX])(\] Liveness screenshot attached.*)$/m;
 const LIVENESS_HEADING_RE = /^## Liveness proof.*$/m;
 const PLACEHOLDER_RE = /Screenshot to follow|Pending: the live|\[OWNER: attach/i;
 
@@ -192,16 +194,24 @@ export function carryLiveness(next: string, live: string): string {
     if (liveText.match(ASSET_RE)) out = out.slice(0, nextSec.start) + liveText + out.slice(nextSec.end);
   }
   const liveBox = BOX1_RE.exec(live);
-  if (liveBox && /[xX]/.test(liveBox[2])) out = out.replace(BOX1_RE, (_m, a: string, _b: string, c: string) => `${a}x${c}`);
+  // The owner's own box character: `[X]` stays `[X]`.
+  if (liveBox && /[xX]/.test(liveBox[2])) out = out.replace(BOX1_RE, (_m, a: string, _b: string, c: string) => `${a}${liveBox[2]}${c}`);
   return out;
 }
+
+/** A ticked line as compared: trimmed, any bullet or number as `-`, the box as `[x]`. */
+const tickKey = (line: string) => line.trim().replace(TICK_PREFIX_RE, '- [x]');
 
 /** Every live attachment URL and ticked checklist line that the outgoing body would drop. */
 export function lostOwnerContent(live: string, next: string): string[] {
   const lost: string[] = [];
   for (const url of new Set(live.match(ASSET_RE) ?? [])) if (!next.includes(url)) lost.push(`attachment ${url}`);
-  for (const line of new Set((live.match(TICKED_RE) ?? []).map(l => l.trim()))) {
-    if (!next.split('\n').some(n => n.trim() === line)) lost.push(`ticked: ${line}`);
+  const kept = new Set((next.match(TICKED_RE) ?? []).map(tickKey));
+  const seen = new Set<string>();
+  for (const line of (live.match(TICKED_RE) ?? []).map(l => l.trim())) {
+    if (seen.has(tickKey(line))) continue;
+    seen.add(tickKey(line));
+    if (!kept.has(tickKey(line))) lost.push(`ticked: ${line}`);
   }
   return lost;
 }
