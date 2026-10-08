@@ -97,6 +97,12 @@ const GH_WRITES: ReadonlyMap<string, readonly string[]> = new Map(Object.entries
   'gpg-key': ['add', 'delete'],
   project: ['create', 'edit', 'delete', 'close', 'copy', 'field-create', 'field-delete', 'item-add', 'item-archive',
     'item-create', 'item-delete', 'item-edit', 'link', 'unlink', 'mark-template'],
+  codespace: ['create', 'delete', 'edit', 'stop', 'rebuild'],
+}));
+/** Write verbs one level below a group (`gh repo deploy-key add`). */
+const GH_NESTED_WRITES: ReadonlyMap<string, readonly string[]> = new Map(Object.entries({
+  'repo deploy-key': ['add', 'delete'],
+  'repo autolink': ['create', 'delete'],
 }));
 /** gh flags that print help or the version and run nothing. */
 const GH_INERT_FLAGS = new Set(['-h', '--help', '--version']);
@@ -210,7 +216,12 @@ function ghWriteOp(args: readonly string[]): string | null {
       group = a;
     } else {
       if (a.startsWith('-')) return `gh ${group} (a flag before the subcommand)`;
-      return GH_WRITES.get(group)?.includes(a) ? `gh ${group} ${a}` : null;
+      if (GH_NESTED_WRITES.has(`${group} ${a}`)) {
+        group = `${group} ${a}`;
+        continue;
+      }
+      const verbs = GH_NESTED_WRITES.get(group) ?? GH_WRITES.get(group);
+      return verbs?.includes(a) ? `gh ${group} ${a}` : null;
     }
   }
   return null;
