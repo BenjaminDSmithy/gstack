@@ -26,7 +26,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  PrContextError, RELEASE_FILES, defaultGh, defaultGit, parsePrRefFor, upstreamRepoFromGh, remoteForRepo,
+  PrContextError, defaultGh, defaultGit, parsePrRefFor, upstreamRepoFromGh, remoteForRepo,
   pinBranch, readPr, viewerLogin, topicFor, defaultBranchFromGh, prStateDir, readStateFor, writeState, withPrLock, envelope,
   type GhRunner, type GitRunner, type PrInfo, type PrState,
 } from './pr-context';
@@ -635,7 +635,10 @@ function cmdSize(d: WatchDeps, f: Flags): number {
     const base = pinBranch(d.git, f.cwd, up, defaultBranchFromGh(d.gh, repo)).sha;
     // Every git call is checked: a failed merge-base used to leave mb '' and
     // print a confident GREEN churn=0. The diff runs from the top level, so a
-    // subdirectory cwd does not shrink the count to its own subtree.
+    // subdirectory cwd does not shrink the count to its own subtree. Release
+    // files count: pulls/N and the merged-PR baseline count every file, so
+    // excluding them scored one tree lower before opening than after (#3066:
+    // 521 churn and 3 files without them, 568 and 7 with, as GitHub reports).
     const run = (args: string[], cwd: string) => {
       const r = d.git(args, { cwd });
       if (r.error || r.status !== 0) throw new PrContextError(`git ${args[0]} failed: ${(r.error ?? r.stderr).trim().split('\n').at(-1) || `exit ${r.status}`}`, 1);
@@ -644,7 +647,7 @@ function cmdSize(d: WatchDeps, f: Flags): number {
     const top = run(['rev-parse', '--show-toplevel'], f.cwd);
     const mb = run(['merge-base', 'HEAD', base], top);
     if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(mb)) throw new PrContextError(`git merge-base printed no commit (got ${JSON.stringify(mb.slice(0, 80))})`, 1);
-    const num = run(['diff', '--numstat', mb, 'HEAD', '--', '.', ...RELEASE_FILES.map(r => `:(exclude)${r}`)], top).split('\n').filter(Boolean);
+    const num = run(['diff', '--numstat', mb, 'HEAD'], top).split('\n').filter(Boolean);
     const commits = run(['rev-list', '--no-merges', '--count', `${mb}..HEAD`], top);
     if (!/^\d+$/.test(commits)) throw new PrContextError(`git rev-list printed no count (got ${JSON.stringify(commits.slice(0, 80))})`, 1);
     ours = {
