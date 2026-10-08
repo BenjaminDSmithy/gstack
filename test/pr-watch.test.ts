@@ -126,16 +126,30 @@ describe('cross-references', () => {
 });
 
 describe('size', () => {
-  test('static thresholds: #3032 RED, #3066 AMBER, a small PR GREEN', () => {
+  test('static thresholds: #3032 RED, #3066 AMBER, a small PR GREEN, a wide one not', () => {
     expect(sizeVerdict({ churn: 4665, files: 16 }, []).verdict).toBe('RED');
     expect(sizeVerdict({ churn: 568, files: 7 }, []).verdict).toBe('AMBER');
     expect(sizeVerdict({ churn: 60, files: 3 }, []).verdict).toBe('GREEN');
+    expect(sizeVerdict({ churn: 60, files: 30 }, []).verdict).toBe('AMBER'); // files count too, not churn alone
   });
-  test('a live sample of five or more sets the green bound at its p90', () => {
-    const sample = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100].map(c => ({ churn: c, files: 1 }));
-    expect(percentile(sample.map(s => s.churn), 0.9)).toBe(91);
-    expect(sizeVerdict({ churn: 95, files: 1 }, sample)).toMatchObject({ verdict: 'AMBER', live: true });
-    expect(sizeVerdict({ churn: 90, files: 1 }, sample).verdict).toBe('GREEN');
+  test('a live sample of twenty or more sets the green bound at its p90', () => {
+    const sample = Array.from({ length: 20 }, (_, i) => ({ churn: 10 * (i + 1), files: 1 }));
+    expect(percentile(sample.map(s => s.churn), 0.9)).toBe(181);
+    expect(sizeVerdict({ churn: 185, files: 1 }, sample)).toMatchObject({ verdict: 'AMBER', live: true });
+    expect(sizeVerdict({ churn: 180, files: 1 }, sample).verdict).toBe('GREEN');
+  });
+  test('a small live sample falls back to the static thresholds: one outlier is not a p90', () => {
+    // upstream's merged contributor PRs among the last 200 merged, read 2026-10-08: 9 PRs, one of churn 7058.
+    const churn = [36, 41, 52, 55, 66, 83, 187, 334, 7058];
+    const files = [1, 2, 2, 3, 3, 4, 9, 18, 54];
+    const sample = churn.map((c, i) => ({ churn: c, files: files[i] }));
+    expect(sizeVerdict({ churn: 568, files: 7 }, sample)).toMatchObject({ verdict: 'AMBER', live: false });
+  });
+  test('the verdict never falls as a PR grows, even when the live green bound passes the static amber one', () => {
+    const sample = Array.from({ length: 20 }, () => ({ churn: 3000, files: 10 }));
+    expect(sizeVerdict({ churn: 2500, files: 10 }, sample).verdict).toBe('GREEN');
+    expect(sizeVerdict({ churn: 1900, files: 11 }, sample).verdict).toBe('AMBER');
+    expect(sizeVerdict({ churn: 3100, files: 5 }, sample).verdict).toBe('RED');
   });
 });
 
