@@ -8,8 +8,9 @@ and replace.
 
 ### 1. The template
 
-If `<state dir>/body.tmpl.md` does not exist yet, build it from the live
-body. Read the live body only through the envelope:
+If `<state dir>/body.tmpl.md` does not exist yet (render names that path
+when it is missing), build it from the live body. Read the live body only
+through the envelope:
 
 ```bash
 ~/.claude/skills/gstack/bin/gstack-issue-guard pr-body <number> --repo <upstream owner/name>
@@ -26,9 +27,11 @@ any line that states another PR's version claim.
 ~/.claude/skills/gstack/bin/gstack-pr-body render --pr <number> --repo <upstream owner/name>
 ```
 
-`RESULT REFUSED` with `LOST` lines: the new body would drop a live
-screenshot or a ticked box. Put them in the template. With `LINT` lines,
-fix the prose. Never publish around a refusal.
+`RESULT REFUSED` (exit 20) with `LOST` lines: the new body would drop a
+live screenshot or a ticked box. Put them in the template. With `LINT`
+lines, fix the prose. With `FACTS` lines, move the template's
+`<!-- pr-prep:facts -->` out of its Liveness proof section. Never publish
+around a refusal.
 
 ### 3. Publish, with the owner's yes
 
@@ -42,12 +45,18 @@ the body's sha256 from render's `RESULT` line. On yes:
 
 - Exit 20 naming the body's sha256: the file is not the body the owner
   approved (it was re-rendered). Ask again with the new sha256.
+- Exit 20 naming the facts block: it is not the one render generated for
+  this head. Render again; never edit the facts block by hand.
 - Exit 20 with `live-diff=<x>`: the live body is not the one last
   published here (an owner or maintainer edit, or the first publish over a
   hand-written body). Show the owner the enveloped diff, and only after
   they accept it re-run with `--accept-live-diff <x>`. `<x>` pairs that
   live body with this rendered body: if either one changes, publish shows
   a new diff and a new value.
+- Exit 30 from the pre-write gate (a latched P0 or unacknowledged P1, an
+  UNVERIFIED poll, or a PR that is not open): the watch section says what
+  to do. `RESULT PRECONDITION the pre-write gate ran ... before the edit`:
+  run publish again.
 - Exit 30 naming the PR head: a push landed after the render, so the
   facts describe an older head. Render again, show the owner, and ask
   again with the new sha256. A sync or `ci:` push marks the body stale

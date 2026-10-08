@@ -15,6 +15,10 @@
   gstack-pr-validate (declare it first) before saying otherwise.
 - `NO_DRAFT` for a stale run, a newer run, or missing evidence: wait for
   the newer run, or report what is missing.
+- `RESULT AGGREGATE` (exit 10): the aggregate job failed with no failed
+  shard; report the enveloped job log tail. `RESULT NOTHING` (exit 11): no
+  Windows shard failed on this head. Exit 40: the PR head moved or is gone
+  from its remote; triage again once it settles.
 
 A fork contributor cannot re-run upstream jobs, so the remedy is one empty
 `ci:` commit. Ask the owner with AskUserQuestion, with
@@ -28,8 +32,10 @@ file the RESULT line names). On yes:
 
 retrigger refuses (exit 30) a draft that is not bound to the PR's current
 head and newest Windows run, or whose bytes changed since triage. Never
-edit or hand-write the draft: re-run triage and ask again. The new head
-makes the PR body's facts stale, so run the body mode next.
+edit or hand-write the draft: re-run triage and ask again. It also refuses
+while the body is stale from an earlier push (exit 32: run the body mode
+first) or a sync is staged (exit 50: push or abort it). The new head makes
+the PR body's facts stale, so run the body mode next.
 
 For disclosure (never as clearance), the per-day flake counts across
 upstream runs:
