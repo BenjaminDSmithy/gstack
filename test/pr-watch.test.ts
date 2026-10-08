@@ -379,4 +379,50 @@ describe('LaunchAgent runner', () => {
     expect(log.match(/skip /g)).toHaveLength(2);
     expect(fs.existsSync(path.join(base, 'pwned'))).toBe(false);
   });
+
+  test('a watch that cannot verify, or whose worktree is gone, notifies on its second failed run in a row', () => {
+    const base = path.join(ROOT, 'runner-fail');
+    const bin = path.join(base, 'gstack', 'bin');
+    const fakeBin = path.join(base, 'fakebin');
+    const root = path.join(base, 'state');
+    fs.mkdirSync(bin, { recursive: true });
+    fs.mkdirSync(fakeBin, { recursive: true });
+    const sh = (p: string, body: string) => { fs.writeFileSync(p, `#!/bin/bash\n${body}\n`); fs.chmodSync(p, 0o755); };
+    sh(path.join(bin, 'gstack-paths'), `echo "${root}"`);
+    sh(path.join(bin, 'gstack-pr-watch'), `exit "$(cat "${base}/rc-$3")"`);
+    sh(path.join(fakeBin, 'osascript'), `printf '%s\\n' "$2" >> "${base}/notified"`);
+    const enable = (topic: string, v: Record<string, unknown>) => {
+      const d = path.join(root, 'projects', 'me-gw', 'pr-drafts', topic);
+      fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(d, 'watch.json'), JSON.stringify(v));
+    };
+    enable('a', { repo: 'acme/gw', number: 20, cwd: base });
+    enable('b', { repo: 'acme/gw', number: 21, cwd: base });
+    enable('c', { repo: 'acme/gw', number: 22, cwd: path.join(base, 'reaped') });
+    const rc = (n: number, v: number) => fs.writeFileSync(path.join(base, `rc-${n}`), `${v}\n`);
+    const notified = () => (fs.existsSync(path.join(base, 'notified')) ? fs.readFileSync(path.join(base, 'notified'), 'utf8').trim().split('\n') : []);
+    const runOnce = () => {
+      const r = spawnSync('/bin/bash', [path.join(import.meta.dir, '..', 'contrib', 'pr-watch', 'pr-watch-runner.sh')], {
+        encoding: 'utf8', timeout: 60_000, env: { ...process.env, GSTACK_DIR: path.join(base, 'gstack'), PATH: `${fakeBin}:${process.env.PATH}` },
+      });
+      expect(r.status).toBe(0);
+    };
+    rc(20, 12);
+    rc(21, 1);
+    runOnce();
+    expect(notified()).toEqual([]);
+    runOnce();
+    expect(notified()).toEqual([
+      'display notification "PR #20: watch could not verify (rc=12)" with title "gstack pr-watch"',
+      'display notification "PR #21: watch could not verify (rc=1)" with title "gstack pr-watch"',
+      'display notification "PR #22: watch stopped, its worktree is gone" with title "gstack pr-watch"',
+    ]);
+    runOnce();
+    expect(notified()).toHaveLength(3);
+    rc(20, 0);
+    runOnce();
+    rc(20, 12);
+    runOnce();
+    expect(notified().filter(l => l.includes('#20'))).toHaveLength(1);
+  });
 });

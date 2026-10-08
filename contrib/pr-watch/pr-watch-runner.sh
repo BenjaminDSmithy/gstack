@@ -1,13 +1,33 @@
 #!/bin/bash
 # pr-watch runner: polls every PR enabled with `gstack-pr-watch enable` and
-# raises a macOS notification while a P0 or P1 signal waits for the owner.
-# Opt-in: the owner installs the LaunchAgent (README.md). Reads only.
+# raises a macOS notification while a P0 or P1 signal waits for the owner,
+# and when a watch keeps failing, so a dead watch never reads as quiet.
+# Opt-in: the owner installs the LaunchAgent (README.md). A notification
+# carries fixed text only: a PR number, a signal class or an exit code.
 set -u
 GSTACK_DIR=${GSTACK_DIR:-$HOME/.claude/skills/gstack}
 ROOT=$("$GSTACK_DIR/bin/gstack-paths" --get GSTACK_STATE_ROOT 2>/dev/null) || ROOT=$HOME/.gstack
 [ -n "$ROOT" ] || ROOT=$HOME/.gstack
 LOG=$ROOT/analytics/pr-watch.log
-mkdir -p "$ROOT/analytics"
+FAILS=$ROOT/analytics/pr-watch-failures
+mkdir -p "$ROOT/analytics" "$FAILS"
+
+notify() {
+  osascript -e "display notification \"$1\" with title \"gstack pr-watch\"" > /dev/null 2>&1 || true
+}
+
+# Count a failed run against its PR. The second failure in a row notifies,
+# then every 48th (about a day at 30 minutes): one 502 stays quiet, a watch
+# that cannot verify for good does not.
+failed() {
+  local key=$1 text=$2 count
+  count=$(cat "$FAILS/$key" 2>/dev/null)
+  case $count in ''|*[!0-9]*) count=0 ;; esac
+  count=$((count + 1))
+  echo "$count" > "$FAILS/$key"
+  if [ "$count" -eq 2 ] || [ $((count % 48)) -eq 0 ]; then notify "$text"; fi
+}
+
 for f in "$ROOT"/projects/*/pr-drafts/*/watch.json; do
   [ -f "$f" ] || continue
   repo=$(jq -r '.repo // empty' "$f" 2>/dev/null)
@@ -16,15 +36,20 @@ for f in "$ROOT"/projects/*/pr-drafts/*/watch.json; do
   case $n in ''|*[!0-9]*) echo "skip $f: bad number" >> "$LOG"; continue ;; esac
   case $repo in */*) ;; *) echo "skip $f: bad repo" >> "$LOG"; continue ;; esac
   case $repo in *[!A-Za-z0-9._/-]*) echo "skip $f: bad repo" >> "$LOG"; continue ;; esac
-  [ -d "$cwd" ] || { echo "skip $f: no worktree" >> "$LOG"; continue; }
+  key="${repo//\//_}-$n"
+  if [ ! -d "$cwd" ]; then
+    echo "skip $f: no worktree" >> "$LOG"
+    failed "$key" "PR #$n: watch stopped, its worktree is gone"
+    continue
+  fi
   "$GSTACK_DIR/bin/gstack-pr-watch" poll --pr "$n" --repo "$repo" --cwd "$cwd" > /dev/null 2>&1
   rc=$?
   printf '%s pr=%s repo=%s rc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$n" "$repo" "$rc" >> "$LOG"
   case $rc in
-    10) level='P0: superseded or closed' ;;
-    11) level='P1: needs attention' ;;
-    *) continue ;;
+    0) rm -f "$FAILS/$key" ;;
+    10) rm -f "$FAILS/$key"; notify "PR #$n P0: superseded or closed" ;;
+    11) rm -f "$FAILS/$key"; notify "PR #$n P1: needs attention" ;;
+    *) failed "$key" "PR #$n: watch could not verify (rc=$rc)" ;;
   esac
-  osascript -e "display notification \"PR #$n $level\" with title \"gstack pr-watch\"" > /dev/null 2>&1 || true
 done
 exit 0
