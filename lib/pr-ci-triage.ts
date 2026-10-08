@@ -341,6 +341,19 @@ export function failedShards(jobs: { name: string }[]): number[] {
   return [...new Set(all)].sort((a, b) => a - b);
 }
 
+const DRAFT_FILE_RE = /^ci-retrigger-\d+\.(?:txt|json)$/;
+
+/** Remove every ci-retrigger draft (message and binding) from the PR state dir. */
+export function pruneDrafts(dir: string): void {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const e of entries) if (DRAFT_FILE_RE.test(e)) fs.rmSync(path.join(dir, e), { force: true });
+}
+
 function treeOf(d: TriageDeps, cwd: string, sha: string): string | null {
   const r = d.git(['rev-parse', `${sha}^{tree}`], { cwd });
   return r.status === 0 ? r.stdout.trim() : null;
@@ -364,6 +377,9 @@ async function cmdRun(d: TriageDeps, f: Flags): Promise<number> {
   if (!f.pr) throw new PrContextError('--pr is required', 2);
   const repo = f.repo ?? upstreamRepoFromGh(d.gh, f.cwd);
   const pr = readPr(d.gh, repo, parsePrRefFor(f.pr, repo));
+  // Every triage starts by removing earlier drafts: only this run's verdict may leave one behind.
+  const dir = prStateDir({ cwd: f.cwd, topic: topicFor(pr.headRef), env: d.env });
+  pruneDrafts(dir);
   const stale: string[] = [];
   // gh's headRefOid is cross-checked against the head remote when one is configured here.
   const headRemote = pr.headRepo ? remoteForRepo(d.git, f.cwd, pr.headRepo) : null;
@@ -429,11 +445,16 @@ async function cmdRun(d: TriageDeps, f: Flags): Promise<number> {
     return TRIAGE_EXIT.NO_DRAFT;
   }
   await yieldToSignals();
-  const dir = prStateDir({ cwd: f.cwd, topic: topicFor(pr.headRef), env: d.env });
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = path.join(dir, `ci-retrigger-${runId}.txt`);
   fs.writeFileSync(file, draftMessage({ run: runId, head: pr.headOid, shards: triaged }), { mode: 0o600 });
-  d.out(`RESULT DRAFTED run=${runId} message=${file}`);
+  // The machine-readable binding: which head and run this draft was triaged on.
+  const binding = path.join(dir, `ci-retrigger-${runId}.json`);
+  fs.writeFileSync(binding, `${JSON.stringify({
+    v: 1, repo, pr: pr.number, run: runId, head: pr.headOid, tree: treeOf(d, f.cwd, pr.headOid), triagedAt: new Date().toISOString(),
+    shards: triaged.map(t => ({ shard: t.shard, klass: t.klass, signature: t.signature, sameTreeGreen: t.sameTreeGreen })),
+  }, null, 2)}\n`, { mode: 0o600 });
+  d.out(`RESULT DRAFTED run=${runId} message=${file} binding=${binding}`);
   for (const line of detail) d.out(line);
   d.out(`NEXT with the owner's yes in this turn: gstack-pr-sync retrigger --pr ${pr.number} --repo ${repo} --cwd ${shq(f.cwd)} --message ${shq(file)} --yes (it builds and pushes the empty commit; never commit or push by hand), then gstack-pr-body publish (its facts name the new head)`);
   return TRIAGE_EXIT.DRAFTED;
