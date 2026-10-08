@@ -270,8 +270,12 @@ describe('pure helpers', () => {
     expect(changelogBlock(BASE_CL, two)?.headings).toEqual(['1.0.2.0', '1.0.1.0']);
   });
 
-  test('renameBlockHeading rewrites only the first line', () => {
+  test('renameBlockHeading rewrites only the version and date, keeping the rest of the heading', () => {
     expect(renameBlockHeading('## [1.0.1.0] - 2026-10-02\n\n- ours\n', '1.0.3.0', TODAY)).toBe(`## [1.0.3.0] - ${TODAY}\n\n- ours\n`);
+    // 87 CHANGELOG headings carry a title after the date (`## [0.15.13.0] - 2026-04-04. Team Mode`).
+    const titled = '## [1.0.1.0] - 2026-10-02. Team Mode\n\n- ours\n';
+    expect(renameBlockHeading(titled, '1.0.1.0', '2026-10-02')).toBe(titled);
+    expect(renameBlockHeading(titled, '1.0.3.0', TODAY)).toBe(`## [1.0.3.0] - ${TODAY}. Team Mode\n\n- ours\n`);
     expect(() => renameBlockHeading('- no heading\n', '1.0.3.0', TODAY)).toThrow();
   });
 

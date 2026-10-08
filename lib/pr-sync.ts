@@ -160,12 +160,26 @@ export function rebuildChangelog(base: string, block: string): string {
   return base.slice(0, i) + block + base.slice(i);
 }
 
-/** Rewrites only the block's first line to `## [V] - <date>`. */
+/** `## [V] - <date><rest>`: the version, the date (if any) and whatever follows (a title such as `. Team Mode`). */
+const HEADING_PARTS_RE = /^## \[([^\]]+)\](?: - (\d{4}-\d{2}-\d{2}))?(.*)$/;
+
+/**
+ * Re-versions the block's heading: only the `[version]` and the date
+ * change, the rest of the line stays. With the version and date unchanged
+ * (or no date to keep) the block comes back as it was.
+ */
 export function renameBlockHeading(block: string, version: string, date: string): string {
   const nl = block.indexOf('\n');
   const first = nl < 0 ? block : block.slice(0, nl);
-  if (!HEADING_RE.test(first)) throw new PrContextError('the CHANGELOG block does not start with a ## [version] heading', 30);
-  return `## [${version}] - ${date}` + (nl < 0 ? '' : block.slice(nl));
+  const m = HEADING_PARTS_RE.exec(first);
+  if (!m) throw new PrContextError('the CHANGELOG block does not start with a ## [version] heading', 30);
+  const [, current, currentDate, rest] = m;
+  if (current === version && (currentDate === undefined || currentDate === date)) return block;
+  return `## [${version}] - ${date}${rest}` + (nl < 0 ? '' : block.slice(nl));
+}
+
+function headingRest(block: string): string {
+  return HEADING_PARTS_RE.exec(block.split('\n', 1)[0])?.[3] ?? '';
 }
 
 export function blockDate(block: string): string | null {
@@ -872,6 +886,7 @@ function checkInvariants(c: Ctx, p: Pinned, pre: Pre, scratch: string, version: 
     if (cl !== rebuildChangelog(baseCl, newBlock)) throw fail('CHANGELOG.md is not upstream\'s file with our one entry on top');
     const bodyOf = (b: string) => b.slice(b.indexOf('\n') + 1);
     if (bodyOf(newBlock) !== bodyOf(pre.block ?? '')) throw fail('our CHANGELOG entry body changed');
+    if (headingRest(newBlock) !== headingRest(pre.block ?? '')) throw fail('our CHANGELOG heading lost the text after its date');
     const top = HEADING_RE.exec(cl.slice(firstEntryOffset(cl)))?.[1];
     if (top !== version) throw fail(`the top CHANGELOG heading is [${top}], not [${version}]`);
   } else if (cl !== baseCl) {
