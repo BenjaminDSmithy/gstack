@@ -696,6 +696,7 @@ function cmdRun(c: Ctx): number {
 function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string): number {
   const { d } = c;
   const state = readStateFor(c.stateDir, c.pr);
+  const declaredAtStart = new Set(state?.focused?.paths ?? []);
   const { sel, mb, changed } = selection(c, state);
   const env = validationEnv(d.env, tmp, mb, writeCiGitConfig(outDir));
   const lines: string[] = [];
@@ -813,13 +814,23 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   const skipped = unverified.length ? `; ${unverified.length} unverified (every test skipped: ${unverified.slice(0, 3).join(', ')}${unverified.length > 3 ? ', ...' : ''})` : '';
   // The summary is what the push question shows and gstack-pr-body publishes: a waiver must travel with it.
   const waived = sel.full.length && c.f.acceptFull ? `; FULL waived (${sel.full.join(', ')}): the full suite did not run` : '';
-  const summary = `${green}/${sel.files.length} selected files green${skipped}${waived}${worst ? '; RED' : ''}`;
-  lines.push(`VALIDATE-END worst=${worst}`);
-  fs.writeFileSync(path.join(outDir, 'summary.txt'), lines.join('\n') + '\n');
+  const summaryOf = () => `${green}/${sel.files.length} selected files green${skipped}${waived}${worst ? '; RED' : ''}`;
+  const writeSummary = () => fs.writeFileSync(path.join(outDir, 'summary.txt'), [...lines, `VALIDATE-END worst=${worst}`].join('\n') + '\n');
+  writeSummary();
+  let summary = summaryOf();
   withPrLock(c.stateDir, () => {
     const s = readStateFor(c.stateDir, c.pr) ?? freshState(c.pr);
+    // A declare that landed while this run was in flight named a file it never ran (the selection read
+    // the declared set at the start), and the declare found no verdict to void yet: this one cannot stand.
+    const late = (s.focused?.paths ?? []).filter(p => !declaredAtStart.has(p));
+    if (late.length) {
+      line(`declared during the run, never ran: ${late.join(', ')}: run gstack-pr-validate run again`, true);
+      writeSummary();
+      summary = summaryOf();
+    }
     writeState(c.stateDir, { ...s, validation: { sha, worst: worst ? 1 : 0, summary, at: d.now().toISOString() } });
   });
+  lines.push(`VALIDATE-END worst=${worst}`);
   d.out(`RESULT ${worst ? 'RED' : 'GREEN'} sha=${sha.slice(0, 12)} ${summary} summary=${path.join(outDir, 'summary.txt')}`);
   for (const l of lines) d.out(l);
   return worst ? VALIDATE_EXIT.RED : VALIDATE_EXIT.GREEN;
