@@ -140,7 +140,8 @@ export function renderFactsBlock(f: Facts): string {
   if (f.merges.length) {
     lines.push(`- Merges of \`${f.baseRef}\` (${f.merges.length}): ${f.merges.map(m => `\`${s12(m.upstream)}\` (v${m.version}${m.pr ? `, ${m.pr}` : ''})`).join(', ')}.`);
   }
-  const same = f.diff.previousPatchId === null ? '' : f.diff.previousPatchId === f.diff.patchId ? ', unchanged since the last publish' : ', changed since the last publish';
+  // previousPatchId is the 12-hex patch-id the last PUBLISHED facts block printed ('' for an empty diff).
+  const same = f.diff.previousPatchId === null ? '' : f.diff.previousPatchId.slice(0, 12) === f.diff.patchId.slice(0, 12) ? ', unchanged since the last publish' : ', changed since the last publish';
   lines.push(`- PR diff without release files: ${f.diff.files} file${f.diff.files === 1 ? '' : 's'}, ${f.diff.lines} lines, patch-id \`${f.diff.patchId.slice(0, 12) || '-'}\`${same}.`);
   lines.push(`- Commits: ${f.commits} (excluding merges and the \`${f.baseRef}\` commits they bring in).`);
   const v = f.validation;
@@ -486,17 +487,14 @@ export function collectFacts(c: Ctx): Facts {
   const lines = stat.reduce((n, l) => n + l.split('\t').slice(0, 2).reduce((a, x) => a + (Number(x) || 0), 0), 0);
   const diffText = gitOut(c, ['diff', '--no-color', mb, head, '--', '.', ...exclude]);
   const pid = diffText ? (d.git(['patch-id', '--stable'], { cwd: c.f.cwd, input: diffText }).stdout.trim().split(/\s+/)[0] ?? '') : '';
-  let previous: Facts | null = null;
-  try {
-    previous = JSON.parse(fs.readFileSync(path.join(c.stateDir, 'facts.json'), 'utf8')) as Facts;
-  } catch { /* first run */ }
+  const previous = readPublishedFacts(c.stateDir);
   const state = readStateFor(c.stateDir, pr);
   const ci = readCiAt(c, head);
   return {
     at: d.now().toISOString().replace(/\.\d+Z$/, 'Z'), head, codeSha, emptyCi, baseRef: pr.baseRef, baseSha: base,
     baseVersion: show(base, 'VERSION'), basePr: prNum(gitOut(c, ['log', '-1', '--format=%s', base]).trim()),
     version: show(head, 'VERSION'), merges,
-    diff: { files: stat.length, lines, patchId: pid, previousPatchId: previous?.diff.patchId ?? null },
+    diff: { files: stat.length, lines, patchId: pid, previousPatchId: previous ? previous.patchId : null },
     commits: Number(gitOut(c, ['rev-list', '--no-merges', '--count', `${mb}..${head}`]).trim()),
     validation: state?.validation ? { sha: state.validation.sha, worst: state.validation.worst, summary: state.validation.summary } : null,
     ci,
@@ -652,6 +650,24 @@ export function lineDiff(a: string, b: string): string {
   return out.join('\n');
 }
 
+/**
+ * What the last verified publish put in the PR: its facts block's head and
+ * patch-id (12 hex; '' for an empty diff). facts and render rewrite
+ * facts.json on every run, refusals included, so "since the last publish"
+ * reads this file, which only a verified publish writes.
+ */
+interface PublishedFacts { v: 1; at: string; head: string; patchId: string; bodySha256: string }
+const PUBLISHED_FACTS = 'published-facts.json';
+
+function readPublishedFacts(dir: string): PublishedFacts | null {
+  try {
+    const p = JSON.parse(fs.readFileSync(path.join(dir, PUBLISHED_FACTS), 'utf8')) as PublishedFacts;
+    return p && p.v === 1 && typeof p.patchId === 'string' ? p : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The 12-hex head the body's facts block names (`- Head \`<sha>\``), or null. */
 export function factsHeadOf(body: string): string | null {
   const block = body.match(FACTS_BLOCK_RE)?.[0] ?? '';
@@ -783,6 +799,11 @@ function cmdPublish(c: Ctx): number {
       return BODY_EXIT.ERROR;
     }
     writeState(c.stateDir, { ...(state ?? freshState(c.pr)), lastPublishedBodySha256: sha256(body), bodyStaleSince: null });
+    const block = body.match(FACTS_BLOCK_RE)?.[0] ?? '';
+    const published: PublishedFacts = {
+      v: 1, at: d.now().toISOString(), head: factsHead, patchId: /patch-id `([0-9a-f]{12})`/.exec(block)?.[1] ?? '', bodySha256: sha256(body),
+    };
+    fs.writeFileSync(path.join(c.stateDir, PUBLISHED_FACTS), JSON.stringify(published, null, 2) + '\n', { mode: 0o600 });
     fs.writeFileSync(path.join(c.stateDir, `pr-body-${today(d)}.published.md`), body, { mode: 0o600 });
     d.out(`RESULT PUBLISHED pr=${c.pr.number} sha256=${sha256(body).slice(0, 12)} head=${factsHead} body-stale-since=none cleared-stale=${stale ? s12(stale) : 'none'}`);
     d.out('WARNING if the owner has the PR description open for editing in a browser tab, they must cancel that edit: saving it overwrites this body and its screenshot.');

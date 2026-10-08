@@ -444,6 +444,21 @@ describe('publish', () => {
     expect(fs.readdirSync(g.dir).some(n => n.startsWith('pr-body-restore-'))).toBe(true);
   });
 
+  test('"changed/unchanged since the last publish" compares with the last publish, not the last render', async () => {
+    const f = fixture('since', TEMPLATE);
+    const diffLine = (file: string) => fs.readFileSync(file, 'utf8').split('\n').find(l => l.startsWith('- PR diff'))!;
+    const r1 = await rendered(f);
+    expect(diffLine(r1)).not.toContain('since the last publish');
+    expect(diffLine(await rendered(f))).not.toContain('since the last publish');
+    expect(await f.publish(r1, ...f.acceptLive())).toBe(0);
+    f.pushCommit('two');
+    expect(diffLine(await rendered(f))).toContain(', changed since the last publish');
+    const r2 = await rendered(f);
+    expect(diffLine(r2)).toContain(', changed since the last publish');
+    expect(await f.publish(r2)).toBe(0);
+    expect(diffLine(await rendered(f))).toContain(', unchanged since the last publish');
+  });
+
   test('the yes is bound to the body sha256 and the live-diff acceptance to the live body that was shown', async () => {
     const f = fixture('bind', TEMPLATE);
     const file = await rendered(f);
