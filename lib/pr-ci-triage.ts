@@ -99,14 +99,59 @@ export function logFailureEvidence(log: string): { failLines: number; unhandled:
   return { failLines, unhandled };
 }
 
-/** The last `::group::<file>:` line opened in the log: the file bun was in when it stopped. */
+/**
+ * A repo-relative test file path, or null. Text from a CI artifact or log
+ * reaches the trusted output lines and the ci: draft only through this
+ * check (any test can print a `::group::` line); everything else from CI
+ * is printed inside the untrusted envelope, or not at all.
+ */
+export function safeTestPath(raw: string): string | null {
+  const p = stripControl(raw).replace(/\\/g, '/').trim();
+  if (p.length > 200 || p.split('/').some(part => part === '' || part === '..')) return null;
+  return /^[A-Za-z0-9_@][A-Za-z0-9_@./-]*\.test\.[cm]?[jt]sx?$/.test(p) ? p : null;
+}
+
+/** The last `::group::<file>:` line opened in the log: the test file bun was in when it stopped (null when it is not a test path). */
 export function inFlightFile(log: string): string | null {
   const groups = [...log.matchAll(/^::group::(.+?):?\s*$/gm)];
   const last = groups.at(-1);
   if (!last) return null;
   const after = log.slice(last.index! + last[0].length);
-  return /^::endgroup::/m.test(after) ? null : last[1].replace(/\\/g, '/');
+  return /^::endgroup::/m.test(after) ? null : safeTestPath(last[1]);
 }
+
+/**
+ * The windows-result-<n> artifact's outcome, with every field type-checked:
+ * a malformed failingFiles counts as a named failure (never drafted), a
+ * missing one stays undefined (missing evidence).
+ */
+export function parseOutcome(text: string): ShardOutcome | null {
+  let raw: unknown;
+  try {
+    raw = (JSON.parse(text) as { outcome?: unknown } | null)?.outcome;
+  } catch {
+    return null;
+  }
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const ff = o.failingFiles;
+  const summary = o.summary && typeof o.summary === 'object' ? (o.summary as Record<string, unknown>) : null;
+  return {
+    status: typeof o.status === 'string' ? o.status : undefined,
+    exitCode: typeof o.exitCode === 'number' ? o.exitCode : null,
+    elapsedMs: typeof o.elapsedMs === 'number' ? o.elapsedMs : undefined,
+    failingFiles: ff === undefined ? undefined : Array.isArray(ff) ? ff.map(x => (typeof x === 'string' ? x : '(not a string)')) : ['(malformed failingFiles)'],
+    unattributedFailures: typeof o.unattributedFailures === 'number' ? o.unattributedFailures : undefined,
+    summary: summary ? { sawTerminalSummary: typeof summary.sawTerminalSummary === 'boolean' ? summary.sawTerminalSummary : null } : null,
+  };
+}
+
+const statusWord = (v: unknown): string => (typeof v === 'string' && /^[a-z-]{1,20}$/.test(v) ? v : 'unrecognised');
+const exitWord = (v: unknown): string => (Number.isInteger(v) ? String(v) : '?');
+const seconds = (ms: unknown): string => (typeof ms === 'number' && Number.isFinite(ms) ? String(Math.round(ms / 1000)) : '?');
+
+/** failingFiles entries that are not test paths: printed only inside the envelope. */
+export const unprintableFailing = (o: ShardOutcome | null): string[] => (o?.failingFiles ?? []).filter(f => !safeTestPath(f));
 
 /** Pure: classify one failed shard from its result artifact and (when read) its log. */
 export function classifyShard(shard: number, outcome: ShardOutcome | null, log: string | null): ShardTriage {
@@ -115,8 +160,12 @@ export function classifyShard(shard: number, outcome: ShardOutcome | null, log: 
   if (!outcome) return { ...base, klass: 'UNKNOWN', why: 'no windows-result artifact' };
   const failing = outcome.failingFiles ?? [];
   if (outcome.status === 'passed') return { ...base, klass: 'INFRA', why: 'the shard passed but its job failed: read the failing setup step' };
-  if (outcome.status === 'failed' && failing.length) return { ...base, klass: 'REAL', why: `failing: ${failing.join(', ')}` };
-  if (outcome.status === 'timed-out' && failing.length === 0) return { ...base, klass: 'HANG', why: `timed out after ${Math.round((outcome.elapsedMs ?? 0) / 1000)} s` };
+  if (outcome.status === 'failed' && failing.length) {
+    const shown = failing.map(safeTestPath).filter((f): f is string => !!f);
+    const hidden = failing.length - shown.length;
+    return { ...base, klass: 'REAL', why: `failing: ${shown.join(', ') || '(no printable test path)'}${hidden ? `; ${hidden} more entr${hidden === 1 ? 'y' : 'ies'}, printed as data below` : ''}` };
+  }
+  if (outcome.status === 'timed-out' && failing.length === 0) return { ...base, klass: 'HANG', why: `timed out after ${seconds(outcome.elapsedMs)} s` };
   if (outcome.status === 'failed' && (outcome.exitCode === 3 || outcome.exitCode === 9) && failing.length === 0) {
     if (!log) return { ...base, klass: 'UNKNOWN', why: `exit ${outcome.exitCode} with no failing test, but no shard log to read` };
     const iocp = IOCP_RE.exec(log);
@@ -125,7 +174,7 @@ export function classifyShard(shard: number, outcome: ShardOutcome | null, log: 
     const code = iocp ? String(Number(iocp[1])) : '';
     return { ...base, signature, klass: 'CRASH', why: iocp ? `Bun aborted: GetQueuedCompletionStatusEx error ${code}${IOCP_NAMES[code] ? ` (${IOCP_NAMES[code]})` : ''}` : 'GLib abort in g_system_thread_free' };
   }
-  return { ...base, klass: 'UNKNOWN', why: `status ${outcome.status ?? '?'} exit ${outcome.exitCode ?? '?'} failing ${failing.length}` };
+  return { ...base, klass: 'UNKNOWN', why: `status ${statusWord(outcome.status)} exit ${exitWord(outcome.exitCode)} failing ${failing.length}` };
 }
 
 /**
@@ -138,7 +187,7 @@ export function classifyShard(shard: number, outcome: ShardOutcome | null, log: 
 export function draftable(t: ShardTriage): boolean {
   const o = t.outcome;
   const onlyMissingSummary = o?.unattributedFailures === 1 && o.summary?.sawTerminalSummary === false;
-  const clean = t.logRead && t.failLines === 0 && t.unhandled === 0 && (o?.failingFiles ?? []).length === 0 && onlyMissingSummary;
+  const clean = t.logRead && t.failLines === 0 && t.unhandled === 0 && Array.isArray(o?.failingFiles) && o.failingFiles.length === 0 && onlyMissingSummary;
   if (t.klass === 'CRASH') return clean && !!t.signature && (o?.exitCode === 3 || o?.exitCode === 9);
   return t.klass === 'HANG' && clean && o?.status === 'timed-out' && !!t.sameTreeGreen;
 }
@@ -288,12 +337,7 @@ function cmdRun(d: TriageDeps, f: Flags): number {
   const triaged: ShardTriage[] = [];
   for (const n of shards) {
     const resFile = download(d, repo, runId, `windows-result-${n}`);
-    let outcome: ShardOutcome | null = null;
-    if (resFile) {
-      try {
-        outcome = (JSON.parse(fs.readFileSync(resFile, 'utf8')) as { outcome?: ShardOutcome }).outcome ?? null;
-      } catch { /* unreadable artifact: UNKNOWN */ }
-    }
+    const outcome = resFile ? parseOutcome(fs.readFileSync(resFile, 'utf8')) : null;
     const needsLog = outcome && outcome.status !== 'passed' && (outcome.failingFiles ?? []).length === 0;
     const logFile = needsLog ? download(d, repo, runId, `windows-free-test-shard-logs-${n}`) : null;
     const log = logFile ? fs.readFileSync(logFile, 'utf8') : null;
@@ -301,7 +345,9 @@ function cmdRun(d: TriageDeps, f: Flags): number {
     if (t.klass === 'HANG') t.sameTreeGreen = sameTreeGreen(d, f.cwd, repo, pr, run, n);
     triaged.push(t);
     d.out(`SHARD\t${n}\t${t.klass}${t.signature ? `(${t.signature})` : ''}\t${t.why}${t.inFlight ? `\tin-flight ${t.inFlight}` : ''}${t.klass === 'HANG' ? `\tsame-tree-green ${t.sameTreeGreen ?? 'none'}` : ''}`);
-    if (log) d.out(envelope(stripControl(log.split('\n').slice(-12).join('\n')), `ci-run-${runId}-shard-${n}`));
+    const hidden = unprintableFailing(t.outcome);
+    if (hidden.length) d.out(envelope(hidden.join('\n'), `ci-run-${runId}-shard-${n}-failing`));
+    if (log) d.out(envelope(log.split('\n').slice(-12).join('\n'), `ci-run-${runId}-shard-${n}`));
   }
   const ok = triaged.filter(draftable);
   if (ok.length !== triaged.length) {
@@ -345,10 +391,7 @@ function cmdOnset(d: TriageDeps, f: Flags): number {
         if (downloads >= CAP) { c.other++; continue; }
         downloads++;
         const res = download(d, repo, r.databaseId, `windows-result-${n}`);
-        let outcome: ShardOutcome | null = null;
-        try {
-          outcome = res ? ((JSON.parse(fs.readFileSync(res, 'utf8')) as { outcome?: ShardOutcome }).outcome ?? null) : null;
-        } catch { /* counted as other */ }
+        const outcome = res ? parseOutcome(fs.readFileSync(res, 'utf8')) : null;
         let log: string | null = null;
         if (outcome && (outcome.exitCode === 3 || outcome.exitCode === 9) && downloads < CAP) {
           downloads++;
