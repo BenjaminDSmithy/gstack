@@ -426,6 +426,18 @@ describe('run', () => {
     expect((await triage([])).code).toBe(11);
   });
 
+  test('a shard that timed out after a test failed is REAL: the file is named and the blame step printed', async () => {
+    // scripts/test-free-shards.ts keeps a named failure in failingFiles whatever the final status
+    const outcome = { status: 'timed-out', exitCode: null, elapsedMs: 563_000, failingFiles: ['test/skill-validation.test.ts'], unattributedFailures: 1, summary: { sawTerminalSummary: false } };
+    expect(classifyShard(5, outcome, null)).toMatchObject({ klass: 'REAL' });
+    const r = await triage([{ id: 301, sha: B, shards: { 5: { result: outcome } } }]);
+    expect(r.code).toBe(10);
+    expect(r.out[0]).toBe('RESULT NO_DRAFT run=301 shards=5:REAL');
+    expect(r.out.find(l => l.startsWith('SHARD\t5\t'))).toContain('test/skill-validation.test.ts');
+    expect(r.out.some(l => l.startsWith('BLAME shard 5'))).toBe(true);
+    expect(draftFiles(r)).toEqual([]);
+  });
+
   test('CI artifact text reaches trusted output and the draft only as a test path; the rest stays inside the envelope', async () => {
     // Everything printed outside BEGIN/END UNTRUSTED blocks, plus the draft file, must hold no control byte and no injected text.
     const trusted = (out: string[]) => out.join('\n').replace(new RegExp(`${TRACKER_ENVELOPE_BEGIN}[\\s\\S]*?${TRACKER_ENVELOPE_END}`, 'g'), '');
