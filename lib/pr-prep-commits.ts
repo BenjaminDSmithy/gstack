@@ -91,28 +91,51 @@ export function searchQualifier(c: AuditCommit): string | null {
 
 export interface AgentReport { summary: string; worst?: string; commits: { sha: string; subject?: string; bucket: string; topScore?: number; hits?: unknown[] }[] }
 
+const SHA_PREFIX_RE = /^[0-9a-f]{7,64}$/i;
+
 /**
  * Validate the agent's report and stamp what the agent never types: head,
- * base, time, the audited patch-ids. A CARRY commit's bucket is the worse of
- * its prior verdict and the delta search; a commit the agent did not report
- * is UNVERIFIED.
+ * base, time, the audited patch-ids. Every row counts: a commit takes the
+ * worst of all its rows, a row for a skipped commit still counts toward
+ * `worst`, and the agent's own `worst` is a floor. A row that names no
+ * commit between the base and HEAD (a typo, a wrong --base, a sha rewritten
+ * since `list`) or names it by fewer than 7 hex characters refuses the whole
+ * report (code 2): dropping it could hide an EXACT_DUP. A CARRY commit's
+ * bucket is the worse of its prior verdict and the delta search; a commit the
+ * agent did not report is UNVERIFIED.
  */
 export function stampReport(agent: unknown, list: CommitList, now: Date): Record<string, unknown> {
   const a = agent as AgentReport;
   if (!a || typeof a !== 'object' || typeof a.summary !== 'string' || !Array.isArray(a.commits)) {
     throw new PrContextError('the report needs {summary: string, commits: [...]}', 2);
   }
-  const byPrefix = (sha: string) => a.commits.find(c => typeof c.sha === 'string' && c.sha.length >= 7 && sha.startsWith(c.sha));
-  const commits = list.audit.map(c => {
-    const got = byPrefix(c.sha);
-    let bucket = got && rank(got.bucket) >= 0 ? got.bucket : 'UNVERIFIED';
-    if (c.mode === 'CARRY' && c.prior) bucket = worstOf([bucket, c.prior.bucket]);
-    return { sha: c.sha, subject: c.subject, bucket, mode: c.mode, topScore: got?.topScore ?? c.prior?.topScore ?? 0, hits: [...(got?.hits ?? []), ...(c.mode === 'CARRY' ? (c.prior?.hits ?? []) : [])] };
+  const known = [...list.audit.map(c => c.sha), ...list.skipped.map(s => s.sha)];
+  const rows = a.commits.map((r, i) => {
+    if (!r || typeof r !== 'object' || typeof r.sha !== 'string' || !SHA_PREFIX_RE.test(r.sha)) {
+      throw new PrContextError(`commits[${i}].sha must be 7 or more hex characters of a listed commit`, 2);
+    }
+    const prefix = r.sha.toLowerCase();
+    const n = known.filter(s => s.startsWith(prefix)).length;
+    if (n === 0) throw new PrContextError(`commits[${i}] (${prefix}) is not a commit between --base and HEAD: re-run list and audit the commits it prints`, 2);
+    if (n > 1) throw new PrContextError(`commits[${i}] (${prefix}) matches ${n} commits: give more of the sha`, 2);
+    return { ...r, sha: prefix };
   });
-  const worst = worstOf(commits.map(c => c.bucket));
+  const rowsFor = (sha: string) => rows.filter(r => sha.startsWith(r.sha));
+  const commits = list.audit.map(c => {
+    const got = rowsFor(c.sha);
+    let bucket: string = got.length ? worstOf(got.map(r => r.bucket)) : 'UNVERIFIED';
+    if (c.mode === 'CARRY' && c.prior) bucket = worstOf([bucket, c.prior.bucket]);
+    return { sha: c.sha, subject: c.subject, bucket, mode: c.mode, topScore: got[0]?.topScore ?? c.prior?.topScore ?? 0, hits: [...got.flatMap(r => (Array.isArray(r.hits) ? r.hits : [])), ...(c.mode === 'CARRY' ? (c.prior?.hits ?? []) : [])] };
+  });
+  const skipped = list.skipped.map(s => {
+    const got = rowsFor(s.sha);
+    return got.length ? { ...s, bucket: worstOf(got.map(r => r.bucket)) } : s;
+  });
+  const declared = a.worst === undefined || a.worst === null ? [] : [String(a.worst)];
+  const worst = worstOf([...commits.map(c => c.bucket), ...skipped.flatMap(s => ('bucket' in s ? [s.bucket] : [])), ...declared]);
   return {
     summary: a.summary, worst, commits,
-    skipped: list.skipped,
+    skipped,
     head: list.head, base_sha: list.base, generated_at: now.toISOString(),
     audited: list.audit.map((c, i) => ({ patchId: c.patchId, sha: c.sha, bucket: commits[i].bucket })),
   };
@@ -153,9 +176,11 @@ export const COMMITS_USAGE = `gstack-pr-prep-commits <list|stamp|self|paths> [op
           before as UNVERIFIED: full searches); release-only and empty
           commits are skipped and listed
   stamp   validate the agent's report (JSON file), fold CARRY verdicts in
-          (worst never drops), mark unreported commits UNVERIFIED, stamp
-          head, base_sha, generated_at and audited patch-ids; write --out
-          (and --persist) atomically
+          (worst never drops), take a commit's worst row, count rows for
+          skipped commits and the report's own worst, mark unreported
+          commits UNVERIFIED, refuse a row that names no listed or skipped
+          commit by 7+ hex characters; stamp head, base_sha, generated_at
+          and audited patch-ids; write --out (and --persist) atomically
   self    drop this branch's own open PR from a candidate list on stdin
   paths   print the default persistent report path for this branch
 

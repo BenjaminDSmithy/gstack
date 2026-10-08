@@ -87,6 +87,33 @@ describe('stampReport', () => {
     expect(r.audited.map((a: { sha: string }) => a.sha)).toEqual([sha.c1, sha.c4]);
   });
 
+  test('every row the agent reported counts toward worst, and its own worst is a floor', () => {
+    const l = listAuditCommits(defaultGit, repo, base, null);
+    const st = (commits: { sha: string; bucket: string }[], worst?: string) =>
+      stampReport({ summary: 's', ...(worst ? { worst } : {}), commits }, l, now) as Record<string, any>;
+    const twice = st([{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c1, bucket: 'EXACT_DUP' }, { sha: sha.c4, bucket: 'CLEAN' }]);
+    expect(twice.commits[0].bucket).toBe('EXACT_DUP');
+    expect(twice.worst).toBe('EXACT_DUP');
+    // c2 is skipped as release-only; a verdict reported for it still counts.
+    expect(st([{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4, bucket: 'CLEAN' }, { sha: sha.c2, bucket: 'EXACT_DUP' }]).worst).toBe('EXACT_DUP');
+    expect(st([{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4, bucket: 'CLEAN' }], 'EXACT_DUP').worst).toBe('EXACT_DUP');
+    expect(st([{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4, bucket: 'CLEAN' }], 'MAYBE').worst).toBe('UNVERIFIED');
+  });
+
+  test('a row naming no commit on the branch, or by fewer than 7 hex characters, refuses the report', () => {
+    const l = listAuditCommits(defaultGit, repo, base, null);
+    const codeOf = (fn: () => unknown): number | null => {
+      try { fn(); return null; } catch (e) { return (e as { code?: number }).code ?? -1; }
+    };
+    const st = (list: typeof l, commits: { sha: string; bucket: string }[]) => () => stampReport({ summary: 's', commits }, list, now);
+    expect(codeOf(st(l, [{ sha: sha.c1.slice(0, 6), bucket: 'EXACT_DUP' }]))).toBe(2);
+    expect(codeOf(st(l, [{ sha: sha.c1, bucket: 'CLEAN' }, { sha: 'deadbeefcafe', bucket: 'EXACT_DUP' }]))).toBe(2);
+    // A wrong --base (HEAD) leaves nothing to audit; the agent's rows must not stamp CLEAN.
+    const empty = listAuditCommits(defaultGit, repo, git('rev-parse', 'HEAD'), null);
+    expect(empty.audit).toEqual([]);
+    expect(codeOf(st(empty, [{ sha: sha.c4, bucket: 'EXACT_DUP' }]))).toBe(2);
+  });
+
   test('a malformed report and an unknown bucket fail closed', () => {
     const l = listAuditCommits(defaultGit, repo, base, null);
     expect(() => stampReport({ commits: [] }, l, now)).toThrow();
