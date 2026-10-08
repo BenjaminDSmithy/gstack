@@ -13,7 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   normalizeBody, renderFactsBlock, spliceFacts, stripFacts, carryLiveness, lostOwnerContent, lintBody, livenessOf,
-  publishedVersions, scanOutgoing, lineDiff, bodyMain, FACTS_BEGIN, FACTS_END, sha256, type Facts, type BodyDeps,
+  publishedVersions, scanOutgoing, lineDiff, bodyMain, manifestWithoutVersion, FACTS_BEGIN, FACTS_END, sha256, type Facts, type BodyDeps,
 } from '../lib/pr-body';
 import { prStateDir, topicFor, readStateFor, writeState, defaultGit, type GhRunner, type PrState } from '../lib/pr-context';
 import { listReceipts } from '../lib/egress-receipt';
@@ -151,6 +151,13 @@ describe('pure helpers', () => {
     expect(phoneLines(scanOutgoing(body, []))).toEqual([3]);
   });
 
+  test('manifestWithoutVersion blanks only the top-level version, else keeps the text', () => {
+    expect(manifestWithoutVersion(pkgJson('1.2.3.4', { scripts: { x: 'y' } }))).toBe(pkgJson('-', { scripts: { x: 'y' } }));
+    const nestedFirst = '{\n  "engines": {\n    "version": "9"\n  },\n  "version": "1.0.0.0"\n}\n';
+    expect(manifestWithoutVersion(nestedFirst)).toBe(nestedFirst);
+    expect(manifestWithoutVersion('{ not json')).toBe('{ not json');
+  });
+
   test('livenessOf and publishedVersions', () => {
     expect(livenessOf(TEMPLATE)).toEqual({ attached: [], ticked: false, placeholder: true });
     const done = TEMPLATE.replace('Screenshot to follow from @me.', IMG66).replace(BOX1_OPEN, BOX1_DONE);
@@ -180,6 +187,9 @@ function write(dir: string, rel: string, text: string): void {
   fs.writeFileSync(path.join(dir, rel), text);
 }
 
+/** A package.json whose `version` sits between two keys no test changes. */
+const pkgJson = (version: string, extra: Record<string, unknown> = {}) => `${JSON.stringify({ name: 'gx', version, private: true, ...extra }, null, 2)}\n`;
+
 function fixture(name: string, liveInitial: string, opts: { state?: string; viewer?: string; webEditDropsImages?: boolean; headLag?: boolean | 'first'; sideMerge?: boolean; comments?: unknown[]; storeEdit?: (sent: string) => string; ciChangesTree?: boolean } = {}) {
   const base = path.join(ROOT, name);
   const up = path.join(base, 'up', 'acme', 'gx.git');
@@ -191,11 +201,13 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
   write(seed, 'VERSION', '1.0.0.0\n');
   write(seed, 'CHANGELOG.md', '# Changelog\n\n## [1.0.0.0] - 2026-10-01\n\n- base\n');
   write(seed, 'lib/x.ts', 'export const x = 1;\n');
+  write(seed, 'package.json', pkgJson('1.0.0.0'));
   git(seed, 'add', '-A'); git(seed, 'commit', '-q', '-m', 'base (#1)');
   git(seed, 'push', '-q', up, 'main'); git(seed, 'push', '-q', fork, 'main');
   git(seed, 'checkout', '-q', '-b', 'pr/b');
   write(seed, 'lib/x.ts', 'export const x = 2;\n');
   write(seed, 'VERSION', '1.0.1.0\n');
+  write(seed, 'package.json', pkgJson('1.0.1.0'));
   write(seed, 'CHANGELOG.md', '# Changelog\n\n## [1.0.1.0] - 2026-10-02\n\n- ours\n\n## [1.0.0.0] - 2026-10-01\n\n- base\n');
   git(seed, 'add', '-A'); git(seed, 'commit', '-q', '-m', 'feat: x');
   if (opts.sideMerge) {
@@ -503,6 +515,22 @@ describe('publish', () => {
     expect(diffLine(r2)).toContain(', changed since the last publish');
     expect(await f.publish(r2)).toBe(0);
     expect(diffLine(await rendered(f))).toContain(', unchanged since the last publish');
+  });
+
+  test('a push of release files alone keeps the fingerprint; a package.json change beyond its version moves it', async () => {
+    const f = fixture('since-release', TEMPLATE);
+    const diffLine = (file: string) => fs.readFileSync(file, 'utf8').split('\n').find(l => l.startsWith('- PR diff'))!;
+    const r1 = await rendered(f);
+    const first = diffLine(r1);
+    expect(await f.publish(r1, ...f.acceptLive())).toBe(0);
+    // A sync's re-version: VERSION, CHANGELOG and package.json's version only.
+    f.pushFiles({ VERSION: '1.0.2.0\n', 'CHANGELOG.md': '# Changelog\n\n## [1.0.2.0] - 2026-10-03\n\n- ours\n\n## [1.0.0.0] - 2026-10-01\n\n- base\n', 'package.json': pkgJson('1.0.2.0') }, 'chore: re-version');
+    expect(diffLine(await rendered(f))).toBe(first.replace(/\.$/, ', unchanged since the last publish.'));
+    // A dependency and a postinstall script at the same version are code.
+    f.pushFiles({ 'package.json': pkgJson('1.0.2.0', { dependencies: { leftpad: '1.0.0' }, scripts: { postinstall: 'node x.js' } }) }, 'chore: add leftpad');
+    const moved = diffLine(await rendered(f));
+    expect(moved).toContain(': 2 files, ');
+    expect(moved).toContain(', changed since the last publish');
   });
 
   test('publish re-checks the outgoing bytes: a hand-made body that drops a live screenshot is refused', async () => {
