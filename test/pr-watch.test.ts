@@ -306,6 +306,39 @@ describe('poll, ack and the write gate', () => {
     expect(out[0]).toContain('RESULT UNVERIFIED');
   });
 
+  const gateDeps = (gh: GhRunner, env: NodeJS.ProcessEnv) => ({ gh, git: defaultGit, env, now: () => new Date(), out: () => {} });
+
+  test('the write gate refuses when an endpoint does not answer, though nothing is latched', () => {
+    const t = topology('gate-unverified', null);
+    const gate = pollForWrite(gateDeps(fakeGh(t, { comments: [], failComments: true }), { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') }), 'acme/gw', 7, t.clone);
+    expect(gate).toMatchObject({ ok: false });
+    expect(gate.reason).toContain('could not verify');
+  });
+
+  test('the write gate refuses a closed or merged PR even with every signal acknowledged', async () => {
+    const t = topology('gate-closed', null);
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') };
+    const closed = fakeGh(t, { pull: { state: 'closed', merged: false } });
+    expect(await watchMain(['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone], { gh: closed, env, out: () => {} })).toBe(10);
+    expect(await watchMain(['ack', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone, 'closed-unmerged'], { gh: closed, env, out: () => {} })).toBe(0);
+    expect(pollForWrite(gateDeps(closed, env), 'acme/gw', 7, t.clone)).toEqual({ ok: false, reason: 'PR #7 is closed' });
+    expect(pollForWrite(gateDeps(fakeGh(t, { pull: { state: 'closed', merged: true } }), env), 'acme/gw', 7, t.clone)).toEqual({ ok: false, reason: 'PR #7 is merged' });
+  });
+
+  test('a latched P1 keeps the write gate shut after its condition clears, until it is acknowledged', async () => {
+    const t = topology('gate-latch', null);
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') };
+    const data: FakeData = { pull: { mergeable_state: 'dirty', head: { sha: 'b'.repeat(40) } } };
+    const gh = fakeGh(t, data);
+    const argv = (sub: string, ...rest: string[]) => [sub, '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone, ...rest];
+    expect(await watchMain(argv('poll'), { gh, env, out: () => {} })).toBe(11);
+    data.pull = { mergeable_state: 'clean' };
+    expect(await watchMain(argv('poll'), { gh, env, out: () => {} })).toBe(11);
+    expect(pollForWrite(gateDeps(gh, env), 'acme/gw', 7, t.clone).ok).toBe(false);
+    expect(await watchMain(argv('ack', `mergeable:dirty:${'b'.repeat(12)}`), { gh, env, out: () => {} })).toBe(0);
+    expect(pollForWrite(gateDeps(gh, env), 'acme/gw', 7, t.clone)).toEqual({ ok: true, reason: 'ok' });
+  });
+
   test('a failing base scan keeps the P0 the REST reads found; with nothing found it is UNVERIFIED', async () => {
     const t = topology('noupstream', null);
     git(t.clone, 'remote', 'remove', 'upstream');
