@@ -1,0 +1,12 @@
+
+::group::test\eng-seeded-coverage.test.ts:
+(pass) batching caller counts completed issue decisions across setup boundaries > six completed calls count six; unrelated wording and either offered choice do not change identity [1.87ms]
+(pass) batching caller counts completed issue decisions across setup boundaries > one batched native call cannot satisfy a three-call floor [0.13ms]
+(pass) batching caller counts completed issue decisions across setup boundaries > incomplete, foreign, inconsistent or non-issue packets cannot inflate the counter [0.78ms]
+(pass) batching replay of run 36606688266 (unsourced native briefs) > the recorded failing verdict is the detector, not the review [0.06ms]
+(pass) batching replay of run 36606688266 (unsourced native briefs) > each ledger-bound native decision counts once without a native source citation [102.54ms]
+(pass) batching replay of run 36606688266 (unsourced native briefs) > a re-asked decision cannot inflate the count [95.76ms]
+(pass) batching replay of run 36606688266 (unsourced native briefs) > the unsourced route rejects a foreign target [75.74ms]
+(pass) batching replay of run 36606688266 (unsourced native briefs) > the unsourced route rejects a mixed target [74.02ms]
+
+(process:4380): GLib-ERROR **: 01:37:18.462: file ../glib-2.89.4/glib/gthread-win32.c: line 420 (g_system_thread_free): error The handle is invalid. during CloseHandle (wt->handle)
