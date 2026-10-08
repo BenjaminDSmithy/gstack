@@ -79,6 +79,28 @@ describe('classification', () => {
   });
 });
 
+describe('reviews', () => {
+  const review = (id: number, login: string, assoc: string, state: string, body: string) => ({ id, user: { login }, author_association: assoc, state, submitted_at: '2026-10-07T00:00:00Z', body });
+  const run = (...reviews: ReturnType<typeof review>[]) => signalsFrom({ number: 1, self: 'me', proxies, maintainers, pull: { state: 'open' }, comments: [], reviews, timeline: [], absorbed: [] })
+    .map(s => [s.id, s.level, s.kind]);
+
+  test('supersede wording is P0 whatever the review state; other maintainer reviews are P1', () => {
+    expect(run(
+      review(5, 'garrytan', 'OWNER', 'CHANGES_REQUESTED', 'Superseded by #3057, closing.'),
+      review(6, 'garrytan', 'OWNER', 'COMMENTED', 'Superseded by #3057, closing.'),
+      review(7, 'garrytan', 'OWNER', 'CHANGES_REQUESTED', 'Please split this.'),
+      review(8, 'capy-ai[bot]', 'CONTRIBUTOR', 'COMMENTED', 'Closing in favour of #3057.'),
+      review(9, 'garrytan', 'OWNER', 'COMMENTED', 'Looks fine.'),
+    )).toEqual([
+      ['review:5', 'P0', 'superseded-review'], ['review:6', 'P0', 'superseded-review'], ['review:7', 'P1', 'changes-requested'],
+      ['review:8', 'P0', 'superseded-review'], ['review:9', 'P1', 'maintainer-review'],
+    ]);
+  });
+  test('an external review with supersede wording cannot raise a P0', () => {
+    expect(run(review(10, 'rando', 'NONE', 'COMMENTED', 'Closing in favour of #3057.'))).toEqual([]);
+  });
+});
+
 describe('cross-references', () => {
   const xref = (actor: string, src: { login: string; assoc?: string; pr?: boolean }) => ({
     event: 'cross-referenced', actor: { login: actor, type: 'User' }, created_at: '2026-10-07T00:00:00Z',
