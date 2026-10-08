@@ -119,9 +119,10 @@ export function signalsFrom(x: SignalInput): Signal[] {
     const who = classifyActor({ login: r.user?.login, type: r.user?.type, assoc: r.author_association }, x.proxies, x.self);
     if (who === 'self') continue;
     const base = { id: `review:${r.id}`, at: r.submitted_at ?? '', ref: '', who: `${r.user?.login ?? '?'} (${who})`, excerpt: (r.body ?? '').slice(0, 600) };
-    if (r.state === 'CHANGES_REQUESTED') out.push({ ...base, level: 'P1', kind: 'changes-requested' });
-    else if ((who === 'maintainer' || who === 'proxy') && SUPERSEDE_RE.test(r.body ?? '')) out.push({ ...base, level: 'P0', kind: 'superseded-review' });
-    else if (who === 'maintainer' || who === 'proxy') out.push({ ...base, level: 'P1', kind: 'maintainer-review' });
+    // Supersede wording first: a review that requests changes and says the PR is superseded is still P0.
+    if (strong(who) && SUPERSEDE_RE.test(r.body ?? '')) out.push({ ...base, level: 'P0', kind: 'superseded-review' });
+    else if (r.state === 'CHANGES_REQUESTED') out.push({ ...base, level: 'P1', kind: 'changes-requested' });
+    else if (strong(who)) out.push({ ...base, level: 'P1', kind: 'maintainer-review' });
   }
   for (const e of x.timeline) {
     const actor = e.actor?.login ?? '';
