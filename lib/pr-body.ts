@@ -372,15 +372,7 @@ export function collectFacts(c: Ctx): Facts {
     previous = JSON.parse(fs.readFileSync(path.join(c.stateDir, 'facts.json'), 'utf8')) as Facts;
   } catch { /* first run */ }
   const state = readStateFor(c.stateDir, pr);
-  const ciRaw = d.gh(['pr', 'checks', String(pr.number), '--repo', c.repo, '--json', 'name,bucket,link']);
-  const parsed = parseChecks(ciRaw);
-  const ci = { pass: 0, fail: 0, pending: 0, skipping: 0, error: null as string | null };
-  if (parsed.kind === 'rows') {
-    for (const row of parsed.rows) {
-      if (row.bucket === 'skipping') ci.skipping++;
-      else ci[bucketClass(row.bucket)]++;
-    }
-  } else if (parsed.kind === 'error') ci.error = parsed.cause;
+  const ci = readCiAt(c, head);
   return {
     at: d.now().toISOString().replace(/\.\d+Z$/, 'Z'), head, codeSha, emptyCi, baseRef: pr.baseRef, baseSha: base,
     baseVersion: show(base, 'VERSION'), basePr: prNum(gitOut(c, ['log', '-1', '--format=%s', base]).trim()),
@@ -390,6 +382,35 @@ export function collectFacts(c: Ctx): Facts {
     validation: state?.validation ? { sha: state.validation.sha, worst: state.validation.worst, summary: state.validation.summary } : null,
     ci,
   };
+}
+
+/**
+ * Check counts for exactly `head`, the pinned head the facts block names.
+ * `gh pr checks` reads GitHub's current PR head, which lags a fresh push, so
+ * GitHub's head is read before (at resolveCtx) and after the checks, the way
+ * gstack-ci-gate --expect-head does; either one off the pinned head means
+ * the counts belong to another commit and the line says "not read".
+ */
+function readCiAt(c: Ctx, head: string): Facts['ci'] {
+  const { d, pr } = c;
+  const ci = { pass: 0, fail: 0, pending: 0, skipping: 0, error: null as string | null };
+  const offHead = (seen: string) => `GitHub's PR head is ${s12(seen)}, not the pinned head ${s12(head)}; re-run facts once GitHub has the push`;
+  if (pr.headOid !== head) return { ...ci, error: offHead(pr.headOid) };
+  const parsed = parseChecks(d.gh(['pr', 'checks', String(pr.number), '--repo', c.repo, '--json', 'name,bucket,link']));
+  let after = '';
+  try {
+    after = readPr(d.gh, c.repo, pr.number).headOid;
+  } catch {
+    return { ...ci, error: 'could not re-read the PR head after the checks' };
+  }
+  if (after !== head) return { ...ci, error: offHead(after) };
+  if (parsed.kind === 'rows') {
+    for (const row of parsed.rows) {
+      if (row.bucket === 'skipping') ci.skipping++;
+      else ci[bucketClass(row.bucket)]++;
+    }
+  } else if (parsed.kind === 'error') ci.error = parsed.cause;
+  return ci;
 }
 
 function cmdFacts(c: Ctx): number {

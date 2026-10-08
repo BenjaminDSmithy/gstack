@@ -141,7 +141,7 @@ function write(dir: string, rel: string, text: string): void {
   fs.writeFileSync(path.join(dir, rel), text);
 }
 
-function fixture(name: string, liveInitial: string, opts: { state?: string; viewer?: string; webEditDropsImages?: boolean } = {}) {
+function fixture(name: string, liveInitial: string, opts: { state?: string; viewer?: string; webEditDropsImages?: boolean; headLag?: boolean } = {}) {
   const base = path.join(ROOT, name);
   const up = path.join(base, 'up', 'acme', 'gx.git');
   const fork = path.join(base, 'fork', 'me', 'gx.git');
@@ -176,7 +176,7 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
   const gh = ((args: string[]) => {
     const ok = (stdout: string) => ({ status: 0, stdout, stderr: '' });
     if (args[0] === 'pr' && args[1] === 'view') {
-      return ok(JSON.stringify({ number: 9, state: opts.state ?? 'OPEN', isDraft: false, headRefOid: git(fork, 'rev-parse', 'refs/heads/pr/b'), url: 'https://github.com/acme/gx/pull/9', headRepositoryOwner: { login: 'me' }, headRepository: { name: 'gx' }, headRefName: 'pr/b', baseRefName: 'main' }));
+      return ok(JSON.stringify({ number: 9, state: opts.state ?? 'OPEN', isDraft: false, headRefOid: git(fork, 'rev-parse', opts.headLag ? 'refs/heads/pr/b^' : 'refs/heads/pr/b'), url: 'https://github.com/acme/gx/pull/9', headRepositoryOwner: { login: 'me' }, headRepository: { name: 'gx' }, headRefName: 'pr/b', baseRefName: 'main' }));
     }
     if (args[0] === 'api' && args[1] === 'user') return ok(`${opts.viewer ?? 'me'}\n`);
     if (args[0] === 'api' && args[1] === 'repos/acme/gx/pulls/9' && args.includes('--jq')) return ok(live.endsWith('\n') ? live : `${live}\n`);
@@ -216,6 +216,16 @@ describe('facts and render', () => {
     expect(facts).toMatchObject({ version: '1.0.1.0', baseVersion: '1.0.0.0', basePr: '#2', commits: 2 });
     expect(facts.diff.files).toBe(1);
     expect(facts.ci).toEqual({ pass: 1, fail: 1, pending: 0, skipping: 1, error: null });
+  });
+
+  test('CI is not read for a head GitHub has not caught up with', async () => {
+    const f = fixture('facts-lag', TEMPLATE, { headLag: true });
+    expect(await f.call(['facts'])).toBe(0);
+    const facts = JSON.parse(fs.readFileSync(path.join(f.dir, 'facts.json'), 'utf8')) as Facts;
+    expect(facts.head).toBe(git(f.clone, 'rev-parse', 'HEAD'));
+    expect(facts.ci).toMatchObject({ pass: 0, fail: 0 });
+    expect(facts.ci.error).toContain(`GitHub's PR head is ${git(f.clone, 'rev-parse', 'HEAD^').slice(0, 12)}`);
+    expect(f.out.join('\n')).toContain(`- CI at \`${facts.head.slice(0, 12)}\`: not read (`);
   });
 
   test('render carries the attached liveness section; refuses when a live top image would be lost', async () => {
