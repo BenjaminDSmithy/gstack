@@ -10,19 +10,20 @@
  * Measured on #3032 (2026-10-05..07): exit 3 with no failing test and
  * "GetQueuedCompletionStatusEx: (735) ERROR_ABANDONED_WAIT_0" or "(6) The
  * handle is invalid." at the end of the shard-log artifact (a Bun abort on
- * Windows); a hang to the shard's
- * deadline with every test of the in-flight file passed; and a GLib abort
- * (exit 9). The step log does not show any of this; the artifacts do.
+ * Windows); a hang to the shard's deadline with every test of the in-flight
+ * file passed; and a GLib abort (exit 9). The step log does not show any of
+ * this; the artifacts do.
  *
  * A draft is written ONLY for a CRASH whose signature, exit code, empty
  * failingFiles and clean log all agree, or a HANG whose shard passed on an
  * earlier run of the identical tree, and in both cases only when the
- * runner's own count says the missing summary was the only failure. A failure that names a test is REAL
- * and gets the blame protocol instead. The onset scan is disclosure only:
- * these flakes appear on other branches at a background rate, so "it also
- * happened elsewhere" never clears a run. This helper never commits or
- * pushes; with the owner's yes, `gstack-pr-sync retrigger` builds and
- * pushes the commit from the drafted message.
+ * runner's own count says the missing summary was the only failure. A
+ * failure that names a test is REAL and gets the blame protocol instead.
+ * The onset scan is disclosure only: these flakes appear on other branches
+ * at a background rate, so "it also happened elsewhere" never clears a run.
+ * This helper never commits or pushes; with the owner's yes,
+ * `gstack-pr-sync retrigger` builds and pushes the commit from the drafted
+ * message.
  */
 
 import fs from 'node:fs';
