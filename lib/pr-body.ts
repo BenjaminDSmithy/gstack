@@ -44,7 +44,13 @@ import { scan, type Finding } from './redact-engine';
 import { writeOutcome, writeReceipt } from './egress-receipt';
 import { pollForWrite } from './pr-watch';
 
-export const BODY_EXIT = { OK: 0, ERROR: 1, USAGE: 2, REFUSED: 20, REDACTION: 22, PRECONDITION: 30, LIVENESS_PENDING: 40 } as const;
+/**
+ * Exit codes. 40 means two things by subcommand: check's liveness pending,
+ * and (facts, render, publish) pinBranch's "remote moved or branch gone";
+ * check never pins a branch, and bodyMain maps any other 40 from check to
+ * 1, so a caller reading check's 40 always reads a pending screenshot.
+ */
+export const BODY_EXIT = { OK: 0, ERROR: 1, USAGE: 2, REFUSED: 20, REDACTION: 22, PRECONDITION: 30, LIVENESS_PENDING: 40, REMOTE_MOVED: 40, LOCK_BUSY: 45 } as const;
 
 export const BODY_USAGE = `gstack-pr-body <facts|render|publish|check> --pr <number|url> [options]
 
@@ -87,12 +93,15 @@ Options:
 Exit codes: 0 ok, 1 error, 2 usage or approval missing, 20 refused (a live
 attachment or ticked box would be lost, a lint rule, an unaccepted live
 diff, a body that is not the approved sha256, or a facts block that is
-not the generated one), 22 redaction (HIGH, or
-MEDIUM not confirmed), 30 precondition (PR not OPEN, the pre-write gate or
-a gate older than 60 s, facts naming an older head, or a body_stale_since
-push outside the head's history), 40 liveness pending (check). Once the
-PR is resolved, every RESULT line of every subcommand, refusals and
-errors included, reports body-stale-since=<sha|none>.`;
+not the generated one), 22 redaction (HIGH, or MEDIUM not confirmed),
+30 precondition (PR not OPEN, the pre-write gate or a gate older than
+60 s, facts naming an older head, or a body_stale_since push outside the
+head's history), 40 for check: liveness pending; for facts, render and
+publish: the PR's head or base branch is gone from its remote or kept
+moving while it was fetched (fetch, then run again), 45 another pr-prep
+run holds this PR's state lock (publish; wait for it, then run again).
+Once the PR is resolved, every RESULT line of every subcommand, refusals
+and errors included, reports body-stale-since=<sha|none>.`;
 
 export const FACTS_BEGIN = '<!-- pr-prep:facts:begin v1 -->';
 export const FACTS_END = '<!-- pr-prep:facts:end -->';
@@ -1165,7 +1174,8 @@ export async function bodyMain(argv: string[], deps: Partial<BodyDeps> = {}): Pr
     const out = c ? c.d.out : d.out;
     if (error instanceof PrContextError) {
       out(`RESULT ${error.code === 2 ? 'USAGE' : error.code === 30 ? 'PRECONDITION' : 'ERROR'} ${error.message}`);
-      return error.code;
+      // check's 40 is a pending screenshot and nothing else.
+      return argv[0] === 'check' && error.code === BODY_EXIT.LIVENESS_PENDING ? BODY_EXIT.ERROR : error.code;
     }
     out(`RESULT ERROR ${(error as Error).message}`);
     return BODY_EXIT.ERROR;
