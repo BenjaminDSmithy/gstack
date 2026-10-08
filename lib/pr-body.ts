@@ -42,7 +42,7 @@ import {
 import { parseChecks, bucketClass } from './ci-gate';
 import { scan, type Finding } from './redact-engine';
 import { writeOutcome, writeReceipt } from './egress-receipt';
-import { pollForWrite } from './pr-watch';
+import { pollForWrite, refuseUnackedLatches } from './pr-watch';
 
 /**
  * Exit codes. 40 means two things by subcommand: check's liveness pending,
@@ -965,6 +965,7 @@ function cmdPublish(c: Ctx): number {
     if (now.state !== 'OPEN') throw new PrContextError(`PR #${c.pr.number} is ${now.state}`, BODY_EXIT.PRECONDITION);
     if (!now.headOid.startsWith(factsHead)) throw staleBody(factsHead, now.headOid);
     const state = readStateFor(c.stateDir, c.pr);
+    refuseUnackedLatches(state);
     const stale = state?.bodyStaleSince ?? null;
     if (stale && stale !== now.headOid) {
       const r = d.git(['merge-base', '--is-ancestor', stale, now.headOid], { cwd: c.f.cwd });

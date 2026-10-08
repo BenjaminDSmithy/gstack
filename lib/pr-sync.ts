@@ -38,7 +38,7 @@ import {
   readStateFor, writeState, withPrLock, receiptedSend, requireApproval, envelope,
   type GhResult, type GhRunner, type GitRunner, type PrInfo, type PrState,
 } from './pr-context';
-import { pollForWrite } from './pr-watch';
+import { pollForWrite, refuseUnackedLatches } from './pr-watch';
 import { pruneDrafts, readRetriggerDraft } from './pr-ci-triage';
 
 export const SYNC_EXIT = {
@@ -1048,6 +1048,7 @@ function cmdPush(c: Ctx): number {
     // Retargeted since the merge: pushing would add the old base's commits to the PR's diff.
     if (staged.baseRef !== c.pr.baseRef) throw new PrContextError(`the PR's base changed from ${staged.baseRef} to ${c.pr.baseRef} since the sync was staged: abort and re-sync`, SYNC_EXIT.PRECONDITION);
     const state = readStateFor(c.stateDir, c.pr);
+    refuseUnackedLatches(state);
     if (state?.bodyStaleSince) throw new PrContextError(`the PR body is still stale since the push of ${state.bodyStaleSince.slice(0, 12)}: publish the body first`, SYNC_EXIT.BODY_STALE);
     if (!state?.validation || state.validation.sha !== staged.sha) throw new PrContextError(`no validation recorded for ${staged.sha.slice(0, 12)}: run gstack-pr-validate in ${staged.scratch}`, SYNC_EXIT.VALIDATION);
     if (state.validation.worst !== 0) throw new PrContextError(`validation of ${staged.sha.slice(0, 12)} is red (${state.validation.summary})`, SYNC_EXIT.VALIDATION);
@@ -1135,6 +1136,8 @@ function cmdRetrigger(c: Ctx): number {
   const gate = d.preWriteGate({ gh: d.gh, git: d.git, env: d.env, cwd: c.cwd, repo: c.repo, number: c.pr.number, expectHead: h0, state: st0 });
   if (!gate.ok) throw new PrContextError(`pre-write gate: ${gate.reason}`, SYNC_EXIT.PRECONDITION);
   return withPrLock(c.stateDir, () => {
+    // A poll after the gate (the LaunchAgent, another session) may have latched a signal.
+    refuseUnackedLatches(readStateFor(c.stateDir, c.pr));
     const sha = gitOk(d, c.cwd, ['commit-tree', tree, '-p', h0, '-F', '-'], 'git commit-tree', { input: msg }).trim();
     if (pinBranch(d.git, c.cwd, c.headRemote, c.pr.headRef).sha !== h0) throw new PrContextError('the remote head moved', SYNC_EXIT.REMOTE_MOVED);
     pushOrThrow(c, c.cwd, sha, 'pr-ci-retrigger-push', gateAt);
