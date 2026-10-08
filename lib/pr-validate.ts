@@ -313,8 +313,9 @@ function resolveCtx(d: ValidateDeps, f: Flags): Ctx {
   return { d, f, repo, pr, stateDir, tree, base, stagedH0: staged?.h0 ?? null };
 }
 
+/** Both sides of a rename: a test that still names or imports the old path must run. */
 function changedFiles(c: Ctx, mb: string): string[] {
-  return gitOk(c.d, c.tree, ['diff', '--name-only', mb, 'HEAD'], 'git diff').split('\n').filter(Boolean);
+  return gitOk(c.d, c.tree, ['diff', '--name-only', '--no-renames', mb, 'HEAD'], 'git diff').split('\n').filter(Boolean);
 }
 
 function pkgVersionOnly(c: Ctx, mb: string): boolean {
