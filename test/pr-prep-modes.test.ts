@@ -42,6 +42,16 @@ describe('dispatch', () => {
   test('the mode comes only from the ARGUMENTS line, and a /ship invocation is always the audit', () => {
     expectMentions(dispatch, [['ARGUMENTS', 'first word'], ['ship', 'always', 'audit']], 'Detect command');
   });
+
+  test('every documented /pr-prep invocation and audit flag starts with a word the dispatch routes', () => {
+    // Step 6 hands the user `/pr-prep --force` and Step 3 cites `/pr-prep --repo ...`:
+    // a dispatch that stops on any other first word stranded the EXACT_DUP override.
+    const flags = [...between(SKILL, '## Flags', '## Cost').matchAll(/^\| `(--[a-z-]+)/gm)].map(m => m[1]);
+    expect(flags.length).toBeGreaterThan(0);
+    const invoked = [SKILL, ...MODES.map(section)].flatMap(t => [...t.matchAll(/\/pr-prep (--[a-z-]+|[a-z]+)/g)].map(m => m[1]));
+    expect(invoked).toContain('--force');
+    expectTokens(dispatch, [...new Set([...flags, ...invoked])].map(w => `\`${w}\``), 'Detect command');
+  });
 });
 
 describe('write safety', () => {
