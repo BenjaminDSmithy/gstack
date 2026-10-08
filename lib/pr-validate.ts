@@ -10,7 +10,8 @@
  * The tree defaults to the staged sync's scratch worktree (gstack-pr-sync
  * merge), else --cwd. The verdict lands in the PR state as
  * `validation: {sha, worst, summary, at}` and in
- * <state dir>/validate/<sha12>/summary.txt, last line `VALIDATE-END worst=N`.
+ * <state dir>/validate/<sha12>/summary.txt, last line `VALIDATE-END worst=N`
+ * (ci.gitconfig beside it is the global git config the tests saw).
  *
  * What #3032 taught (RESUME 2026-10-05..07):
  * - cookie-workflow-judge-input failed locally until `gen:skill-docs --host all`
@@ -74,8 +75,8 @@ selected test covers is red (NO_TESTS), never "0/0 green": declare the
 tests that cover it.
 A change to package.json beyond .version, bun.lock, tsconfig,
 bunfig.toml or its preload files, or the free-suite runner needs the
-full suite: the selection prints FULL and
-the run stays red unless --accept-full-risk (CI runs the full suite).
+full suite: the selection prints FULL and the run stays red unless
+--accept-full-risk (CI runs the full suite).
 
 Options:
   --pr N|URL            the upstream PR (required)
@@ -107,7 +108,7 @@ const CREDENTIAL_SEGMENTS = new Set([
   'PASS', 'CREDENTIAL', 'CREDENTIALS', 'AUTH', 'PAT', 'DSN', 'COOKIE',
   'SESSION', 'PRIVATE',
 ]);
-const credentialShaped = (name: string) => !/^GIT_CONFIG_KEY_\d+$/.test(name) && name.toUpperCase().split('_').some(seg => CREDENTIAL_SEGMENTS.has(seg));
+const credentialShaped = (name: string) => name.toUpperCase().split('_').some(seg => CREDENTIAL_SEGMENTS.has(seg));
 
 // The caller's own git config overrides: CI has none, and GIT_CONFIG_COUNT
 // entries outrank a test's GIT_CONFIG_GLOBAL isolation.
