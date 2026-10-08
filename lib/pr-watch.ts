@@ -74,8 +74,11 @@ busy (another poll or write is running; try again).`;
 
 // ── classification ──────────────────────────────────────────────────────────
 
-/** Seeded maintainer proxies: bots that merge, close and post closure notices here. Extended from mergedBy at poll time. */
-export const SEED_PROXIES = ['capy-ai'];
+/**
+ * Seeded maintainer proxies: bot accounts that merge, close and post closure
+ * notices here, as `<app slug>[bot]`. Extended from mergedBy at poll time.
+ */
+export const SEED_PROXIES = ['capy-ai[bot]'];
 export const INFRA_BOTS = ['github-actions', 'trunk-io', 'dependabot'];
 const MAINTAINER_ASSOC = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 export const SUPERSEDE_RE = /will be closed when|clos(?:e|ed|ing) in favou?r of #\d+|superseded by #\d+|landed in v[\d.]+ via #\d+|rewr(?:ote|itten) (?:the fix|this|it)|fix[- ]wave|much smaller version|not part of the wave|replac(?:ed|es|ing) this PR|duplicate of #\d+|absorbed (?:into|from|in|by) |co-authored-by/i;
@@ -89,11 +92,25 @@ function hasLogin(set: ReadonlySet<string> | readonly string[], login: string): 
   return false;
 }
 
+/**
+ * What a proxy is matched on, lower-cased: a bot account as `<slug>[bot]`
+ * (a `x[bot]` login, type Bot, or gh's `app/x` for a bot merger), anyone
+ * else by login. The User account `capy-ai` is not the bot `capy-ai[bot]`:
+ * matching on the bare name let any account named like a merge bot raise
+ * a P0 with supersede wording.
+ */
+export function actorKey(login: string, isBot = false): string {
+  const bot = isBot || /\[bot\]$/i.test(login) || /^app\//i.test(login);
+  const base = login.replace(/\[bot\]$/i, '').replace(/^app\//i, '');
+  return (bot ? `${base}[bot]` : base).toLowerCase();
+}
+
 export function classifyActor(a: { login?: string; type?: string; assoc?: string }, proxies: ReadonlySet<string>, self: string): ActorClass {
   const login = (a.login ?? '').replace(/\[bot\]$/, '');
   if (!login) return 'external';
   if (login.toLowerCase() === self.toLowerCase()) return 'self';
-  if (hasLogin(proxies, login)) return 'proxy';
+  const key = actorKey(a.login ?? '', a.type === 'Bot');
+  for (const p of proxies) if (actorKey(p) === key) return 'proxy';
   if (hasLogin(INFRA_BOTS, login)) return 'infra';
   if (a.assoc && MAINTAINER_ASSOC.has(a.assoc)) return 'maintainer';
   if (a.type === 'Bot' || /\[bot\]$/.test(a.login ?? '')) return 'bot';
@@ -473,12 +490,15 @@ export function poll(d: WatchDeps, repo: string, n: number, cwd: string): PollRe
     const comments = ghList<Comment>(d, `repos/${repo}/issues/${n}/comments`, 'comments');
     const reviews = ghList<Review>(d, `repos/${repo}/pulls/${n}/reviews`, 'reviews');
     const timeline = ghList<TimelineEvent>(d, `repos/${repo}/issues/${n}/timeline`, 'timeline', ['-H', 'Accept: application/vnd.github+json']);
-    const merged = ghJson<{ mergedBy?: { login?: string } | null }[]>(d, ['pr', 'list', '--repo', repo, '--state', 'merged', '--limit', '30', '--json', 'mergedBy'], 'merged PRs');
+    const merged = ghJson<{ mergedBy?: { login?: string; is_bot?: boolean } | null }[]>(d, ['pr', 'list', '--repo', repo, '--state', 'merged', '--limit', '30', '--json', 'mergedBy'], 'merged PRs');
     const owner = repo.split('/')[0];
     const proxies = new Set<string>(SEED_PROXIES);
     for (const m of merged) {
-      const login = (m.mergedBy?.login ?? '').replace(/\[bot\]$/, '').replace(/^app\//, '');
-      if (login && login.toLowerCase() !== owner.toLowerCase() && !hasLogin(INFRA_BOTS, login)) proxies.add(login);
+      const login = m.mergedBy?.login ?? '';
+      if (!login) continue;
+      const key = actorKey(login, m.mergedBy?.is_bot === true);
+      const bare = key.replace(/\[bot\]$/, '');
+      if (bare !== owner.toLowerCase() && !hasLogin(INFRA_BOTS, bare)) proxies.add(key);
     }
     const maintainers = new Set<string>([owner]);
     for (const c of [...comments, ...reviews]) if (c.author_association && MAINTAINER_ASSOC.has(c.author_association) && c.user?.login) maintainers.add(c.user.login);

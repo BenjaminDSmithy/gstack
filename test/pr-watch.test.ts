@@ -259,7 +259,7 @@ function fakeGh(t: { fork: string }, data: FakeData): GhRunner & { calls: string
     if (args[0] === 'api' && route === 'repos/acme/gw/issues/7/comments') return data.failComments ? { status: 1, stdout: '', stderr: 'HTTP 502' } : page(data.comments);
     if (args[0] === 'api' && route === 'repos/acme/gw/pulls/7/reviews') return page(data.reviews);
     if (args[0] === 'api' && route === 'repos/acme/gw/issues/7/timeline') return page(data.timeline);
-    if (args[0] === 'pr' && args[1] === 'list') return ok(data.merged ?? [{ mergedBy: { login: 'capy-ai' } }]);
+    if (args[0] === 'pr' && args[1] === 'list') return ok(data.merged ?? [{ mergedBy: { login: 'app/capy-ai', is_bot: true } }]); // gh's shape for a bot merger, read 2026-10-09
     return { status: 1, stdout: '', stderr: `unexpected gh ${args.join(' ')}` };
   }) as GhRunner & { calls: string[][] };
   gh.calls = calls;
@@ -514,6 +514,28 @@ describe('poll, ack and the write gate', () => {
     expect(await watchMain(['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone], { gh, env: { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') }, out: l => out.push(l) }), out.join('\n')).toBe(10);
     expect(out[0]).not.toContain('error=');
     for (const kind of ['superseded-comment', 'closed-unmerged', 'cited-on-base']) expect(out.join('\n')).toContain(kind);
+  });
+
+  test('a proxy is the bot account itself: a User named like a merge bot cannot raise a P0', async () => {
+    // capy-ai (type User, created 2026-01-17) is not capy-ai[bot] (type Bot); gh lists a bot merger as app/<slug>.
+    expect(classifyActor({ login: 'capy-ai', type: 'User', assoc: 'NONE' }, proxies, 'me')).toBe('external');
+    const t = topology('proxy-exact', null);
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') };
+    const c = (id: number, login: string, type: string) => ({ id, user: { login, type }, author_association: 'NONE', created_at: '2026-10-01T00:00:00Z', html_url: 'u', body: 'Superseded by #9.' });
+    const data: FakeData = { merged: [{ mergedBy: { login: 'app/fixbot', is_bot: true } }, { mergedBy: { login: 'helper', is_bot: false } }], comments: [c(1, 'fixbot', 'User'), c(2, 'capy-ai', 'User')] };
+    const gh = fakeGh(t, data);
+    const argv = ['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone];
+    const out: string[] = [];
+    expect(await watchMain(argv, { gh, env, out: l => out.push(l) }), out.join('\n')).toBe(0);
+    expect(out.filter(l => l.startsWith('INFO\tcomment:'))).toEqual(['INFO\tcomment:1\texternal-comment\tfixbot (external)', 'INFO\tcomment:2\texternal-comment\tcapy-ai (external)']);
+    // The bot account that merged, and a human who merged, are proxies.
+    data.comments = [c(3, 'fixbot[bot]', 'Bot'), c(4, 'helper', 'User')];
+    out.length = 0;
+    expect(await watchMain(argv, { gh, env, out: l => out.push(l) }), out.join('\n')).toBe(10);
+    expect(out.filter(l => l.startsWith('SIGNAL'))).toEqual([
+      'SIGNAL\tP0\tcomment:3\tsuperseded-comment\tfixbot[bot] (proxy)\tu',
+      'SIGNAL\tP0\tcomment:4\tsuperseded-comment\thelper (proxy)\tu',
+    ]);
   });
 
   test('maintainer logins match without regard to case, so --repo Acme/gw still sees acme', async () => {
