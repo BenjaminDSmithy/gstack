@@ -12,7 +12,8 @@
  * #3032's audit covered "the first 32 of the 42 commits" at 4 gh searches
  * per commit; the full 74 would have been about 296 calls against a search
  * secondary limit that trips at about 5 rapid calls. Merges, release-only
- * commits and empty `ci:` re-runs carry no new work, and a commit whose
+ * commits (a package.json change counts only when nothing but `version`
+ * moved) and empty `ci:` re-runs carry no new work, and a commit whose
  * patch-id was audited before only needs the upstream items that are new
  * since then. Its earlier verdict carries forward, so `worst` never drops
  * because a commit was skipped; an UNVERIFIED or EXACT_DUP verdict is
@@ -92,6 +93,32 @@ function foldPrior(entries: PriorEntry[]): PriorEntry | null {
   return { ...all[0], bucket: worstOf(all.map(e => e.bucket)), hits: all.flatMap(e => (Array.isArray(e.hits) ? e.hits : [])) };
 }
 
+/** package.json at <rev> with `version` dropped, or null when it is absent or not a JSON object. */
+function manifestSansVersion(g: GitRunner, cwd: string, rev: string): string | null {
+  const r = g(['show', `${rev}:package.json`], { cwd });
+  if (r.status !== 0) return null;
+  try {
+    const o: unknown = JSON.parse(r.stdout);
+    if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+    return JSON.stringify({ ...o, version: undefined });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Only release files changed, and package.json (when touched) changed only
+ * its `version`, the same rule sync's preconditions use. A package.json
+ * commit that adds a script, a dependency or a bin entry is real work and
+ * is audited; so is one whose manifest cannot be read on either side.
+ */
+function releaseOnly(g: GitRunner, cwd: string, sha: string, files: string[]): boolean {
+  if (!files.every(f => RELEASE_FILES.includes(f))) return false;
+  if (!files.includes('package.json')) return true;
+  const after = manifestSansVersion(g, cwd, sha);
+  return after !== null && after === manifestSansVersion(g, cwd, `${sha}^`);
+}
+
 export function listAuditCommits(g: GitRunner, cwd: string, base: string, prior: PriorReport | null): CommitList {
   const head = git(g, cwd, ['rev-parse', 'HEAD']).trim();
   const baseSha = git(g, cwd, ['rev-parse', `${base}^{commit}`]).trim();
@@ -102,7 +129,7 @@ export function listAuditCommits(g: GitRunner, cwd: string, base: string, prior:
     const subject = git(g, cwd, ['log', '-1', '--format=%s', sha]).trim();
     const files = git(g, cwd, ['diff-tree', '--no-commit-id', '--name-only', '-r', '--root', sha]).split('\n').filter(Boolean);
     if (!files.length) { out.skipped.push({ sha, subject, reason: 'empty' }); continue; }
-    if (files.every(f => RELEASE_FILES.includes(f))) { out.skipped.push({ sha, subject, reason: 'release-only' }); continue; }
+    if (releaseOnly(g, cwd, sha, files)) { out.skipped.push({ sha, subject, reason: 'release-only' }); continue; }
     const diff = git(g, cwd, ['show', '--format=', '--no-color', sha]);
     const patchId = diff ? (git(g, cwd, ['patch-id', '--stable'], diff).trim().split(/\s+/)[0] ?? '') : '';
     const entries = [...(index.get(`s:${sha}`) ?? []), ...(patchId ? (index.get(`p:${patchId}`) ?? []) : [])];
@@ -206,8 +233,10 @@ export const COMMITS_USAGE = `gstack-pr-prep-commits <list|stamp|self|paths> [op
           NEW (full searches), CARRY (audited before with a verdict: search
           only items updated since, keep the old verdict), RECHECK (audited
           before as UNVERIFIED or EXACT_DUP, or under another subject:
-          full searches, the verdict is re-derived); release-only and
-          empty commits are skipped and listed
+          full searches, the verdict is re-derived); release-only commits
+          (only VERSION, CHANGELOG.md, the agents digest, and package.json
+          with nothing but its version changed) and empty commits are
+          skipped and listed
   stamp   validate the agent's report (JSON file), fold CARRY verdicts in
           (worst never drops), take a commit's worst row, count rows for
           skipped commits and the report's own worst, mark unreported
