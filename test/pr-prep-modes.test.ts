@@ -107,6 +107,16 @@ describe('mode sections', () => {
   test('sync merges, never rebases, and stops on a code conflict', () => {
     expectMentions(section('sync'), [['never', 'rebase'], ['code', 'conflict', 'STOP']], 'sync section');
   });
+
+  test("sync goes on past its own conflict signal, acked on the owner's yes before the push", () => {
+    // poll latches mergeable-dirty/behind as P1 (exit 11) for exactly the PR
+    // this mode exists to fix, and the push's pre-write gate refuses while it
+    // is unacknowledged: a sync that stops on every exit 11 can never run.
+    const sync = section('sync');
+    expectTokens(sync, ['mergeable-dirty', 'mergeable-behind'], 'sync section');
+    expectOrdered(sync, ['gstack-pr-watch poll', 'gstack-pr-watch ack', 'gstack-pr-sync push'], 'sync section');
+    expectMentions(sync, [['owner', 'yes', 'ack']], 'sync section');
+  });
 });
 
 describe('audit changes', () => {
