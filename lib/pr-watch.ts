@@ -54,7 +54,10 @@ P1 ATTENTION (any other maintainer or proxy comment or review, a maintainer
 mention from an issue or another contributor's PR, changes requested, a
 merge conflict or a behind base, an owner commit referencing this PR).
 P2 informational (an external user's comment or cross-reference, our
-trailer on a commit not linked to this PR).
+trailer on a commit not linked to this PR). A latched P0/P1 keeps its
+level until acknowledged, even when a later poll reads it lower (an
+edited comment, a sender reclassified); its SIGNAL line then ends with
+what it reads now.
 
 Exit codes: 0 quiet (no unacknowledged P0/P1), 1 error, 2 usage,
 10 unacknowledged P0, 11 unacknowledged P1, 12 UNVERIFIED (an endpoint
@@ -91,7 +94,11 @@ export function classifyActor(a: { login?: string; type?: string; assoc?: string
   return 'external';
 }
 
-export interface Signal { id: string; level: 'P0' | 'P1' | 'P2'; kind: string; at: string; ref: string; who: string; excerpt?: string }
+export interface Signal {
+  id: string; level: 'P0' | 'P1' | 'P2'; kind: string; at: string; ref: string; who: string; excerpt?: string;
+  /** A latched signal that this poll reads at another level or kind: what it reads now, e.g. `P2 bot-comment`. */
+  reads?: string;
+}
 
 interface Comment { id: number; user?: { login?: string; type?: string }; author_association?: string; created_at?: string; html_url?: string; body?: string }
 interface Review { id: number; user?: { login?: string; type?: string }; author_association?: string; state?: string; submitted_at?: string; body?: string }
@@ -290,7 +297,7 @@ function freshState(pr: PrInfo): PrState {
 // ── poll ────────────────────────────────────────────────────────────────────
 
 type Latched = PrState['signals']['latched'][number];
-const RANK = { P1: 1, P0: 2 } as const;
+const RANK = { P2: 0, P1: 1, P0: 2 } as const;
 
 /**
  * Latch this poll's P0/P1 signals. A new id latches. An id already latched
@@ -302,7 +309,7 @@ const RANK = { P1: 1, P0: 2 } as const;
 function latchSignals(prev: PrState['signals'], signals: Signal[], now: Date): { latched: Latched[]; acked: string[]; fresh: Signal[] } {
   const latched: Latched[] = prev.latched.map(l => ({ ...l }));
   let acked = [...prev.acked];
-  const fresh: Signal[] = [];
+  const fresh = new Map<string, Signal>();
   for (const s of signals) {
     if (s.level === 'P2') continue;
     const entry = { id: s.id, level: s.level, kind: s.kind, at: s.at || now.toISOString(), ref: s.ref };
@@ -310,14 +317,36 @@ function latchSignals(prev: PrState['signals'], signals: Signal[], now: Date): {
     if (i === -1) {
       if (acked.includes(s.id)) continue;
       latched.push(entry);
-      fresh.push(s);
+      fresh.set(s.id, s);
     } else if (RANK[s.level] > RANK[latched[i].level]) {
       latched[i] = entry;
       acked = acked.filter(id => id !== s.id);
-      fresh.push(s);
+      fresh.set(s.id, s);
     }
   }
-  return { latched, acked, fresh };
+  return { latched, acked, fresh: [...fresh.values()] };
+}
+
+/**
+ * The unacknowledged latches as this poll reports them: level, kind, time
+ * and ref from the latch, which only ever rises; who and the excerpt from
+ * this poll's reading of the same id, re-read each time. A later poll can
+ * read a latched signal lower (its sender left the last-30 mergedBy proxy
+ * window or lost COLLABORATOR, the comment was edited), and the exit code,
+ * the LaunchAgent's notification and the write gate's reason must still
+ * say what latched. Where ids repeat in one poll, the highest reading wins.
+ */
+function unackedFromLatch(latched: Latched[], acked: string[], signals: Signal[]): Signal[] {
+  const byId = new Map<string, Signal>();
+  for (const s of signals) {
+    const cur = byId.get(s.id);
+    if (!cur || RANK[s.level] > RANK[cur.level]) byId.set(s.id, s);
+  }
+  return latched.filter(l => !acked.includes(l.id)).map(l => {
+    const cur = byId.get(l.id);
+    const reads = cur && (cur.level !== l.level || cur.kind !== l.kind) ? `${cur.level} ${cur.kind}` : undefined;
+    return { who: cur?.who ?? '', excerpt: cur?.excerpt, id: l.id, level: l.level, kind: l.kind, at: l.at, ref: l.ref, ...(reads ? { reads } : {}) };
+  });
 }
 
 export interface PollResult { code: number; signals: Signal[]; fresh: Signal[]; unacked: Signal[]; state: string; error?: string }
@@ -398,8 +427,7 @@ export function poll(d: WatchDeps, repo: string, n: number, cwd: string): PollRe
       const ack = latchSignals(st.signals, signals, d.now());
       fresh = ack.fresh;
       writeState(dir, { ...st, signals: { latched: ack.latched, acked: ack.acked } });
-      const byId = new Map(signals.map(s => [s.id, s]));
-      unacked = ack.latched.filter(l => !ack.acked.includes(l.id)).map(l => byId.get(l.id) ?? { ...l, who: '' } as Signal);
+      unacked = unackedFromLatch(ack.latched, ack.acked, signals);
     });
     const code = unacked.some(s => s.level === 'P0') ? WATCH_EXIT.P0 : unacked.some(s => s.level === 'P1') ? WATCH_EXIT.P1
       : scanError ? WATCH_EXIT.UNVERIFIED : WATCH_EXIT.QUIET;
@@ -426,7 +454,7 @@ export function pollForWrite(d: WatchDeps, repo: string, n: number, cwd: string)
 function printSignals(d: WatchDeps, r: PollResult, n: number): void {
   const word = r.code === WATCH_EXIT.P0 ? 'P0' : r.code === WATCH_EXIT.P1 ? 'P1' : r.code === WATCH_EXIT.UNVERIFIED ? 'UNVERIFIED' : 'QUIET';
   d.out(`RESULT ${word} pr=${n} state=${r.state} new=${r.fresh.length} unacknowledged=${r.unacked.length}${r.error ? ` error=${r.error}` : ''}`);
-  for (const s of r.unacked) d.out(`SIGNAL\t${s.level}\t${s.id}\t${s.kind}\t${s.who}\t${s.ref}`);
+  for (const s of r.unacked) d.out(`SIGNAL\t${s.level}\t${s.id}\t${s.kind}\t${s.who}\t${s.ref}${s.reads ? `\tnow reads ${s.reads}` : ''}`);
   for (const s of r.signals.filter(x => x.level === 'P2')) d.out(`INFO\t${s.id}\t${s.kind}\t${s.who}`);
   // Every unacknowledged signal, not only this call's new ones: the LaunchAgent
   // and the write gate latch with their output discarded, so the owner's poll
