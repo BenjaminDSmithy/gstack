@@ -228,6 +228,15 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(d.out.some(l => l.startsWith('NO_TESTS'))).toBe(false);
   });
 
+  test('a rename selects the tests that still import the old path', async () => {
+    const f = fixture('rename', null, { pr: { 'lib/y.ts': null, 'lib/w.ts': 'export const y = 1;\n' } });
+    expect(await f.call(['select'])).toBe(0);
+    expect(f.out).toContain('SELECT\ttest/x.test.ts\timports:lib/y.ts');
+    f.out.length = 0;
+    expect(await f.call(['run'])).toBe(1);
+    expect(f.out.find(l => l.startsWith('test/x.test.ts'))).toContain('RED');
+  });
+
   test('a runner/dependency change keeps the run red unless the owner accepts the full-suite risk', async () => {
     const f = fixture('full', "test('x', () => expect(y).toBe(2));");
     write(f.tree, 'tsconfig.test.json', '{}\n');
