@@ -239,6 +239,27 @@ export function relativeImports(file: string, src: string): { imports: string[];
   return { imports: [...imports], refs: [...refs] };
 }
 
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Path segments as consecutive quoted path.join arguments: `'scripts', 'eval-list.ts'`. */
+function joinedSegmentsRe(segs: string[]): RegExp {
+  return new RegExp(segs.map((s, i) => `(['"\`])${escapeRe(s)}\\${i + 1}`).join('\\s*,\\s*'));
+}
+
+/**
+ * A test naming `f` relative to its own directory (`dir`, with a trailing
+ * slash), as `import.meta.dir`/`__dirname` joins do: two or more segments,
+ * joined (`'fixtures', 'one.json'`) or as one literal (`'fixtures/one.json'`).
+ */
+function namesFromDir(src: string, dir: string, f: string, cache: Map<string, RegExp[]>): boolean {
+  if (!f.startsWith(dir)) return false;
+  const rel = f.slice(dir.length);
+  if (!rel.includes('/')) return false;
+  let res = cache.get(rel);
+  if (!res) cache.set(rel, (res = [joinedSegmentsRe(rel.split('/')), new RegExp(`(['"\`])${escapeRe(rel)}\\1`)]));
+  return res.some(re => re.test(src));
+}
+
 /** The changed path an import specifier resolves to, the way bun resolves it (extension, /index, .js naming a .ts). */
 function importedChange(spec: string, changed: Set<string>): string | undefined {
   const stem = spec.replace(/\.[mc]?js$/, '');
@@ -276,14 +297,19 @@ export function selectTests(x: { changed: string[]; universe: string[]; declared
   // prints, so the edge is resolved rather than searched for as text.
   const nonRelease = x.changed.filter(f => !RELEASE_FILES.includes(f));
   const importable = new Set(nonRelease);
-  const tokens = nonRelease
+  // How a test can name a changed path: the path itself, a bin's basename,
+  // or its segments as path.join arguments (path.join(ROOT, 'scripts',
+  // 'eval-list.ts')); every changed path a test names is recorded, since
+  // each one's coverage is judged on its own.
+  const named = nonRelease
     .filter(f => !universe.has(f))
-    .flatMap(f => {
-      const out = [f];
+    .map(f => {
+      const tokens = [f];
       const base = path.basename(f);
-      if (f.startsWith('bin/') && base.length >= 6) out.push(base);
-      return out;
+      if (f.startsWith('bin/') && base.length >= 6) tokens.push(base);
+      return { f, base, tokens, joined: f.includes('/') ? joinedSegmentsRe(f.split('/')) : null };
     });
+  const relRes = new Map<string, RegExp[]>();
   if (importable.size) {
     for (const t of x.universe) {
       const src = x.source(t);
@@ -294,8 +320,12 @@ export function selectTests(x: { changed: string[]; universe: string[]; declared
           if (hit && hit !== t) add(t, `${kind}:${hit}`);
         }
       }
-      const hit = tokens.find(tok => src.includes(tok));
-      if (hit) add(t, `names:${hit}`);
+      const dir = `${path.posix.dirname(t)}/`;
+      for (const n of named) {
+        // Every form below contains the basename: a cheap exact pre-filter.
+        if (!src.includes(n.base)) continue;
+        if (n.tokens.some(tok => src.includes(tok)) || n.joined?.test(src) || namesFromDir(src, dir, n.f, relRes)) add(t, `names:${n.f}`);
+      }
     }
   }
   const missingDeclared: string[] = [];

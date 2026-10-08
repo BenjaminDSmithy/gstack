@@ -100,7 +100,7 @@ describe('selectTests', () => {
     const s = sel(['test/a.test.ts', 'bin/gstack-thing', 'x/SKILL.md.tmpl', 'VERSION']);
     const rules = Object.fromEntries(s.files.map(f => [f.file, f.rules]));
     expect(rules['test/a.test.ts']).toContain('changed');
-    expect(rules['test/b.test.ts']).toEqual(['names:gstack-thing']);
+    expect(rules['test/b.test.ts']).toEqual(['names:bin/gstack-thing']);
     expect(rules['test/gen-skill-docs.test.ts']).toEqual(['class:skill(x/SKILL.md.tmpl)']);
     expect(rules['test/egress-receipt-wiring.test.ts']).toEqual(['class:code(bin/gstack-thing)']);
     expect(rules['test/spawnsync-timeout-tripwire.test.ts']).toEqual(['class:test(test/a.test.ts)']);
@@ -118,6 +118,24 @@ describe('selectTests', () => {
     expect(rules(['lib/req.js'])['test/agents-digest.test.ts']).toEqual(['imports:lib/req.js']);
     expect(rules(['browse/src/cli.ts'])['test/b.test.ts']).toContain('refs:browse/src/cli.ts');
     expect(rules(['lib/foobar.ts'])['test/a.test.ts']).toBeUndefined();
+  });
+
+  test('a test that names several changed paths records each; path.join segments name a path too', () => {
+    const local = {
+      'test/c.test.ts': "spawnSync('bun', ['run', path.join(ROOT, 'scripts', 'eval-list.ts')]);\nrun(path.join(ROOT, 'bin', 'gstack-thing'));\nconst cfg = 'docs/notes.txt';",
+      'test/d.test.ts': "const fx = path.join(import.meta.dir, 'fixtures', 'pr', 'one.json');\nconst two = path.join(__dirname, \"fixtures/pr/two.json\");",
+      'browse/test/e.test.ts': "const own = path.join(import.meta.dir, 'fixtures', 'pr', 'one.json');",
+    };
+    const rules = (changed: string[]) => Object.fromEntries(selectTests({
+      changed, universe: [...universe, ...Object.keys(local)], declared: [], pkgVersionOnly: true, source: f => local[f as keyof typeof local] ?? src[f] ?? '',
+    }).files.map(f => [f.file, f.rules]));
+    expect(rules(['scripts/eval-list.ts', 'bin/gstack-thing', 'docs/notes.txt'])['test/c.test.ts'])
+      .toEqual(['names:bin/gstack-thing', 'names:docs/notes.txt', 'names:scripts/eval-list.ts']);
+    // Relative to the test's own directory: a fixture beside the test, joined or as one literal.
+    const fx = rules(['test/fixtures/pr/one.json', 'test/fixtures/pr/two.json']);
+    expect(fx['test/d.test.ts']).toEqual(['names:test/fixtures/pr/one.json', 'names:test/fixtures/pr/two.json']);
+    // browse/test/e.test.ts names its own browse/test/fixtures/pr/one.json, not test/'s.
+    expect(fx['browse/test/e.test.ts']).toBeUndefined();
   });
 
   test('a path named in a test source selects it; release files never do', () => {
