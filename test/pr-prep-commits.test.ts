@@ -282,6 +282,23 @@ describe('CLI', () => {
     expect(JSON.parse(fs.readFileSync(ship, 'utf8')).worst).toBe('EXACT_DUP');
   });
 
+  test('the bin drains a list larger than a pipe buffer to a slow reader before it exits', () => {
+    const { dir, base: b } = freshRepo('pipe', { 'lib/z.ts': 'z\n' });
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 1500; i++) files[`lib/${'n'.repeat(100)}-${i}.ts`] = `${i}\n`;
+    commitIn(dir, files, 'feat: many files');
+    // The reader sleeps, so the pipe fills: bytes still buffered when the bin exits must not be dropped.
+    const r = spawnSync('/bin/bash', ['-c', 'set -o pipefail; "$BUN" "$BIN" list --base "$BASE" --cwd "$DIR" | (sleep 1; cat)'], {
+      encoding: 'utf8', timeout: 60_000, maxBuffer: 64 * 1024 * 1024,
+      env: { ...process.env, BUN: process.execPath, BIN: path.join(import.meta.dir, '..', 'bin', 'gstack-pr-prep-commits'), BASE: b, DIR: dir, GSTACK_STATE_ROOT: path.join(ROOT, 'home-pipe') },
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout.length).toBeGreaterThan(128 * 1024);
+    const [first, ...rest] = r.stdout.split('\n');
+    expect(first).toBe('RESULT OK 1 to audit, 0 skipped');
+    expect(JSON.parse(rest.join('\n')).audit[0].files).toHaveLength(1500);
+  });
+
   test('stamp writes the /ship report and the persistent copy; the next list carries from it; each prints RESULT first', async () => {
     const env = { ...process.env, GSTACK_STATE_ROOT: path.join(ROOT, 'home') };
     let out: string[] = [];

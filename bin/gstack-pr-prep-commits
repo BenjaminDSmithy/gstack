@@ -1,4 +1,7 @@
 #!/usr/bin/env bun
 import { commitsMain } from '../lib/pr-prep-commits';
 
-process.exit(await commitsMain(process.argv.slice(2)));
+// process.exit() discards stdout still buffered in a pipe: past 64 KiB a
+// slow reader got a cut-off list whose JSON no longer parsed. Set the code
+// and let the runtime drain stdout, as bin/gstack-pr-body does.
+process.exitCode = await commitsMain(process.argv.slice(2));
