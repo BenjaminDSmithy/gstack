@@ -486,6 +486,25 @@ describe('merge', () => {
     expect(installs).toEqual(['{"lockfileVersion":1,"deps":"new from upstream"}\n']);
   });
 
+  test('plan\'s dry run reads the same git config as the real merge (a user merge.renames=false is a code conflict)', async () => {
+    const t = topology('s19', {
+      pr: d => { fs.renameSync(path.join(d, 'src/a.txt'), path.join(d, 'src/a2.txt')); release(d, '1.0.1.0', '2026-10-02', 'ours'); },
+      main: d => write(d, 'src/a.txt', 'a1\nMAIN\na3\n'),
+    });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    const cfg = path.join(t.base, 'user.gitconfig');
+    fs.writeFileSync(cfg, '[merge]\n\trenames = false\n');
+    const was = process.env.GIT_CONFIG_GLOBAL;
+    process.env.GIT_CONFIG_GLOBAL = cfg;
+    try {
+      const plan = await run(t, ['plan']);
+      expect(plan.code, plan.out.join('\n')).toBe(20);
+      expect(plan.out.join('\n')).toContain('CONFLICT\tcode\tsrc/a.txt');
+    } finally {
+      process.env.GIT_CONFIG_GLOBAL = was;
+    }
+  });
+
   test('preconditions: a VERSION move with no entry, or two entries, stops with 30', async () => {
     const noEntry = topology('s6a', { pr: d => { write(d, 'src/a.txt', 'a1\nOURS\na3\n'); write(d, 'VERSION', '1.0.1.0\n'); }, main: d => write(d, 'src/b.txt', 'b9\n') });
     queue(noEntry, { version: '1.0.1.0', base_version: '1.0.0.0' });

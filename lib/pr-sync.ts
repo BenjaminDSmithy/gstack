@@ -471,14 +471,19 @@ function isGeneratedIn(d: SyncDeps, cwd: string, revs: string[]): (p: string) =>
   return p => GENERATED_EXTRA.includes(p) || revs.every(rev => d.git(['cat-file', '-e', `${rev}:${p}.tmpl`], { cwd }).status === 0);
 }
 
-/** Read-only dry run: objects go to a throwaway directory, the repo is not touched. */
+/**
+ * Read-only dry run: objects go to a throwaway directory, the repo is not
+ * touched. It runs with the caller's whole env plus the object dirs, so it
+ * finds the same git and reads the same config (HOME, GIT_CONFIG_*) as the
+ * real merge: a user `merge.renames=false` conflicts in both or neither.
+ */
 function dryMerge(c: Ctx, p: Pinned): { tree: string; conflicts: string[]; clean: boolean } {
   const { d, cwd } = c;
   const common = path.resolve(cwd, gitOk(d, cwd, ['rev-parse', '--git-common-dir'], 'git rev-parse').trim());
   const objdir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-pr-sync-objects-'));
   try {
     const r = d.git(['merge-tree', '--write-tree', '--name-only', '--no-messages', p.h0, p.b], {
-      cwd, env: { GIT_OBJECT_DIRECTORY: objdir, GIT_ALTERNATE_OBJECT_DIRECTORIES: path.join(common, 'objects') },
+      cwd, env: { ...d.env, GIT_OBJECT_DIRECTORY: objdir, GIT_ALTERNATE_OBJECT_DIRECTORIES: path.join(common, 'objects') },
     });
     if (r.status !== 0 && r.status !== 1) throw new PrContextError(`git merge-tree failed: ${r.stderr.trim()}`, 1);
     return { ...parseMergeTree(r.stdout), clean: r.status === 0 };
