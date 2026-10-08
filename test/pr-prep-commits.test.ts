@@ -268,6 +268,11 @@ describe('stampReport', () => {
     const empty = listAuditCommits(defaultGit, repo, git('rev-parse', 'HEAD'), null);
     expect(empty.audit).toEqual([]);
     expect(codeOf(st(empty, [{ sha: sha.c4, bucket: 'EXACT_DUP' }]))).toBe(2);
+    // Two listed commits share the 7-hex prefix: the row cannot say which one the agent audited.
+    const twin = (tail: string) => ({ sha: `abcdef1${tail.repeat(33)}`, subject: 's', files: ['lib/a.ts'], patchId: tail, mode: 'NEW' as const, since: null, prior: null });
+    const twins = { base: 'b', head: 'h', audit: [twin('0'), twin('1')], skipped: [] };
+    expect(codeOf(st(twins, [{ sha: 'abcdef1', bucket: 'CLEAN' }]))).toBe(2);
+    expect((stampReport({ summary: 's', commits: [{ sha: 'abcdef10', bucket: 'CLEAN' }] }, twins, now) as Record<string, any>).commits.map((c: { bucket: string }) => c.bucket)).toEqual(['CLEAN', 'UNVERIFIED']);
   });
 
   test('a malformed report and an unknown bucket fail closed', () => {
@@ -317,6 +322,9 @@ describe('dropSelf', () => {
       { number: 3, headRefName: 'other', author: { login: 'me' } },
     ];
     expect(dropSelf(cands, { number: 3066, headRef: 'pr/x', headOwner: 'me' }).map(c => c.number)).toEqual([2, 3]);
+    // The own PR by number alone: its head branch was renamed, or gh reported another head owner.
+    const renamed = [{ number: 3066, headRefName: 'pr/old-name', headRepositoryOwner: { login: 'someone' } }, { number: 4, headRefName: 'pr/y' }];
+    expect(dropSelf(renamed, { number: 3066, headRef: 'pr/x', headOwner: 'me' }).map(c => c.number)).toEqual([4]);
   });
 });
 
@@ -354,7 +362,7 @@ describe('CLI', () => {
     expect(listed.audit[0]).toMatchObject({ mode: 'CARRY', prior: { bucket: 'OVERLAP' } });
   });
 
-  test('stamp never follows a symlink planted at a predictable temp name, and keeps the state dir 0700', async () => {
+  test('stamp never follows a symlink planted at the report path or a predictable temp name, and keeps the state dir 0700', async () => {
     const env = { ...process.env, GSTACK_STATE_ROOT: path.join(ROOT, 'home-atomic') };
     const lines: string[] = [];
     const run = (argv: string[]) => commitsMain([...argv, '--repo', UP, '--cwd', repo], { out: l => lines.push(l), env });
@@ -364,6 +372,8 @@ describe('CLI', () => {
     const victim = path.join(ROOT, 'victim-rc');
     fs.writeFileSync(victim, 'keep\n');
     fs.symlinkSync(victim, `${ship}.${process.pid}.tmp`);
+    // The default --out is the predictable /tmp/ship-pr-prep-<hash>.json: a link there is replaced, never written through.
+    fs.symlinkSync(victim, ship);
     const agent = path.join(ROOT, 'agent-atomic.json');
     fs.writeFileSync(agent, JSON.stringify({ summary: 's', commits: [{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4, bucket: 'CLEAN' }] }));
     expect(await run(['stamp', '--base', base, '--report', agent, '--out', ship])).toBe(0);
