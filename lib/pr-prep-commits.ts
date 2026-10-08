@@ -358,14 +358,17 @@ list and stamp need --base and --repo <owner/name>, the same on both.
 list prints \`RESULT OK <n> to audit, <m> skipped\` and then the JSON;
 stamp prints \`RESULT OK <worst> <out>\` and then the \`PR_PREP_REPORT:\`
 line (\`PR_PREP_REPORT: <out> (<worst>, refused)\` after a refusal's
-RESULT line). self and paths print only their data (it is redirected to a file
-or read as a path). Any failure prints \`RESULT USAGE|ERROR <why>\`.
+RESULT line). self and paths print only their data on stdout (it is
+redirected to a file or read as a path). Any failure prints
+\`RESULT USAGE|ERROR <why>\`: on stderr for self and paths, on stdout for
+list and stamp.
 
 Exit codes: 0 ok, 1 git failure, 2 usage or a malformed report.`;
 
-export async function commitsMain(argv: string[], deps: { git?: GitRunner; out?: (l: string) => void; stdin?: () => string; env?: NodeJS.ProcessEnv; now?: () => Date } = {}): Promise<number> {
+export async function commitsMain(argv: string[], deps: { git?: GitRunner; out?: (l: string) => void; err?: (l: string) => void; stdin?: () => string; env?: NodeJS.ProcessEnv; now?: () => Date } = {}): Promise<number> {
   const g = deps.git ?? defaultGit;
   const out = deps.out ?? (l => process.stdout.write(l + '\n'));
+  const err = deps.err ?? (l => process.stderr.write(l + '\n'));
   const env = deps.env ?? process.env;
   const sub = argv[0] ?? '';
   const flags: Record<string, string> = {};
@@ -439,7 +442,10 @@ export async function commitsMain(argv: string[], deps: { git?: GitRunner; out?:
     throw new PrContextError(`unknown subcommand ${JSON.stringify(sub)}`, 2);
   } catch (error) {
     const code = error instanceof PrContextError ? error.code : 1;
-    out(`RESULT ${code === 2 ? 'USAGE' : 'ERROR'} ${(error as Error).message}`);
+    // self's stdout is redirected into the candidate file and paths' is read
+    // as a path: a failure printed there was never seen, and the template's
+    // `&& mv` silently left the own PR in place to score against itself.
+    (sub === 'self' || sub === 'paths' ? err : out)(`RESULT ${code === 2 ? 'USAGE' : 'ERROR'} ${(error as Error).message}`);
     if (sub === 'stamp' && flags.out) {
       const worst = writeRefused(flags.out, (error as Error).message, flags.report, (deps.now ?? (() => new Date()))());
       out(worst ? `PR_PREP_REPORT: ${flags.out} (${worst}, refused)` : `PR_PREP_REPORT: ${flags.out} not written`);

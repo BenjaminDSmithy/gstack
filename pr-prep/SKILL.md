@@ -793,7 +793,7 @@ Drop it first (the raw fetches directory from Step 3 as a literal):
 ```bash
 _PP_DIR=<raw fetches dir from Step 3>
 _ME=$(gh api user --jq .login 2>/dev/null)
-~/.claude/skills/gstack/bin/gstack-pr-prep-commits self --head-ref "$(git branch --show-current)" --head-owner "$_ME" < "$_PP_DIR/prs-open.json" > "$_PP_DIR/prs-open.self.json" && mv "$_PP_DIR/prs-open.self.json" "$_PP_DIR/prs-open.json"
+~/.claude/skills/gstack/bin/gstack-pr-prep-commits self --head-ref "$(git branch --show-current)" --head-owner "$_ME" < "$_PP_DIR/prs-open.json" > "$_PP_DIR/prs-open.self.json" && mv "$_PP_DIR/prs-open.self.json" "$_PP_DIR/prs-open.json" || echo "PR_PREP_SELF: own PR not dropped - remove this branch's open PR from prs-open.json before scoring" >&2
 ```
 
 This bucketing is implemented deterministically in `bin/gstack-pr-prep-score`
