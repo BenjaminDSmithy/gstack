@@ -198,9 +198,24 @@ function section(body: string, heading: RegExp): { start: number; end: number } 
   return { start: m.index, end: next ? m.index + m[0].length + next.index : body.length };
 }
 
+const SLOT_RE = /(\n*)(<!-- pr-prep:facts:begin v1 -->[\s\S]*?<!-- pr-prep:facts:end -->|<!-- pr-prep:facts -->)(\n*)/g;
+const hasSlot = (text: string) => text.includes(FACTS_MARKER) || text.includes(FACTS_BEGIN);
+
+/** Where the template's own `## Liveness proof` section holds the facts slot. */
+function slotInLiveness(template: string): boolean {
+  const sec = section(template, LIVENESS_HEADING_RE);
+  return !!sec && hasSlot(template.slice(sec.start, sec.end));
+}
+
 /**
  * Carry the owner's liveness work from the live body: its `## Liveness proof`
- * section when that holds an attachment, and a ticked box 1.
+ * section when that holds an attachment, and a ticked box 1. The carried
+ * section's facts block is an old one, and the template decides where the
+ * fresh one goes: when its own Liveness section holds the slot, the first
+ * carried block becomes the marker; otherwise every carried block goes, so
+ * the template's slot elsewhere is the only one (an owner who moved the
+ * marker out of that section was otherwise refused for ever, told to move
+ * it out).
  */
 export function carryLiveness(next: string, live: string): string {
   let out = next;
@@ -208,7 +223,18 @@ export function carryLiveness(next: string, live: string): string {
   const nextSec = section(out, LIVENESS_HEADING_RE);
   if (liveSec && nextSec) {
     const liveText = live.slice(liveSec.start, liveSec.end);
-    if (liveText.match(ASSET_RE)) out = out.slice(0, nextSec.start) + liveText + out.slice(nextSec.end);
+    if (liveText.match(ASSET_RE)) {
+      let keep = slotInLiveness(out);
+      const carried = liveText.replace(SLOT_RE, (_m, lead: string, _slot: string, trail: string) => {
+        if (keep) {
+          keep = false;
+          return lead + FACTS_MARKER + trail;
+        }
+        const n = Math.max(lead.length, trail.length);
+        return '\n'.repeat(lead && trail ? Math.min(n, 2) : n);
+      });
+      out = out.slice(0, nextSec.start) + carried + out.slice(nextSec.end);
+    }
   }
   const liveBox = BOX1_RE.exec(live);
   // The owner's own box character: `[X]` stays `[X]`.
@@ -672,7 +698,9 @@ function cmdRender(c: Ctx): number {
   } catch (error) {
     if (!(error instanceof PrContextError)) throw error;
     body = normalizeBody(carried);
-    slotProblems.push(`the template's facts slot sits in the "## Liveness proof" section, which render takes from the live body to keep the owner's screenshot (${error.message}): move ${FACTS_MARKER} out of that section`);
+    slotProblems.push(slotInLiveness(template)
+      ? `the template's facts slot sits in the "## Liveness proof" section, which render takes from the live body to keep the owner's screenshot, and that live section holds no facts slot: move ${FACTS_MARKER} out of that section`
+      : `the live "## Liveness proof" section render carried left the body without exactly one facts slot (${error.message})`);
   }
   const lost = lostOwnerContent(live, body);
   const lint = lintBody(body, lintContext(c, facts.head, facts.baseSha));

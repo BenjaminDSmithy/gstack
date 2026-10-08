@@ -411,6 +411,27 @@ describe('facts and render', () => {
     expect(body).not.toContain('cccccccccccc');
     expect(body.split(FACTS_BEGIN)).toHaveLength(2);
   });
+
+  test('a template slot moved out of the Liveness section takes the facts with it; the carried old block goes', async () => {
+    const t1 = `## Why\n\nBecause.\n\n${LIVENESS('Screenshot to follow from @me.\n\n<!-- pr-prep:facts -->')}${CHECKLIST(BOX1_OPEN)}`;
+    const live = spliceFacts(t1.replace('Screenshot to follow from @me.', IMG66), renderFactsBlock(FACTS));
+    const f = fixture('render-slot-moved', live);
+    fs.mkdirSync(f.dir, { recursive: true });
+    fs.writeFileSync(path.join(f.dir, 'body.tmpl.md'), TEMPLATE);
+    expect(await f.call(['render'])).toBe(0);
+    const body = fs.readFileSync(f.out[0].match(/body=(\S+)/)![1], 'utf8');
+    expect(body).toContain(IMG66);
+    expect(body.split(FACTS_BEGIN)).toHaveLength(2);
+    expect(body).not.toContain('cccccccccccc');
+    expect(body.indexOf(FACTS_BEGIN)).toBeLessThan(body.indexOf('## Scope'));
+    expect(body).not.toMatch(/\n\n\n/);
+    // A slot left in the template's Liveness section over a live section without one is refused, and says so.
+    const g = fixture('render-slot-none', TEMPLATE.replace('Screenshot to follow from @me.', IMG66));
+    fs.mkdirSync(g.dir, { recursive: true });
+    fs.writeFileSync(path.join(g.dir, 'body.tmpl.md'), t1);
+    expect(await g.call(['render'])).toBe(20);
+    expect(g.out.find(l => l.startsWith('FACTS '))).toContain('holds no facts slot');
+  });
 });
 
 describe('publish', () => {
