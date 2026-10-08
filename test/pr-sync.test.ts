@@ -222,10 +222,10 @@ function queue(t: Topo, answer: Record<string, unknown>): void {
 /** Each topology gets its own state root: the clones share a slug and a topic, as two checkouts of one PR would. */
 const envFor = (t: Topo): NodeJS.ProcessEnv => ({ ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') });
 
-async function run(t: Topo, argv: string[], extra: Partial<SyncDeps> = {}): Promise<{ code: number; out: string[] }> {
+async function run(t: Topo, argv: string[], extra: Partial<SyncDeps> = {}, cwd = t.clone): Promise<{ code: number; out: string[] }> {
   const out: string[] = [];
   process.env.GSTACK_STATE_ROOT = path.join(t.base, 'home');
-  const code = await syncMain([...argv, '--pr', '7', '--repo', 'acme/gstack', '--cwd', t.clone, '--worktree-root', t.wt], {
+  const code = await syncMain([...argv, '--pr', '7', '--repo', 'acme/gstack', '--cwd', cwd, '--worktree-root', t.wt], {
     gh: fakeGh(t), env: envFor(t), now: () => NOW, out: l => out.push(l), err: () => {}, readbackDelayMs: 0, ...extra,
   });
   return { code, out };
@@ -872,6 +872,20 @@ describe('push', () => {
     expect(a.code, a.out.join('\n')).toBe(0);
     expect(fs.existsSync(s.scratch)).toBe(false);
     expect(git(t.clone, 'worktree', 'list').split('\n')).toHaveLength(1);
+  });
+
+  test('run from a linked worktree of the PR checkout, merge marks its scratch and abort removes it', async () => {
+    const t = topology('p15', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    git(t.clone, 'checkout', '-q', 'main');
+    const linked = path.join(t.base, 'linked');
+    git(t.clone, 'worktree', 'add', '-q', linked, 'pr/feat');
+    expect((await run(t, ['merge'], {}, linked)).code).toBe(0);
+    const s = readStagedSync(prStateDir({ cwd: linked, topic: topicFor('pr/feat'), env: envFor(t) }), pr)!;
+    expect(fs.existsSync(s.scratch)).toBe(true);
+    const a = await run(t, ['abort'], {}, linked);
+    expect(a.code, a.out.join('\n')).toBe(0);
+    expect(fs.existsSync(s.scratch)).toBe(false);
   });
 
   test('a stale body from an earlier push blocks the next one; abort removes a staged sync', async () => {
