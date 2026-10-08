@@ -505,6 +505,35 @@ describe('merge', () => {
     }
   });
 
+  test('code-diff proof: upstream landing our own hunk is CHANGED (21, push needs --accept-diff-change); an edit beside it is CONTEXT-ONLY', async () => {
+    const t = topology('s20', { pr: ourFeature, main: d => { write(d, 'src/a.txt', 'a1\nOURS\na3\n'); write(d, 'src/b.txt', 'b9\n'); } });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    const r = await run(t, ['merge']);
+    expect(r.code, r.out.join('\n')).toBe(21);
+    expect(r.out[0]).toStartWith('RESULT DIFF_CHANGED');
+    expect(r.out).toContain('CHANGED\tsrc/a.txt');
+    const s = readStagedSync(stateDir(t), pr)!;
+    expect(s).toMatchObject({ proof: 'CHANGED', changedFiles: ['src/a.txt'] });
+    recordValidation(t, s.sha, 0);
+    expect((await run(t, ['push', '--yes'])).code).toBe(21);
+    expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
+    const pushed = await run(t, ['push', '--yes', '--accept-diff-change']);
+    expect(pushed.code, pushed.out.join('\n')).toBe(0);
+    expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.sha);
+
+    const lines = 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n';
+    const near = topology('s21', {
+      base: d => write(d, 'src/long.txt', lines),
+      pr: d => { write(d, 'src/long.txt', lines.replace('l3', 'l3 OURS')); release(d, '1.0.1.0', '2026-10-02', 'ours'); },
+      main: d => write(d, 'src/long.txt', lines.replace('l5', 'l5 MAIN')),
+    });
+    queue(near, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    const c = await run(near, ['merge']);
+    expect(c.code, c.out.join('\n')).toBe(0);
+    expect(c.out[0]).toContain('proof=CONTEXT-ONLY');
+    expect(readStagedSync(stateDir(near), pr)?.changedFiles).toEqual([]);
+  });
+
   test('preconditions: a VERSION move with no entry, or two entries, stops with 30', async () => {
     const noEntry = topology('s6a', { pr: d => { write(d, 'src/a.txt', 'a1\nOURS\na3\n'); write(d, 'VERSION', '1.0.1.0\n'); }, main: d => write(d, 'src/b.txt', 'b9\n') });
     queue(noEntry, { version: '1.0.1.0', base_version: '1.0.0.0' });
@@ -607,6 +636,29 @@ describe('push', () => {
     expect(r.code, r.out.join('\n')).toBe(30);
     expect(r.out[0]).toContain('head moved');
     expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(moved);
+  });
+
+  test('push re-pins the head itself: a head that moved after a passing gate is 40, nothing sent, never overwritten', async () => {
+    const t = topology('p14', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    recordValidation(t, s.sha, 0);
+    git(t.seed, 'checkout', '-q', 'pr/feat');
+    write(t.seed, 'src/d.txt', 'someone else\n');
+    git(t.seed, 'add', '-A');
+    git(t.seed, 'commit', '-q', '-m', 'maintainer push');
+    git(t.seed, 'push', '-q', t.fork, 'pr/feat');
+    const moved = git(t.fork, 'rev-parse', 'refs/heads/pr/feat');
+    // A gate that saw nothing (it ran before the push landed); push's own pin must catch it before anything is sent.
+    const sent = () => listReceipts(path.join(t.base, 'home')).filter(x => x.sink === 'pr-prep').length;
+    const before = sent();
+    const r = await run(t, ['push', '--yes'], { preWriteGate: () => ({ ok: true, reason: 'ok' }) });
+    expect(r.code, r.out.join('\n')).toBe(40);
+    expect(r.out[0]).toStartWith('RESULT REMOTE_MOVED');
+    expect(sent()).toBe(before);
+    expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(moved);
+    expect(readStagedSync(stateDir(t), pr)?.sha).toBe(s.sha);
   });
 
   test('the default gate polls the watch: a maintainer-proxy supersede comment stops the push', async () => {
