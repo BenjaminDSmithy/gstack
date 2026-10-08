@@ -39,6 +39,7 @@ import {
   type GhResult, type GhRunner, type GitRunner, type PrInfo, type PrState,
 } from './pr-context';
 import { pollForWrite } from './pr-watch';
+import { pruneDrafts, readRetriggerDraft } from './pr-ci-triage';
 
 export const SYNC_EXIT = {
   SYNCED: 0, ERROR: 1, USAGE: 2, NOTHING: 10, CODE_CONFLICT: 20, DIFF_CHANGED: 21, PRECONDITION: 30,
@@ -66,7 +67,11 @@ exact commit.
   status   prints the staged sync and whether it may be pushed
   retrigger  pushes ONE empty commit on top of the PR head with the
            message file gstack-pr-ci-triage drafted (needs --yes and
-           --message); the tree is unchanged, so no new validation
+           --message); the tree is unchanged, so no new validation.
+           Refused (30) unless the draft is in this PR's state dir,
+           unedited, and bound to the head the remote holds and the
+           newest Windows run on it: re-run triage. A landed push or
+           sync push removes every ci: draft
 
 Options:
   --pr N|URL              the upstream PR (required)
@@ -85,9 +90,10 @@ First line of output: RESULT <WORD> ...
 
 Exit codes: 0 synced/pushed/ok, 1 error, 2 usage or approval missing,
 10 nothing to do, 20 code conflict (resolve by hand), 21 code diff changed
-(review; push needs --accept-diff-change), 30 precondition, 31 validation
-missing, red, or a waived full suite without --accept-full-risk for the
-staged commit, 32 PR body still stale from an earlier push, 40 remote moved
+(review; push needs --accept-diff-change), 30 precondition (for retrigger,
+also a draft not bound to this PR's current head and newest run), 31
+validation missing, red, or a waived full suite without --accept-full-risk
+for the staged commit, 32 PR body still stale from an earlier push, 40 remote moved
 or not fast-forward, 41 a pre-push hook or the remote refused the push
 (stop and report; never --no-verify), 45 lock busy, 50 a sync is already
 staged, the scratch path holds something gstack-pr-sync did not make, or
@@ -1048,6 +1054,7 @@ function cmdPush(c: Ctx): number {
     const after = readStateFor(c.stateDir, c.pr) ?? state;
     writeState(c.stateDir, { ...after, bodyStaleSince: staged.sha });
     fs.rmSync(syncFile(c.stateDir), { force: true });
+    const pruned = pruneDraftsAfterPush(c);
     let local = 'local branch not moved (dirty or diverged)';
     const clean = d.git(['status', '--porcelain', '--untracked-files=no'], { cwd: c.cwd });
     if (clean.status === 0 && !clean.stdout.trim()) {
@@ -1058,6 +1065,7 @@ function cmdPush(c: Ctx): number {
     const rb = readback(c, staged.sha);
     d.out(`RESULT PUSHED sha=${staged.sha.slice(0, 12)} pr=${c.pr.number} readback=${rb.word}`);
     d.out(`NOTE ${local}; scratch ${gone === 'removed' || gone === 'absent' ? 'removed' : `left at ${staged.scratch}`}; the PR body is stale until gstack-pr-body publish`);
+    if (pruned) d.out(pruned);
     for (const line of rb.detail) d.out(line);
     return SYNC_EXIT.SYNCED;
   });
@@ -1086,35 +1094,74 @@ function readback(c: Ctx, sha: string): { word: string; detail: string[] } {
  * One empty `ci:` commit on top of the PR head, pushed fast-forward: the
  * re-run a fork contributor can trigger when `gh run rerun` is refused.
  * Same gates as a sync push (approval, pre-write poll, remote still at H0,
- * receipt); no validation, because the tree is the head's own.
+ * receipt); no validation, because the tree is the head's own. The message
+ * must be a gstack-pr-ci-triage draft whose binding names this PR, the head
+ * the remote holds now and the newest Windows run on it, and whose bytes are
+ * the ones triage wrote; otherwise triage's evidence gates would not hold at
+ * the push (30: re-run triage).
  */
 function cmdRetrigger(c: Ctx): number {
   const { d } = c;
   requireApproval(c.f.argv, { valueFlags: VALUE_FLAGS });
   if (!c.f.message || !fs.existsSync(c.f.message)) throw new PrContextError('--message <drafted ci: message file> is required', 2);
-  const msg = fs.readFileSync(c.f.message, 'utf8');
+  const { message: msg, binding } = readRetriggerDraft(c.f.message, { stateDir: c.stateDir, repo: c.repo, pr: c.pr.number });
   if (!/^ci: /.test(msg)) throw new PrContextError('the message must be a ci: commit message (draft it with gstack-pr-ci-triage)', 2);
   if (readStagedSync(c.stateDir, c.pr)) throw new PrContextError('a sync is staged: push or abort it first', SYNC_EXIT.DIRTY);
   const st0 = readStateFor(c.stateDir, c.pr);
   if (st0?.bodyStaleSince) throw new PrContextError(`the PR body is still stale since the push of ${st0.bodyStaleSince.slice(0, 12)}: publish the body first`, SYNC_EXIT.BODY_STALE);
   const h0 = pinBranch(d.git, c.cwd, c.headRemote, c.pr.headRef).sha;
   if (h0 !== c.pr.headOid) throw new PrContextError(`${c.headRemote}/${c.pr.headRef} is ${h0.slice(0, 12)} but the PR reports ${c.pr.headOid.slice(0, 12)}`, SYNC_EXIT.REMOTE_MOVED);
+  const tree = gitOk(d, c.cwd, ['rev-parse', `${h0}^{tree}`], 'git rev-parse').trim();
+  if (binding.head !== h0 || (binding.tree !== null && binding.tree !== tree)) {
+    throw new PrContextError(`the draft for run ${binding.run} was triaged on head ${binding.head.slice(0, 12)}, but the PR head is ${h0.slice(0, 12)}: re-run gstack-pr-ci-triage on the current head`, SYNC_EXIT.PRECONDITION);
+  }
+  const newer = newerWindowsRuns(c, h0, binding.run);
+  if (newer.length) throw new PrContextError(`run ${binding.run} is no longer the newest Windows Free Tests run on ${h0.slice(0, 12)} (${newer.join(', ')}): re-run gstack-pr-ci-triage`, SYNC_EXIT.PRECONDITION);
   const gateAt = d.now().getTime();
   const gate = d.preWriteGate({ gh: d.gh, git: d.git, env: d.env, cwd: c.cwd, repo: c.repo, number: c.pr.number, expectHead: h0, state: st0 });
   if (!gate.ok) throw new PrContextError(`pre-write gate: ${gate.reason}`, SYNC_EXIT.PRECONDITION);
   return withPrLock(c.stateDir, () => {
-    const tree = gitOk(d, c.cwd, ['rev-parse', `${h0}^{tree}`], 'git rev-parse').trim();
     const sha = gitOk(d, c.cwd, ['commit-tree', tree, '-p', h0, '-F', '-'], 'git commit-tree', { input: msg }).trim();
     if (pinBranch(d.git, c.cwd, c.headRemote, c.pr.headRef).sha !== h0) throw new PrContextError('the remote head moved', SYNC_EXIT.REMOTE_MOVED);
     pushOrThrow(c, c.cwd, sha, 'pr-ci-retrigger-push', gateAt);
     const st = readStateFor(c.stateDir, c.pr) ?? freshState(c.pr, { headRemote: c.headRemote, upstreamRemote: c.upRemote });
     writeState(c.stateDir, { ...st, bodyStaleSince: sha });
+    const pruned = pruneDraftsAfterPush(c);
     const clean = d.git(['status', '--porcelain', '--untracked-files=no'], { cwd: c.cwd });
     const ff = clean.status === 0 && !clean.stdout.trim() && d.git(['merge', '--ff-only', '-q', sha], { cwd: c.cwd }).status === 0;
     d.out(`RESULT PUSHED sha=${sha.slice(0, 12)} pr=${c.pr.number} kind=ci-retrigger`);
     d.out(`NOTE ${ff ? `local ${c.pr.headRef} fast-forwarded` : 'local branch not moved (dirty or diverged)'}; the PR body is stale until gstack-pr-body publish`);
+    if (pruned) d.out(pruned);
     return SYNC_EXIT.SYNCED;
   });
+}
+
+/** Windows Free Tests runs on `head` newer than `run` (read-only gh run list); a failed read refuses (1). */
+function newerWindowsRuns(c: Ctx, head: string, run: number): string[] {
+  const r = c.d.gh(['run', 'list', '-R', c.repo, '--workflow', 'windows-free-tests.yml', '--commit', head, '--limit', '20', '--json', 'databaseId']);
+  let runs: unknown = null;
+  try {
+    runs = r.status === 0 ? JSON.parse(r.stdout) : null;
+  } catch {
+    runs = null;
+  }
+  if (!Array.isArray(runs)) throw new PrContextError(`gh run list on ${head.slice(0, 12)} failed, so run ${run} cannot be shown to be the newest: nothing was sent`, SYNC_EXIT.ERROR);
+  return runs.map(x => (x as { databaseId?: unknown }).databaseId).filter((id): id is number => typeof id === 'number' && id > run).map(String);
+}
+
+/**
+ * After a push lands the head has moved, so every ci: draft in the state dir
+ * is for an old head: remove them. Best effort (the push is already done):
+ * a failure is a NOTE line, never an error, and retrigger refuses an old
+ * draft anyway.
+ */
+function pruneDraftsAfterPush(c: Ctx): string | null {
+  try {
+    pruneDrafts(c.stateDir);
+    return null;
+  } catch (error) {
+    return `NOTE could not remove the old ci-retrigger drafts in ${c.stateDir} (${(error as NodeJS.ErrnoException).code ?? (error as Error).message}); retrigger refuses them`;
+  }
 }
 
 /**

@@ -25,6 +25,7 @@ import {
   qualifyQueue, pickVersion, cmpVersion, readStagedSync, classifyPush, defaultTool, type SyncDeps, type ToolRunner,
 } from '../lib/pr-sync';
 import { prStateDir, topicFor, readStateFor, writeState, type GhRunner, type PrState } from '../lib/pr-context';
+import { triageMain, writeRetriggerDraft } from '../lib/pr-ci-triage';
 import { listReceipts } from '../lib/egress-receipt';
 
 setDefaultTimeout(180_000);
@@ -202,6 +203,8 @@ function fakeGh(t: Topo, opts: { state?: string } = {}): GhRunner & { calls: str
     }
     if (args[0] === 'api' && args[1] === 'user') return ok('me\n');
     if (args[0] === 'pr' && args[1] === 'list') return ok('[]');
+    // retrigger's check for a newer Windows run on the head: none by default
+    if (args[0] === 'run' && args[1] === 'list') return ok('[]');
     // gstack-pr-watch's poll, run by the default pre-write gate: a quiet PR.
     if (args[0] === 'api' && args[1] === 'repos/acme/gstack/pulls/7') return ok(JSON.stringify({ state: 'open', merged: false, mergeable_state: 'clean', head: { sha: 'x' } }));
     if (args[0] === 'api' && (args[1]?.startsWith('repos/acme/gstack/issues/7/comments') || args[1]?.startsWith('repos/acme/gstack/pulls/7/reviews'))) return ok('[]');
@@ -244,6 +247,54 @@ const ourFeature = (d: string) => {
   write(d, 'src/a.txt', 'a1\nOURS\na3\n');
   release(d, '1.0.1.0', '2026-10-02', 'ours');
 };
+
+const forkHead = (t: Topo) => git(t.fork, 'rev-parse', 'refs/heads/pr/feat');
+
+/** A ci: draft pair written by gstack-pr-ci-triage's own writer, bound to the fork head unless told otherwise. */
+function ciDraft(t: Topo, opts: { run?: number; head?: string; message?: string; pr?: number; repo?: string } = {}): string {
+  const head = opts.head ?? forkHead(t);
+  const run = opts.run ?? 100;
+  return writeRetriggerDraft(stateDir(t), {
+    repo: opts.repo ?? 'acme/gstack', pr: opts.pr ?? 7, run, head, tree: git(t.fork, 'rev-parse', `${head}^{tree}`), shards: [],
+    message: opts.message ?? `ci: re-run CI after a Bun IOCP crash on windows-free-shard (4)\n\nWindows Free Tests run ${run} on ${head.slice(0, 9)} failed with no failing test.\n`,
+  }).message;
+}
+
+const retriggerReceipts = (t: Topo) => listReceipts(path.join(t.base, 'home')).filter(x => x.payload_class === 'pr-ci-retrigger-push').length;
+
+const CI_FX = path.join(import.meta.dir, 'fixtures', 'pr-ci-triage');
+
+/**
+ * The sync fake gh plus the Windows Free Tests calls gstack-pr-ci-triage
+ * makes: each run failed shard 4 with #3032 run 37346036310's real IOCP
+ * result and shard log.
+ */
+function ciGh(t: Topo, runs: { id: number; sha: string }[]): GhRunner {
+  const quiet = fakeGh(t);
+  const ok = (v: unknown) => ({ status: 0, stdout: JSON.stringify(v), stderr: '' });
+  const view = (r: { id: number; sha: string }) => ({
+    databaseId: r.id, headSha: r.sha, headBranch: 'pr/feat', event: 'pull_request', conclusion: 'failure', status: 'completed', createdAt: '2026-10-06T00:00:00Z',
+    jobs: [{ databaseId: 10, name: 'windows-free-shard (4)', conclusion: 'failure' }, { databaseId: 2, name: 'windows-free-tests', conclusion: 'failure' }],
+  });
+  return ((args: string[]) => {
+    if (args[0] === 'run' && args[1] === 'list') {
+      const commit = args.includes('--commit') ? args[args.indexOf('--commit') + 1] : null;
+      return ok(runs.filter(r => !commit || r.sha === commit).map(view).sort((a, b) => b.databaseId - a.databaseId));
+    }
+    const r = runs.find(x => String(x.id) === args[2]);
+    if (args[0] === 'run' && args[1] === 'view' && r) return ok(view(r));
+    if (args[0] === 'run' && args[1] === 'download' && r) {
+      const name = args[args.indexOf('-n') + 1];
+      const dir = args[args.indexOf('-D') + 1];
+      fs.mkdirSync(dir, { recursive: true });
+      if (name === 'windows-result-4') fs.copyFileSync(path.join(CI_FX, '37346036310-result.json'), path.join(dir, 'shard-4.json'));
+      else if (name === 'windows-free-test-shard-logs-4') fs.copyFileSync(path.join(CI_FX, '37346036310-shard.log.txt'), path.join(dir, 'shard.log'));
+      else return { status: 1, stdout: '', stderr: 'no artifact' };
+      return ok('');
+    }
+    return quiet(args);
+  }) as GhRunner;
+}
 
 // ── pure helpers ────────────────────────────────────────────────────────────
 
@@ -608,9 +659,13 @@ describe('push', () => {
 
     const home = path.join(t.base, 'home');
     const before = listReceipts(home).filter(x => x.sink === 'pr-prep').length;
+    // a ci: draft for the head this push replaces
+    const oldDraft = ciDraft(t, { head: s.h0 });
     const r = await run(t, ['push', '--yes']);
     expect(r.code, r.out.join('\n')).toBe(0);
     expect(forkHead()).toBe(s.sha);
+    expect(fs.existsSync(oldDraft)).toBe(false);
+    expect(fs.existsSync(oldDraft.replace(/\.txt$/, '.json'))).toBe(false);
     const receipts = listReceipts(home).filter(x => x.sink === 'pr-prep');
     expect(receipts.length).toBe(before + 1);
     expect(receipts.at(-1)).toMatchObject({ payload_class: 'pr-sync-push', consent: 'user ran /pr-prep', status: 'exit:0' });
@@ -697,9 +752,8 @@ describe('push', () => {
     expect(readStagedSync(stateDir(t), pr)).toBeNull();
     expect(fs.existsSync(s.scratch)).toBe(false);
     expect(git(t.clone, 'rev-parse', 'HEAD')).toBe(s.sha);
-    // The stale-body gate now holds for the next write.
-    const msg = path.join(t.base, 'ci-msg.txt');
-    fs.writeFileSync(msg, 'ci: re-run CI\n');
+    // The stale-body gate now holds for the next write, even for a draft bound to the new head.
+    const msg = ciDraft(t);
     expect((await run(t, ['retrigger', '--message', msg, '--yes'])).code).toBe(32);
   });
 
@@ -741,10 +795,9 @@ describe('push', () => {
     expect(r.out[0]).toContain('60 s');
     expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
     expect((await run(t, ['abort'])).code).toBe(0);
-    const msg = path.join(t.base, 'ci-msg.txt');
-    fs.writeFileSync(msg, 'ci: re-run CI\n');
-    const rt = await run(t, ['retrigger', '--message', msg, '--yes'], slow());
+    const rt = await run(t, ['retrigger', '--message', ciDraft(t), '--yes'], slow());
     expect(rt.code, rt.out.join('\n')).toBe(30);
+    expect(rt.out[0]).toContain('60 s');
     expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
   });
 
@@ -802,9 +855,7 @@ describe('push', () => {
     expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBeNull();
 
     expect((await run(t, ['abort'])).code).toBe(0);
-    const msg = path.join(t.base, 'ci-msg.txt');
-    fs.writeFileSync(msg, 'ci: re-run CI\n');
-    const rt = await run(t, ['retrigger', '--message', msg, '--yes']);
+    const rt = await run(t, ['retrigger', '--message', ciDraft(t), '--yes']);
     expect(rt.code, rt.out.join('\n')).toBe(41);
     expect(rt.out.join('\n')).toContain('pre-push: BLOCKED');
     expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
@@ -812,20 +863,80 @@ describe('push', () => {
 
   test('retrigger pushes one empty ci: commit on the head, with approval, and marks the body stale', async () => {
     const t = topology('p5', { pr: ourFeature });
-    const msg = path.join(t.base, 'ci-msg.txt');
-    fs.writeFileSync(msg, 'feat: not a ci message\n');
-    expect((await run(t, ['retrigger', '--message', msg])).code).toBe(2);
-    expect((await run(t, ['retrigger', '--message', msg, '--yes'])).code).toBe(2);
-    fs.writeFileSync(msg, 'ci: re-run CI after a Bun IOCP crash on windows-free-shard (4)\n\nRun 1 failed with no failing test.\n');
-    const h0 = git(t.fork, 'rev-parse', 'refs/heads/pr/feat');
+    const notCi = ciDraft(t, { message: 'feat: not a ci message\n' });
+    expect((await run(t, ['retrigger', '--message', notCi])).code).toBe(2);
+    expect((await run(t, ['retrigger', '--message', notCi, '--yes'])).code).toBe(2);
+    const msg = ciDraft(t);
+    const h0 = forkHead(t);
     const r = await run(t, ['retrigger', '--message', msg, '--yes']);
     expect(r.code, r.out.join('\n')).toBe(0);
-    const head = git(t.fork, 'rev-parse', 'refs/heads/pr/feat');
+    const head = forkHead(t);
     expect(git(t.fork, 'rev-parse', `${head}^`)).toBe(h0);
     expect(git(t.fork, 'rev-parse', `${head}^{tree}`)).toBe(git(t.fork, 'rev-parse', `${h0}^{tree}`));
     expect(git(t.fork, 'log', '-1', '--format=%s', head)).toBe('ci: re-run CI after a Bun IOCP crash on windows-free-shard (4)');
     expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBe(head);
-    expect((await run(t, ['retrigger', '--message', msg, '--yes'])).code).toBe(32);
+    // the landed push removed the draft pair: it named a head that is no longer the PR's
+    expect(fs.readdirSync(stateDir(t)).filter(e => e.startsWith('ci-retrigger-'))).toEqual([]);
+    expect((await run(t, ['retrigger', '--message', ciDraft(t), '--yes'])).code).toBe(32);
+  });
+
+  test('a ci: draft gstack-pr-ci-triage bound to an older head is refused after the head moves, nothing sent', async () => {
+    const t = topology('p16', { pr: ourFeature });
+    const h1 = forkHead(t);
+    const gh = ciGh(t, [{ id: 100, sha: h1 }]);
+    const out: string[] = [];
+    expect(await triageMain(['run', '--pr', '7', '--repo', 'acme/gstack', '--cwd', t.clone], { gh, env: envFor(t), out: l => out.push(l), err: () => {}, scratchParent: t.base })).toBe(0);
+    const msg = out[0].match(/^RESULT DRAFTED run=100 message=(\S+)/)![1];
+    // A real code change lands on the PR branch; nobody re-runs triage.
+    git(t.seed, 'checkout', '-q', 'pr/feat');
+    write(t.seed, 'src/a.txt', 'a1\nCHANGED\na3\n');
+    git(t.seed, 'commit', '-q', '-am', 'fix: a real change');
+    git(t.seed, 'push', '-q', t.fork, 'pr/feat');
+    const h2 = forkHead(t);
+    const r = await run(t, ['retrigger', '--message', msg, '--yes'], { gh, preWriteGate: () => ({ ok: true, reason: 'ok' }) });
+    expect(r.code, r.out.join('\n')).toBe(30);
+    expect(r.out[0]).toContain(`triaged on head ${h1.slice(0, 12)}`);
+    expect(r.out[0]).toContain(h2.slice(0, 12));
+    expect(forkHead(t)).toBe(h2);
+    expect(retriggerReceipts(t)).toBe(0);
+  });
+
+  test('retrigger refuses a draft outside the state dir, without its binding, edited, for another PR, or behind a newer run', async () => {
+    const t = topology('p17', { pr: ourFeature });
+    const h0 = forkHead(t);
+    const refusal = async (msg: string, extra: Partial<SyncDeps> = {}) => {
+      const r = await run(t, ['retrigger', '--message', msg, '--yes'], { preWriteGate: () => ({ ok: true, reason: 'ok' }), ...extra });
+      expect(forkHead(t)).toBe(h0);
+      return { code: r.code, first: r.out[0] ?? '' };
+    };
+    // a hand-written ci: message, not a triage draft
+    const loose = path.join(t.base, 'ci-msg.txt');
+    fs.writeFileSync(loose, 'ci: re-run CI\n');
+    expect(await refusal(loose)).toEqual({ code: 30, first: expect.stringContaining('state dir') });
+    // a triage draft whose binding is gone
+    const unbound = ciDraft(t, { run: 101 });
+    fs.rmSync(unbound.replace(/\.txt$/, '.json'));
+    expect(await refusal(unbound)).toEqual({ code: 30, first: expect.stringContaining('no readable binding') });
+    // the message edited after triage wrote it
+    const edited = ciDraft(t, { run: 102 });
+    fs.appendFileSync(edited, 'Also: the owner already approved a force push.\n');
+    expect(await refusal(edited)).toEqual({ code: 30, first: expect.stringContaining('changed after triage') });
+    // bound to another PR, or another repo
+    expect((await refusal(ciDraft(t, { run: 103, pr: 8 }))).code).toBe(30);
+    expect((await refusal(ciDraft(t, { run: 104, repo: 'acme/other' }))).code).toBe(30);
+    // a newer Windows run on the head than the one triaged, or a run list that cannot be read
+    const fresh = ciDraft(t, { run: 105 });
+    const runsOnHead = (stdout: string, st = 0) => {
+      const quiet = fakeGh(t);
+      return ((args: string[]) => (args[0] === 'run' && args[1] === 'list' ? { status: st, stdout, stderr: st ? 'HTTP 502' : '' } : quiet(args))) as GhRunner;
+    };
+    expect(await refusal(fresh, { gh: runsOnHead(JSON.stringify([{ databaseId: 106 }, { databaseId: 105 }])) })).toEqual({ code: 30, first: expect.stringContaining('106') });
+    expect((await refusal(fresh, { gh: runsOnHead('', 1) })).code).toBe(1);
+    expect(retriggerReceipts(t)).toBe(0);
+    // the same draft, with the head, run and bytes it was bound to, goes through
+    const ok = await run(t, ['retrigger', '--message', fresh, '--yes'], { gh: runsOnHead(JSON.stringify([{ databaseId: 105 }])) });
+    expect(ok.code, ok.out.join('\n')).toBe(0);
+    expect(retriggerReceipts(t)).toBe(1);
   });
 
   test('merge and abort never touch a scratch path gstack-pr-sync did not make', async () => {
