@@ -29,10 +29,15 @@ import { PrContextError, RELEASE_FILES, defaultGit, prStateDir, topicFor, type G
 
 export const BUCKETS = ['CLEAN', 'SIBLING', 'OVERLAP', 'UNVERIFIED', 'EXACT_DUP'] as const;
 export type Bucket = (typeof BUCKETS)[number];
-const rank = (b: string) => BUCKETS.indexOf(b as Bucket);
+/**
+ * The agent types its buckets by hand: `exact_dup`, `Exact-Dup` or a padded
+ * `EXACT_DUP ` is still the verdict /ship blocks on, never an unknown one.
+ */
+const normBucket = (b: unknown) => String(b ?? '').trim().toUpperCase().replace(/[\s-]+/g, '_');
+const rank = (b: unknown) => BUCKETS.indexOf(normBucket(b) as Bucket);
 
 /** The most severe bucket; an unknown one ranks as UNVERIFIED and the scan goes on. */
-export function worstOf(buckets: readonly string[]): Bucket {
+export function worstOf(buckets: readonly unknown[]): Bucket {
   let w = 0;
   for (const b of buckets) {
     const r = rank(b);
