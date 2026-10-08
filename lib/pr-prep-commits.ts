@@ -15,8 +15,10 @@
  * commits and empty `ci:` re-runs carry no new work, and a commit whose
  * patch-id was audited before only needs the upstream items that are new
  * since then. Its earlier verdict carries forward, so `worst` never drops
- * because a commit was skipped. A re-run on an open PR scored the PR
- * itself as EXACT_DUP; `self` drops it before scoring.
+ * because a commit was skipped; an UNVERIFIED or EXACT_DUP verdict is
+ * searched in full again instead, since only a full search can confirm or
+ * clear it. A re-run on an open PR scored the PR itself as EXACT_DUP;
+ * `self` drops it before scoring.
  */
 
 import fs from 'node:fs';
@@ -41,6 +43,14 @@ export interface PriorEntry { sha: string; patchId?: string; subject?: string; b
 export interface PriorReport { generated_at?: string; base_sha?: string; head?: string; commits?: PriorEntry[]; audited?: { patchId: string; sha: string; bucket: string }[] }
 
 export type Mode = 'NEW' | 'CARRY' | 'RECHECK';
+/**
+ * Verdicts a delta search cannot keep: UNVERIFIED was never searched, and
+ * EXACT_DUP is defined over currently OPEN upstream PRs, so it must be
+ * re-derived in full each run (the duplicate may have closed, or it was this
+ * branch's own PR scored once because `self` could not run). Carrying it
+ * would abort /ship forever.
+ */
+const RECHECK_BUCKETS: ReadonlySet<string> = new Set(['UNVERIFIED', 'EXACT_DUP']);
 export interface AuditCommit { sha: string; subject: string; files: string[]; patchId: string; mode: Mode; since: string | null; prior: PriorEntry | null }
 export interface CommitList { base: string; head: string; audit: AuditCommit[]; skipped: { sha: string; subject: string; reason: 'release-only' | 'empty' }[] }
 
@@ -97,7 +107,7 @@ export function listAuditCommits(g: GitRunner, cwd: string, base: string, prior:
     const patchId = diff ? (git(g, cwd, ['patch-id', '--stable'], diff).trim().split(/\s+/)[0] ?? '') : '';
     const p = foldPrior([...(index.get(`s:${sha}`) ?? []), ...(patchId ? (index.get(`p:${patchId}`) ?? []) : [])]);
     let mode: Mode = 'NEW';
-    if (p) mode = p.bucket === 'UNVERIFIED' ? 'RECHECK' : 'CARRY';
+    if (p) mode = RECHECK_BUCKETS.has(p.bucket) ? 'RECHECK' : 'CARRY';
     out.audit.push({ sha, subject, files, patchId, mode, since: mode === 'CARRY' ? (prior?.generated_at ?? null) : null, prior: p });
   }
   return out;
@@ -192,8 +202,9 @@ export const COMMITS_USAGE = `gstack-pr-prep-commits <list|stamp|self|paths> [op
   list    commits to audit between --base and HEAD (merges excluded):
           NEW (full searches), CARRY (audited before with a verdict: search
           only items updated since, keep the old verdict), RECHECK (audited
-          before as UNVERIFIED: full searches); release-only and empty
-          commits are skipped and listed
+          before as UNVERIFIED or EXACT_DUP: full searches, the verdict is
+          re-derived); release-only and empty commits are skipped and
+          listed
   stamp   validate the agent's report (JSON file), fold CARRY verdicts in
           (worst never drops), take a commit's worst row, count rows for
           skipped commits and the report's own worst, mark unreported

@@ -103,6 +103,17 @@ describe('stampReport', () => {
     expect(r.audited.map((a: { sha: string }) => a.sha)).toEqual([sha.c1, sha.c4]);
   });
 
+  test('a carried EXACT_DUP is searched in full again and clears once the full search stops finding it', () => {
+    const first = listAuditCommits(defaultGit, repo, base, null);
+    const r1 = stampReport({ summary: 's', commits: [{ sha: sha.c1, bucket: 'EXACT_DUP' }, { sha: sha.c4, bucket: 'CLEAN' }] }, first, now);
+    const l = listAuditCommits(defaultGit, repo, base, r1 as PriorReport);
+    expect(l.audit.map(c => c.mode)).toEqual(['RECHECK', 'CARRY']);
+    expect(searchQualifier(l.audit[0])).toBeNull();
+    // The duplicate closed upstream (or it was this branch's own PR, scored once by mistake).
+    const r2 = stampReport({ summary: 's', commits: [{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4, bucket: 'CLEAN' }] }, l, now) as Record<string, any>;
+    expect(r2.worst).toBe('CLEAN');
+  });
+
   test('every row the agent reported counts toward worst, and its own worst is a floor', () => {
     const l = listAuditCommits(defaultGit, repo, base, null);
     const st = (commits: { sha: string; bucket: string }[], worst?: string) =>
