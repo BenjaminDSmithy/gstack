@@ -80,11 +80,12 @@ fs.writeFileSync('VERSION', v + '\\n');
 const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 pkg.version = v.split('.').slice(0, 3).join('.');
 fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\\n');
-fs.writeFileSync('agents-digest/gstack-AGENTS.md', '# gstack digest v' + v + '\\n');
+fs.writeFileSync('agents-digest/gstack-AGENTS.md', '# gstack digest v' + v + '\\n' + (fs.existsSync('rules.txt') ? fs.readFileSync('rules.txt', 'utf8') : ''));
 console.log(JSON.stringify({ wrote: v, packageJson: true, packageJsonVersion: pkg.version, agentsDigest: true }));
 `;
+/** The digest is the version line plus rules.txt, when a tree has one; gen:skill-docs writes it too, as the real one does. */
 const FAKE_DIGEST = `import fs from 'node:fs';
-fs.writeFileSync('agents-digest/gstack-AGENTS.md', '# gstack digest v' + fs.readFileSync('VERSION', 'utf8').trim() + '\\n');
+fs.writeFileSync('agents-digest/gstack-AGENTS.md', '# gstack digest v' + fs.readFileSync('VERSION', 'utf8').trim() + '\\n' + (fs.existsSync('rules.txt') ? fs.readFileSync('rules.txt', 'utf8') : ''));
 `;
 const FAKE_GEN = `import fs from 'node:fs';
 import path from 'node:path';
@@ -105,6 +106,8 @@ const walk = (d: string) => {
   }
 };
 walk(process.cwd());
+const digest = '# gstack digest v' + fs.readFileSync('VERSION', 'utf8').trim() + '\\n' + (fs.existsSync('rules.txt') ? fs.readFileSync('rules.txt', 'utf8') : '');
+if (fs.readFileSync('agents-digest/gstack-AGENTS.md', 'utf8') !== digest) { stale = true; if (!dry) fs.writeFileSync('agents-digest/gstack-AGENTS.md', digest); }
 process.exit(dry && stale ? 1 : 0);
 `;
 
@@ -426,6 +429,20 @@ describe('merge', () => {
     expect(r.code, r.out.join('\n')).toBe(21);
     expect(r.out).toContain('CHANGED\ty/SKILL.md');
     expect(readStagedSync(stateDir(quiet), pr)?.proof).toBe('CHANGED');
+  });
+
+  test('no release of our own: the digest the generator rewrites is committed, and the scratch is clean', async () => {
+    const t = topology('s16', {
+      base: d => { write(d, 'rules.txt', 'rule 0\n'); write(d, 'agents-digest/gstack-AGENTS.md', '# gstack digest v1.0.0.0\nrule 0\n'); },
+      pr: d => { write(d, 'rules.txt', 'rule 0\nrule added by the PR\n'); write(d, 'agents-digest/gstack-AGENTS.md', '# gstack digest v1.0.0.0\nrule 0\nrule added by the PR\n'); },
+      main: d => write(d, 'src/b.txt', 'b1\nMAIN\nb3\n'),
+    });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    const r = await run(t, ['merge']);
+    expect(r.code, r.out.join('\n')).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    expect(git(s.scratch, 'show', 'HEAD:agents-digest/gstack-AGENTS.md')).toBe('# gstack digest v1.0.0.0\nrule 0\nrule added by the PR');
+    expect(git(s.scratch, 'status', '--porcelain')).toBe('');
   });
 
   test('preconditions: a VERSION move with no entry, or two entries, stops with 30', async () => {
