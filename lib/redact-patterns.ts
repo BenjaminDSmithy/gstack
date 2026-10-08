@@ -350,19 +350,26 @@ export function isCiRunIdentifier(span: string, match: RegExpExecArray): boolean
  * `version `), or a Keep a Changelog heading `## [1.2.3.4]`. The same digits
  * after `host:`, `server = ` or in prose that merely mentions a version still
  * report, and the pre-push hook's VERSION-file rule (#2856) is unchanged.
- * A markdown code span around the key (`` `VERSION` 1.2.3.4 ``) and an arrow
- * separator (`VERSION → 1.2.3.4`, `->`, `=>`) count as the bare key, which is
- * how PR bodies state a release; an arrow with no version key before it
- * (`gateway → 8.8.8.8`) still reports.
+ *
+ * PR bodies state a release as `` `VERSION` → 1.2.3.4 ``. A markdown code
+ * span around the key and an arrow separator (`→`, `->`, `=>`) count only
+ * around a standalone version word, at the line start or after a space, `(`,
+ * `*`, `|` or `[` (VERSION_WORD_BEFORE). A route, DNS label or field whose
+ * name merely ends in "version" (`` `/version` → ``, `api-version → `,
+ * `proxyVersion → `) maps to an address, as does `gateway → 8.8.8.8`, and
+ * both still report.
  */
 const VERSION_DECLARATION_BEFORE =
-  /(?:\b[Vv]ersion|\bVERSION|[a-z0-9_]Version|[_-][Vv]ersion|_VERSION)["'`\]]?(?:[ \t]*(?:[:=(>]|->|=>|→)[ \t]*|[ \t]+)["'`]?$/;
+  /(?:\b[Vv]ersion|\bVERSION|[a-z0-9_]Version|[_-][Vv]ersion|_VERSION)["'\]]?(?:[ \t]*[:=(>][ \t]*|[ \t]+)["']?$/;
+const VERSION_WORD_BEFORE =
+  /(?:^|[ \t(*|[])`?(?:VERSION|[Vv]ersion)`?(?:[ \t]*(?:[:=]|->|=>|→)[ \t]*|[ \t]+)`?$/;
 const CHANGELOG_HEADING_BEFORE = /^#{1,6}[ \t]+\[$/;
 export function isDeclaredVersion(match: RegExpExecArray): boolean {
   const input = match.input ?? "";
   const { start, end } = spanBounds(match);
   const lineStart = input.lastIndexOf("\n", start - 1) + 1;
-  if (VERSION_DECLARATION_BEFORE.test(input.slice(Math.max(lineStart, start - 48), start))) return true;
+  const before = input.slice(Math.max(lineStart, start - 48), start);
+  if (VERSION_DECLARATION_BEFORE.test(before) || VERSION_WORD_BEFORE.test(before)) return true;
   return CHANGELOG_HEADING_BEFORE.test(input.slice(lineStart, start)) && input[end] === "]";
 }
 
