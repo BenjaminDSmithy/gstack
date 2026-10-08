@@ -152,6 +152,17 @@ describe('pure helpers', () => {
     expect(lintBody('Validated at `06c53bff1`.\n')).toEqual([]);
   });
 
+  test('lint: another PR named as `PR 3033`, a pull URL or owner/repo#N is a claim too; an entity or our own version is not', () => {
+    const ctx = { shas: [], prNumber: 3066, released: ['1.91.33.0'], version: '1.91.35.0' };
+    for (const l of ['PR 3033 holds 1.91.30.0.', 'Upstream queue: pull/3033 has 1.91.30.0, so this PR takes 1.91.35.0.',
+      'https://github.com/garrytan/gstack/pull/3033 reserved 1.91.30.0.', 'garrytan/gstack#3033 sits on 1.91.30.0.', 'PR#3033 is at 1.91.30.0.']) {
+      expect(lintBody(`${l}\n`, ctx), l).toEqual(['line 1: names #3033 beside an unreleased version (another PR\'s version goes stale when it merges)']);
+    }
+    for (const l of ['Fixes #3032; this PR ships 1.91.35.0.', 'VERSION &#8594; 1.91.35.0', 'Arrow &#8594; 1.91.36.0 is a typo test.', 'See pull/3066 for 1.91.35.0.']) {
+      expect(lintBody(`${l}\n`, ctx), l).toEqual([]);
+    }
+  });
+
   test('lint reports the body\'s own line numbers below the facts block', () => {
     const body = spliceFacts(TEMPLATE.replace('- **Changed:** lib/x.ts', 'Our head moved.'), renderFactsBlock(FACTS));
     const line = body.split('\n').indexOf('Our head moved.') + 1;
