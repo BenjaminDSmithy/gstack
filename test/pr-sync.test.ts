@@ -502,6 +502,32 @@ describe('push', () => {
     expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
   });
 
+  test('a read-back failure after a landed push still records it: body stale, staged sync gone, branch forwarded', async () => {
+    const t = topology('p7', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    recordValidation(t, s.sha, 0);
+    const quiet = fakeGh(t);
+    // gh pr view answers until the fork head moves, then GitHub has a bad moment.
+    const flaky = ((args: string[]) => args[0] === 'pr' && args[1] === 'view' && git(t.fork, 'rev-parse', 'refs/heads/pr/feat') !== s.h0
+      ? { status: 1, stdout: '', stderr: 'HTTP 502: Bad Gateway' }
+      : quiet(args)) as GhRunner;
+    const r = await run(t, ['push', '--yes'], { gh: flaky });
+    expect(r.code, r.out.join('\n')).toBe(0);
+    expect(r.out[0]).toStartWith('RESULT PUSHED');
+    expect(r.out[0]).toContain('readback=unverified');
+    expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.sha);
+    expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBe(s.sha);
+    expect(readStagedSync(stateDir(t), pr)).toBeNull();
+    expect(fs.existsSync(s.scratch)).toBe(false);
+    expect(git(t.clone, 'rev-parse', 'HEAD')).toBe(s.sha);
+    // The stale-body gate now holds for the next write.
+    const msg = path.join(t.base, 'ci-msg.txt');
+    fs.writeFileSync(msg, 'ci: re-run CI\n');
+    expect((await run(t, ['retrigger', '--message', msg, '--yes'])).code).toBe(32);
+  });
+
   test('a local pre-push hook refusal is exit 41 with the hook\'s own words, for push and retrigger', async () => {
     const t = topology('p6', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
     queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
