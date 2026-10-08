@@ -11,8 +11,9 @@
   <dict>
     <key>HOME</key><string>@HOME@</string>
     <key>PATH</key><string>@PATH@</string>
+    <key>GSTACK_STATE_ROOT</key><string>@STATE_ROOT@</string>
   </dict>
-  <key>StandardOutPath</key><string>@HOME@/.gstack/analytics/pr-watch.launchd.log</string>
-  <key>StandardErrorPath</key><string>@HOME@/.gstack/analytics/pr-watch.launchd.log</string>
+  <key>StandardOutPath</key><string>@STATE_ROOT@/analytics/pr-watch.launchd.log</string>
+  <key>StandardErrorPath</key><string>@STATE_ROOT@/analytics/pr-watch.launchd.log</string>
 </dict>
 </plist>

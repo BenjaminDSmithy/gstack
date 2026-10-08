@@ -30,6 +30,7 @@ import {
   pinBranch, readPr, viewerLogin, topicFor, defaultBranchFromGh, prStateDir, readStateFor, writeState, withPrLock, envelope,
   type GhRunner, type GitRunner, type PrInfo, type PrState,
 } from './pr-context';
+import { resolveStateRoot } from './state-root';
 
 export const WATCH_EXIT = { QUIET: 0, ERROR: 1, USAGE: 2, P0: 10, P1: 11, UNVERIFIED: 12 } as const;
 
@@ -718,6 +719,12 @@ export async function watchMain(argv: string[], deps: Partial<WatchDeps> = {}): 
       if (f.sub === 'enable') {
         fs.writeFileSync(watchFile, JSON.stringify({ v: 1, repo, number: n, cwd: f.cwd }, null, 2) + '\n', { mode: 0o600 });
         d.out(`RESULT ENABLED ${watchFile}`);
+        // The LaunchAgent scans the root its plist names (GSTACK_STATE_ROOT); a
+        // root moved by GSTACK_HOME or a plugin install would never be polled.
+        const root = path.resolve(resolveStateRoot(d.env));
+        if (!d.env.HOME || root !== path.resolve(d.env.HOME, '.gstack')) {
+          d.out(`NOTE this watch is under the state root ${root}, not ~/.gstack: install the LaunchAgent with GSTACK_STATE_ROOT=${root} (contrib/pr-watch/README.md) or it never polls this PR`);
+        }
       } else {
         fs.rmSync(watchFile, { force: true });
         d.out(`RESULT DISABLED ${watchFile}`);
