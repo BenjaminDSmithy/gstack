@@ -571,12 +571,66 @@ function liveChanged(c: Ctx, live: string): boolean {
 
 // ── publish ─────────────────────────────────────────────────────────────────
 
-function diffLines(a: string, b: string): string {
-  const al = a.split('\n');
-  const bl = b.split('\n');
+/**
+ * A line diff of `a` to `b` in hunks: `- ` removed, `+ ` added, two lines of
+ * `  ` context, each hunk headed `@@ live line N, new line M @@`. Moved
+ * sections and dropped duplicate lines show, which a set difference of
+ * lines hid (a reordered body diffed as empty). The middle between the
+ * common prefix and suffix is aligned by LCS; past 4M cells it is shown as
+ * all removed then all added, coarse but never missing a line. Empty only
+ * when the texts are equal.
+ */
+export function lineDiff(a: string, b: string): string {
+  if (a === b) return '';
+  const x = a.split('\n');
+  const y = b.split('\n');
+  let pre = 0;
+  while (pre < x.length && pre < y.length && x[pre] === y[pre]) pre++;
+  let suf = 0;
+  while (suf < x.length - pre && suf < y.length - pre && x[x.length - 1 - suf] === y[y.length - 1 - suf]) suf++;
+  const xm = x.slice(pre, x.length - suf);
+  const ym = y.slice(pre, y.length - suf);
+  const n = xm.length;
+  const m = ym.length;
+  const mid: ('=' | '-' | '+')[] = [];
+  if (n * m <= 4_000_000) {
+    const w = m + 1;
+    const lcs = new Uint32Array((n + 1) * w);
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        lcs[i * w + j] = xm[i] === ym[j] ? lcs[(i + 1) * w + j + 1] + 1 : Math.max(lcs[(i + 1) * w + j], lcs[i * w + j + 1]);
+      }
+    }
+    let i = 0;
+    let j = 0;
+    while (i < n || j < m) {
+      if (i < n && j < m && xm[i] === ym[j]) { mid.push('='); i++; j++; }
+      else if (j >= m || (i < n && lcs[(i + 1) * w + j] >= lcs[i * w + j + 1])) { mid.push('-'); i++; }
+      else { mid.push('+'); j++; }
+    }
+  } else {
+    mid.push(...Array<'-'>(n).fill('-'), ...Array<'+'>(m).fill('+'));
+  }
+  const ops = [...Array<'='>(pre).fill('='), ...mid, ...Array<'='>(suf).fill('=')];
+  const rows: { op: '=' | '-' | '+'; text: string; ai: number; bi: number }[] = [];
+  let ai = 0;
+  let bi = 0;
+  for (const op of ops) {
+    if (op === '=') rows.push({ op, text: x[ai], ai: ai++, bi: bi++ });
+    else if (op === '-') rows.push({ op, text: x[ai], ai: ai++, bi });
+    else rows.push({ op, text: y[bi], ai, bi: bi++ });
+  }
+  const show = new Array<boolean>(rows.length).fill(false);
+  rows.forEach((r, k) => {
+    if (r.op === '=') return;
+    for (let t = Math.max(0, k - 2); t <= Math.min(rows.length - 1, k + 2); t++) show[t] = true;
+  });
   const out: string[] = [];
-  for (const l of al) if (!bl.includes(l)) out.push(`- ${l}`);
-  for (const l of bl) if (!al.includes(l)) out.push(`+ ${l}`);
+  rows.forEach((r, k) => {
+    if (!show[k]) return;
+    if (k === 0 || !show[k - 1]) out.push(`@@ live line ${r.ai + 1}, new line ${r.bi + 1} @@`);
+    out.push(`${r.op === '=' ? ' ' : r.op} ${r.text}`);
+  });
   return out.join('\n');
 }
 
@@ -612,7 +666,9 @@ function cmdPublish(c: Ctx): number {
     }
     if (liveChanged(c, live) && !c.f.acceptLiveDiff) {
       d.out('RESULT REFUSED the live body is not the one we last published (owner edit, or the first publish over a hand-written body): show the owner the diff below, then pass --accept-live-diff');
-      d.out(envelope(diffLines(live, body), `pr-${c.pr.number}-live-vs-new`));
+      const diff = lineDiff(live, body);
+      if (!diff) throw new PrContextError('the live body differs from the outgoing one but their diff is empty', 1);
+      d.out(envelope(diff, `pr-${c.pr.number}-live-vs-new`));
       return BODY_EXIT.REFUSED;
     }
     // Scan exactly the bytes that will be sent.

@@ -13,7 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   normalizeBody, renderFactsBlock, spliceFacts, stripFacts, carryLiveness, lostOwnerContent, lintBody, livenessOf,
-  publishedVersions, scanOutgoing, bodyMain, FACTS_BEGIN, FACTS_END, sha256, type Facts,
+  publishedVersions, scanOutgoing, lineDiff, bodyMain, FACTS_BEGIN, FACTS_END, sha256, type Facts,
 } from '../lib/pr-body';
 import { prStateDir, topicFor, readStateFor, type GhRunner } from '../lib/pr-context';
 import { listReceipts } from '../lib/egress-receipt';
@@ -246,7 +246,7 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
   const http = async (url: string) => (url.includes('dead') ? 404 : 200);
   const call = (argv: string[]) => bodyMain([...argv, '--pr', '9', '--repo', 'acme/gx', '--cwd', clone], { gh, env, out: l => out.push(l), now: () => new Date('2026-10-08T01:00:00Z'), http });
   const dir = prStateDir({ cwd: clone, topic: topicFor('pr/b'), env });
-  return { base, clone, out, call, dir, edits, getLive: () => live, env };
+  return { base, clone, out, call, dir, edits, getLive: () => live, setLive: (text: string) => { live = text; }, env };
 }
 const prRef = { repo: 'acme/gx', number: 9, headRef: 'pr/b', headOwner: 'me' };
 
@@ -366,6 +366,23 @@ describe('publish', () => {
     // The second publish of an unchanged live body needs no live-diff acceptance.
     expect(await f.call(['publish', '--body', file, '--yes'])).toBe(0);
     expect(f.edits).toHaveLength(2);
+  });
+
+  test('the live-vs-new diff is a real line diff: a moved section and a dropped duplicate show', async () => {
+    const f = fixture('reorder', TEMPLATE);
+    const file = await rendered(f);
+    expect(await f.call(['publish', '--body', file, '--yes', '--accept-live-diff'])).toBe(0);
+    const published = f.getLive();
+    const liveness = published.slice(published.indexOf('## Liveness proof'), published.indexOf('## Checklist'));
+    f.setLive(liveness + published.replace(liveness, ''));
+    f.out.length = 0;
+    expect(await f.call(['publish', '--body', file, '--yes'])).toBe(20);
+    const text = f.out.join('\n');
+    expect(text).not.toContain('(empty body)');
+    expect(text).toMatch(/^- ## Liveness proof/m);
+    expect(text).toMatch(/^\+ ## Liveness proof/m);
+    expect(lineDiff('a\nb\na\n', 'a\nb\n')).toContain('- a');
+    expect(lineDiff('x\n', 'x\n')).toBe('');
   });
 
   test('a MEDIUM redaction finding blocks until the owner confirms its key; published versions are not findings', async () => {
