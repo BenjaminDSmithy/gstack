@@ -7,10 +7,19 @@ conflict) signal waits for you. It exists because on #3032 a maintainer
 bot's "the fix wave rewrote this" comment arrived during a usage-limit gap
 and sat unanswered for 3 h 17 min before the PR was closed.
 
-It only reads: REST GETs, `gh pr list`, and a fetch of the base branch into
-a private ref namespace. A notification names only the PR number and the
-signal class, never comment text. Nothing is installed for you; you run the
-commands below.
+A watch that fails twice in a row (it could not verify the PR, or the PR's
+worktree is gone) also notifies, then about once a day while it keeps
+failing, so a dead watch never looks like a quiet one.
+
+What it touches: GitHub is only read (REST GETs, `gh pr list`). In the
+PR's worktree, git fetches the base branch, and the PR head only when the
+worktree lacks its commit, into the private `refs/pr-prep/` namespace. It
+writes the signals it latches into the PR's `state.json` under
+`~/.gstack/projects/` (that is what makes every pr-prep write wait for your
+ack), a log line per PR, and a per-PR failure count under
+`~/.gstack/analytics/`. A notification names only the PR number and the
+signal class or exit code, never comment text. Nothing is installed for
+you; you run the commands below.
 
 ## Enable a PR
 
