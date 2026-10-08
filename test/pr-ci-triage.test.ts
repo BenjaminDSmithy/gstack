@@ -178,10 +178,10 @@ function fakeGh(runs: FakeRun[], calls: string[][], headOid = B): GhRunner {
 }
 
 let homes = 0;
-async function triage(runs: FakeRun[], extra: string[] = [], opts: { headOid?: string; cwd?: string } = {}) {
+async function triage(runs: FakeRun[], extra: string[] = [], opts: { headOid?: string; cwd?: string; stateRoot?: string } = {}) {
   const calls: string[][] = [];
   const out: string[] = [];
-  const env = { ...process.env, GSTACK_STATE_ROOT: path.join(ROOT, `home-${++homes}`) };
+  const env = { ...process.env, GSTACK_STATE_ROOT: opts.stateRoot ?? path.join(ROOT, `home-${++homes}`) };
   const code = await triageMain(['run', '--pr', '3', '--repo', 'acme/gt', '--cwd', opts.cwd ?? repoDir, ...extra], { gh: fakeGh(runs, calls, opts.headOid ?? B), env, out: l => out.push(l) });
   return { code, out, calls, env };
 }
@@ -206,6 +206,22 @@ describe('run', () => {
     expect(next).toContain(`--message ${file}`);
     expect(next).toContain('--yes');
     expect(next).not.toMatch(/git (commit|push)/);
+  });
+
+  test('a draft is bound to its head and run, and the next triage removes any earlier draft', async () => {
+    const stateRoot = path.join(ROOT, 'bound-state');
+    const first = await triage([{ id: 640, sha: B, shard: 4, fixture: '37346036310' }], [], { stateRoot });
+    expect(first.code).toBe(0);
+    const msg = first.out[0].match(/message=(\S+)/)![1];
+    const binding = JSON.parse(fs.readFileSync(msg.replace(/\.txt$/, '.json'), 'utf8'));
+    expect(binding).toMatchObject({ v: 1, run: 640, head: B });
+    expect(first.out.some(l => l.includes(msg.replace(/\.txt$/, '.json')))).toBe(true);
+    // a newer run on the same head is REAL: the old draft must not survive to be pushed
+    const later = await triage([{ id: 641, sha: B, shard: 2, result: { status: 'failed', exitCode: 1, failingFiles: ['test/x.test.ts'] } }], [], { stateRoot });
+    expect(later.code).toBe(10);
+    expect(fs.existsSync(msg)).toBe(false);
+    expect(fs.existsSync(msg.replace(/\.txt$/, '.json'))).toBe(false);
+    expect(fs.readdirSync(path.dirname(msg)).filter(e => e.startsWith('ci-retrigger-'))).toEqual([]);
   });
 
   test('a run on an older head, or one with a newer run on the head, gets no draft', async () => {
