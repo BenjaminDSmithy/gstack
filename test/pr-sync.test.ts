@@ -651,6 +651,25 @@ describe('push', () => {
     expect((await run(t, ['retrigger', '--message', msg, '--yes'])).code).toBe(32);
   });
 
+  test('a PR retargeted to another base after the sync was staged is refused (30)', async () => {
+    const t = topology('p11', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    expect(s.baseRef).toBe('main');
+    recordValidation(t, s.sha, 0);
+    git(t.seed, 'push', '-q', t.up, 'main:refs/heads/develop');
+    const quiet = fakeGh(t);
+    const retargeted = ((args: string[]) => {
+      const r = quiet(args);
+      return args[0] === 'pr' && args[1] === 'view' ? { ...r, stdout: r.stdout.replace('"baseRefName":"main"', '"baseRefName":"develop"') } : r;
+    }) as GhRunner;
+    const r = await run(t, ['push', '--yes'], { gh: retargeted });
+    expect(r.code, r.out.join('\n')).toBe(30);
+    expect(r.out[0]).toContain('develop');
+    expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
+  });
+
   test('a push URL that is not the PR head repo is refused before anything is sent', async () => {
     const t = topology('p10', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
     queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
