@@ -816,9 +816,14 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   const scanner = path.join(c.tree, '.github/scripts/gate-secret-scan.mjs');
   if (fs.existsSync(scanner)) {
     const diff = d.git(['diff', '--unified=0', '--no-color', mb, 'HEAD', '--', '.', ':(exclude)test/fixtures/**', ':(exclude)browse/test/fixtures/**', ':(exclude)docs/evals/**', ':(exclude)test/helpers/security-bench*'], { cwd: c.tree });
-    const runner = d.which('node') ? 'node' : 'bun';
-    const r = tool(runner, [scanner], 120_000, diff.stdout);
-    line(`mirror secret-scan rc=${r.status}`, r.status !== 0);
+    // CI's step runs under `set -euo pipefail`: a failed diff fails it, and scanning an empty or partial one would pass.
+    if (diff.status !== 0 || diff.error) {
+      line(`mirror secret-scan RED: git diff failed (${diff.error ?? `exit ${diff.status}: ${diff.stderr.trim().split('\n').at(-1)}`}); nothing was scanned`, true);
+    } else {
+      const runner = d.which('node') ? 'node' : 'bun';
+      const r = tool(runner, [scanner], 120_000, diff.stdout);
+      line(`mirror secret-scan rc=${r.status}`, r.status !== 0);
+    }
   }
   // CI shellchecks a named list (the extensionless `setup` among it); *.sh files are checked too.
   const ciShell = new Set(shellcheckTargetsFrom(showBase(c, '.github/workflows/quality-gate.yml')));
