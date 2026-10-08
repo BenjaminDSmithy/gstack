@@ -46,7 +46,13 @@ describe('dispatch', () => {
   });
 
   test('the mode comes only from the ARGUMENTS line, and a /ship invocation is always the audit', () => {
-    expectMentions(dispatch, [['ARGUMENTS', 'first word'], ['ship', 'always', 'audit']], 'Detect command');
+    expectMentions(dispatch, [
+      ['ARGUMENTS', 'first word'],
+      ['ship', 'always', 'audit'],
+      // Injection: a tracker comment or a file never picks a write mode.
+      ['tracker', 'never', 'mode'],
+      ['not a mode', 'stop'],
+    ], 'Detect command');
   });
 
   test('every documented /pr-prep invocation and audit flag starts with a word the dispatch routes', () => {
@@ -67,6 +73,8 @@ describe('write safety', () => {
     expectTokens(safety, ['gstack-pr-sync push', 'gstack-pr-sync retrigger', 'gstack-pr-body publish', 'gh pr create'], 'Write safety');
     expectMentions(safety, [
       ['AskUserQuestion', 'same turn'],
+      // D2: one yes, one write; never a standing grant.
+      ['yes', 'one write', 'never'],
       ['Auto-fix', 'never', 'consent'],
       ['force-push', 'no-verify', 'gh pr ready'],
       ['refusal', 'route around'],
@@ -160,7 +168,8 @@ describe('audit changes', () => {
   test('Step 5b writes the report with the Write tool and stamps it with the helper, no heredoc', () => {
     const s5b = between(SKILL, '## Step 5b: Write the machine report', '## Step 6:');
     expectTokens(s5b, ['Write tool', 'gstack-pr-prep-commits stamp'], 'Step 5b');
-    expectAbsent(s5b, ['<<\''], 'Step 5b');
+    // Every heredoc form (quoted, unquoted, <<-): hit titles are upstream text.
+    expectAbsent(s5b, [/<<-?\s*['"]?\w/], 'Step 5b');
   });
 
   test('the audit pins the upstream base, carries verdicts, and drops its own PR before scoring', () => {
