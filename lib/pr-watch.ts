@@ -43,10 +43,12 @@ export const WATCH_USAGE = `gstack-pr-watch <poll|ack|enable|disable|size> --pr 
 
 Signals: P0 SUPERSEDED (a maintainer or maintainer-proxy bot says the work
 was rewritten, replaced or will be closed; a maintainer PR cross-references
-this one; upstream's base branch cites it or carries our trailer while it
-is unmerged; closed unmerged). P1 ATTENTION (any other maintainer or proxy
-comment or review, changes requested, a merge conflict or a behind base,
-an owner commit referencing this PR). P2 informational.
+this one; while it is unmerged, upstream's base branch cites it, or carries
+our trailer on a commit linked to it; closed unmerged). Our trailer on a
+commit not linked to it (credit for another PR) is P2. P1 ATTENTION (any
+other maintainer or proxy comment or review, changes requested, a merge
+conflict or a behind base, an owner commit referencing this PR). P2
+informational.
 
 Exit codes: 0 quiet (no unacknowledged P0/P1), 1 error, 2 usage,
 10 unacknowledged P0, 11 unacknowledged P1, 12 UNVERIFIED (an endpoint
@@ -80,10 +82,13 @@ interface Review { id: number; user?: { login?: string; type?: string }; author_
 interface TimelineEvent { event?: string; actor?: { login?: string; type?: string } | null; created_at?: string; commit_id?: string | null; source?: { issue?: { number?: number; user?: { login?: string } } } | null }
 interface PullState { state?: string; merged?: boolean; mergeable_state?: string; head?: { sha?: string } }
 
+export interface Absorbed { sha: string; credit: boolean; cites?: boolean }
+
 export interface SignalInput {
   number: number; self: string; proxies: ReadonlySet<string>; maintainers: ReadonlySet<string>;
   pull: PullState; comments: Comment[]; reviews: Review[]; timeline: TimelineEvent[];
-  absorbed: { sha: string; credit: boolean }[];
+  /** Base commits since the merge base that cite `(#N)` or carry our Co-authored-by trailer. */
+  absorbed: Absorbed[];
 }
 
 /** Pure: every signal in the inputs, with stable ids. */
@@ -122,8 +127,18 @@ export function signalsFrom(x: SignalInput): Signal[] {
     }
   }
   if (x.pull.state === 'closed' && !x.pull.merged) out.push({ id: 'closed-unmerged', level: 'P0', kind: 'closed-unmerged', at: '', ref: '', who: '' });
+  // Our trailer alone is not this PR's absorption: upstream credits the owner
+  // per PR, so 28f1385ea's credit for #3032 sits on the base of every other
+  // open PR too. It counts only when the commit cites (#N) or GitHub linked
+  // it to this PR with a `referenced` event; otherwise it is information.
+  const linked = new Set(x.timeline.filter(e => e.event === 'referenced' && e.commit_id).map(e => e.commit_id as string));
   for (const a of x.absorbed) {
-    out.push({ id: `absorbed:${a.sha.slice(0, 12)}`, level: 'P0', kind: a.credit ? 'absorbed-with-credit' : 'cited-on-base', at: '', ref: a.sha.slice(0, 12), who: '' });
+    const id = `absorbed:${a.sha.slice(0, 12)}`;
+    if (a.cites || (a.credit && linked.has(a.sha))) {
+      out.push({ id, level: 'P0', kind: a.credit ? 'absorbed-with-credit' : 'cited-on-base', at: '', ref: a.sha.slice(0, 12), who: '' });
+    } else if (a.credit) {
+      out.push({ id, level: 'P2', kind: 'credited-elsewhere', at: '', ref: a.sha.slice(0, 12), who: '' });
+    }
   }
   const ms = x.pull.mergeable_state;
   if (x.pull.state === 'open' && (ms === 'dirty' || ms === 'behind')) {
@@ -280,7 +295,7 @@ function headCommit(d: WatchDeps, cwd: string, pr: PrInfo): string {
 }
 
 /** Upstream base commits citing `(#N)` or carrying our trailer, since the PR's merge base. */
-function absorbedOnBase(d: WatchDeps, cwd: string, repo: string, pr: PrInfo, self: string): { sha: string; credit: boolean }[] {
+function absorbedOnBase(d: WatchDeps, cwd: string, repo: string, pr: PrInfo, self: string): Absorbed[] {
   const up = remoteForRepo(d.git, cwd, repo);
   if (!up) throw new UnverifiedError(`no git remote for ${repo} in ${cwd}`);
   const b = pinBranch(d.git, cwd, up, pr.baseRef).sha;
@@ -292,9 +307,9 @@ function absorbedOnBase(d: WatchDeps, cwd: string, repo: string, pr: PrInfo, sel
     if (r.status !== 0) throw new UnverifiedError('git log failed');
     return r.stdout.split('\n').filter(Boolean);
   };
-  const cites = log(`\\(#${pr.number}\\)`, false);
+  const cites = new Set(log(`\\(#${pr.number}\\)`, false));
   const credit = new Set(log(`co-authored-by: ${self}`, true));
-  return [...new Set([...cites, ...credit])].map(sha => ({ sha, credit: credit.has(sha) }));
+  return [...new Set([...cites, ...credit])].map(sha => ({ sha, credit: credit.has(sha), cites: cites.has(sha) }));
 }
 
 export function poll(d: WatchDeps, repo: string, n: number, cwd: string): PollResult {
@@ -322,7 +337,7 @@ export function poll(d: WatchDeps, repo: string, n: number, cwd: string): PollRe
     // The git half runs last and cannot discard what the REST reads found: a
     // definite P0/P1 outranks a failed scan (reported as error=), and a scan
     // failure with nothing else waiting is UNVERIFIED, never quiet.
-    let absorbed: { sha: string; credit: boolean }[] = [];
+    let absorbed: Absorbed[] = [];
     let scanError: string | undefined;
     if (!pull.merged) {
       try {
