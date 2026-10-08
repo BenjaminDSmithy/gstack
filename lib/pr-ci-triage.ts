@@ -166,10 +166,13 @@ export function classifyShard(shard: number, outcome: ShardOutcome | null, log: 
   if (!outcome) return { ...base, klass: 'UNKNOWN', why: 'no windows-result artifact' };
   const failing = outcome.failingFiles ?? [];
   if (outcome.status === 'passed') return { ...base, klass: 'INFRA', why: 'the shard passed but its job failed (a setup or upload step): see the job log tail' };
-  if (outcome.status === 'failed' && failing.length) {
+  // A named failure is REAL whatever the final status: the runner keeps it in
+  // failingFiles when the shard later times out (or ends any other way).
+  if (failing.length) {
     const shown = failing.map(safeTestPath).filter((f): f is string => !!f);
     const hidden = failing.length - shown.length;
-    return { ...base, klass: 'REAL', why: `failing: ${shown.join(', ') || '(no printable test path)'}${hidden ? `; ${hidden} more entr${hidden === 1 ? 'y' : 'ies'}, printed as data below` : ''}` };
+    const when = outcome.status === 'timed-out' ? ' (before the shard timed out)' : '';
+    return { ...base, klass: 'REAL', why: `failing: ${shown.join(', ') || '(no printable test path)'}${hidden ? `; ${hidden} more entr${hidden === 1 ? 'y' : 'ies'}, printed as data below` : ''}${when}` };
   }
   if (outcome.status === 'timed-out' && failing.length === 0) return { ...base, klass: 'HANG', why: `timed out after ${seconds(outcome.elapsedMs)} s` };
   if (outcome.status === 'failed' && (outcome.exitCode === 3 || outcome.exitCode === 9) && failing.length === 0) {
