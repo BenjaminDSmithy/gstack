@@ -125,19 +125,36 @@ export function renderFactsBlock(f: Facts): string {
   return lines.join('\n');
 }
 
-/** Put the block at `<!-- pr-prep:facts -->`, or replace an existing block. */
+export const FACTS_MARKER = '<!-- pr-prep:facts -->';
+const FACTS_BLOCK_RE = /<!-- pr-prep:facts:begin v1 -->[\s\S]*?<!-- pr-prep:facts:end -->/g;
+const count = (text: string, needle: string) => text.split(needle).length - 1;
+
+/**
+ * Put the block at `<!-- pr-prep:facts -->`, or in place of the one existing
+ * block. A text with no slot, or with more than one (a marker beside an old
+ * block, two blocks), is refused: a second block would publish a stale
+ * "Current state" next to the fresh one. The block is inserted by slicing,
+ * never as a `replace` pattern, so `$'` or `$&` in a fact copies nothing.
+ */
 export function spliceFacts(template: string, block: string): string {
-  if (template.includes('<!-- pr-prep:facts -->')) return template.replace('<!-- pr-prep:facts -->', block);
+  const markers = count(template, FACTS_MARKER);
+  const blocks = count(template, FACTS_BEGIN);
+  if (markers + blocks !== 1 || count(template, FACTS_END) !== blocks) {
+    throw new PrContextError(`the template must hold exactly one facts slot (${FACTS_MARKER} or one facts block); it has ${markers} marker(s) and ${blocks} block(s)`, 2);
+  }
+  if (markers) {
+    const i = template.indexOf(FACTS_MARKER);
+    return template.slice(0, i) + block + template.slice(i + FACTS_MARKER.length);
+  }
   const a = template.indexOf(FACTS_BEGIN);
   const b = template.indexOf(FACTS_END);
-  if (a >= 0 && b > a) return template.slice(0, a) + block + template.slice(b + FACTS_END.length);
-  throw new PrContextError('the template has neither <!-- pr-prep:facts --> nor a facts block', 2);
+  if (b < a) throw new PrContextError('the template\'s facts block ends before it begins', 2);
+  return template.slice(0, a) + block + template.slice(b + FACTS_END.length);
 }
 
+/** The body without any facts block. */
 export function stripFacts(body: string): string {
-  const a = body.indexOf(FACTS_BEGIN);
-  const b = body.indexOf(FACTS_END);
-  return a >= 0 && b > a ? body.slice(0, a) + body.slice(b + FACTS_END.length) : body;
+  return body.replace(FACTS_BLOCK_RE, () => '');
 }
 
 function section(body: string, heading: RegExp): { start: number; end: number } | null {
@@ -383,13 +400,28 @@ function cmdRender(c: Ctx): number {
   fs.mkdirSync(c.stateDir, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(c.stateDir, 'facts.json'), JSON.stringify(facts, null, 2) + '\n', { mode: 0o600 });
   const live = liveBody(c);
-  const body = normalizeBody(carryLiveness(spliceFacts(fs.readFileSync(templatePath, 'utf8'), renderFactsBlock(facts)), live));
+  const template = fs.readFileSync(templatePath, 'utf8');
+  const block = renderFactsBlock(facts);
+  spliceFacts(template, block); // the template itself holds exactly one slot, or this is a usage error
+  // Carry the owner's liveness work first, then fill the slot: a slot inside
+  // the carried section (its old block, from the live body) gets the fresh facts.
+  const carried = carryLiveness(template, live);
+  let body = '';
+  const slotProblems: string[] = [];
+  try {
+    body = normalizeBody(spliceFacts(carried, block));
+  } catch (error) {
+    if (!(error instanceof PrContextError)) throw error;
+    body = normalizeBody(carried);
+    slotProblems.push(`the template's facts slot sits in the "## Liveness proof" section, which render takes from the live body to keep the owner's screenshot (${error.message}): move ${FACTS_MARKER} out of that section`);
+  }
   const lost = lostOwnerContent(live, body);
   const lint = lintBody(body);
   const out = c.f.out ?? path.join(c.stateDir, `pr-body-${today(d)}.md`);
   fs.writeFileSync(out, body, { mode: 0o600 });
-  const word = lost.length || lint.length ? 'REFUSED' : 'RENDERED';
+  const word = lost.length || lint.length || slotProblems.length ? 'REFUSED' : 'RENDERED';
   d.out(`RESULT ${word} body=${out} sha256=${sha256(body).slice(0, 12)} live-changed=${liveChanged(c, live) ? 'yes' : 'no'}`);
+  for (const l of slotProblems) d.out(`FACTS ${l}`);
   for (const l of lost) d.out(`LOST ${l}`);
   for (const l of lint) d.out(`LINT ${l}`);
   return word === 'REFUSED' ? BODY_EXIT.REFUSED : BODY_EXIT.OK;
@@ -428,6 +460,10 @@ function cmdPublish(c: Ctx): number {
     if (lost.length) {
       for (const l of lost) d.out(`LOST ${l}`);
       d.out('RESULT REFUSED the outgoing body would drop live owner content');
+      return BODY_EXIT.REFUSED;
+    }
+    if (count(body, FACTS_BEGIN) !== 1 || count(body, FACTS_END) !== 1) {
+      d.out(`RESULT REFUSED the body must hold exactly one facts block; it has ${count(body, FACTS_BEGIN)} (render it with gstack-pr-body render)`);
       return BODY_EXIT.REFUSED;
     }
     const lint = lintBody(body);
