@@ -24,7 +24,7 @@ import {
   syncMain, parseMergeTree, classifyConflicts, changelogBlock, rebuildChangelog, renameBlockHeading,
   qualifyQueue, pickVersion, cmpVersion, readStagedSync, classifyPush, defaultTool, type SyncDeps, type ToolRunner,
 } from '../lib/pr-sync';
-import { prStateDir, topicFor, readStateFor, writeState, type GhRunner, type PrState } from '../lib/pr-context';
+import { prStateDir, topicFor, readStateFor, writeState, defaultGit, type GhRunner, type GitRunner, type PrState } from '../lib/pr-context';
 import { triageMain, writeRetriggerDraft } from '../lib/pr-ci-triage';
 import { listReceipts } from '../lib/egress-receipt';
 
@@ -1013,5 +1013,50 @@ describe('push', () => {
     expect(ab.code).toBe(0);
     expect(fs.existsSync(s.scratch)).toBe(false);
     expect(readStagedSync(stateDir(t), pr)).toBeNull();
+  });
+
+  test('a sync a closed PR left staged names that PR, and abort --pr <it> clears it; the new PR never merges onto its state', async () => {
+    const t = topology('p18', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    // PR #6 from pr/feat stages a sync and is then closed; #7 is opened from the same branch.
+    const as6 = (state: string): GhRunner => {
+      const base = fakeGh(t);
+      return ((args: string[]) => {
+        if (args[0] !== 'pr' || args[1] !== 'view' || args[2] !== '6') return base(args);
+        const view = JSON.parse(base(args).stdout) as Record<string, unknown>;
+        return { status: 0, stderr: '', stdout: JSON.stringify({ ...view, number: 6, state, url: 'https://github.com/acme/gstack/pull/6' }) };
+      }) as GhRunner;
+    };
+    let worktreeAdds = 0;
+    const counting = { git: ((args, o) => { if (args[0] === 'worktree' && args[1] === 'add') worktreeAdds++; return defaultGit(args, o); }) as GitRunner };
+    const as = async (n: number, gh: GhRunner, argv: string[]) => {
+      const out: string[] = [];
+      const code = await syncMain([...argv, '--pr', String(n), '--repo', 'acme/gstack', '--cwd', t.clone, '--worktree-root', t.wt], {
+        gh, env: envFor(t), now: () => NOW, out: l => out.push(l), err: () => {}, readbackDelayMs: 0, ...counting,
+      });
+      return { code, out };
+    };
+    expect((await as(6, as6('OPEN'), ['merge'])).code).toBe(0);
+    const s6 = readStagedSync(stateDir(t), { repo: 'acme/gstack', number: 6 })!;
+    expect(fs.existsSync(s6.scratch)).toBe(true);
+
+    const st = await as(7, as6('CLOSED'), ['status']);
+    expect(st.code, st.out.join('\n')).toBe(30);
+    expect(st.out[0]).toContain('#6');
+    expect(st.out[0]).toContain('gstack-pr-sync abort --pr 6');
+    // abort is local: it runs for the closed PR that staged the sync, and removes only what that PR made.
+    const ab = await as(6, as6('CLOSED'), ['abort']);
+    expect(ab.code, ab.out.join('\n')).toBe(0);
+    expect(fs.existsSync(s6.scratch)).toBe(false);
+    expect(readStagedSync(stateDir(t), pr)).toBeNull();
+    // A closed PR is still never pushed for.
+    expect((await as(6, as6('CLOSED'), ['push', '--yes'])).code).toBe(30);
+
+    // #6's state.json is still #6's: #7's merge refuses it before it makes a worktree.
+    const before = worktreeAdds;
+    const m = await as(7, as6('CLOSED'), ['merge']);
+    expect(m.code, m.out.join('\n')).toBe(30);
+    expect(m.out[0]).toContain('#6');
+    expect(worktreeAdds).toBe(before);
   });
 });
