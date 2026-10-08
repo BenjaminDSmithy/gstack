@@ -227,7 +227,7 @@ describe('stampReport', () => {
     const modes = (l: typeof first) => [l.floor, l.audit.map(c => c.mode), l.audit.map(searchQualifier)];
     const clean = [{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4, bucket: 'CLEAN' }];
     // c2 is release-only and never searched again; the agent put the OVERLAP it found on it.
-    const r1 = stampReport({ summary: 's', commits: [...clean, { sha: sha.c2, bucket: 'OVERLAP' }] }, first, now) as PriorReport & { worst: string };
+    const r1 = stampReport({ summary: 's', commits: [...clean, { sha: sha.c2, bucket: 'OVERLAP' }] }, first, now) as PriorReport;
     expect(r1.worst).toBe('OVERLAP');
     expect(modes(listAuditCommits(defaultGit, repo, base, r1))).toEqual(['OVERLAP', ['RECHECK', 'RECHECK'], [null, null]]);
     // A declared EXACT_DUP no row carries stays until every commit's full search returned a verdict.
