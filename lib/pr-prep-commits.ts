@@ -194,8 +194,9 @@ const SHA_PREFIX_RE = /^[0-9a-f]{7,64}$/i;
  * `worst`, and the agent's own `worst` is a floor. A row that names no
  * commit between the base and HEAD (a typo, a wrong --base, a sha rewritten
  * since `list`) or names it by fewer than 7 hex characters refuses the whole
- * report (code 2): dropping it could hide an EXACT_DUP. A CARRY commit's
- * bucket is the worse of its prior verdict and the delta search; a commit the
+ * report (code 2): dropping it could hide an EXACT_DUP. A commit with a
+ * verified prior verdict (CARRY, or a RECHECK after a reword) takes the worse
+ * of it and the new search; a commit the
  * agent did not report is UNVERIFIED, except that a RECHECK of a known
  * EXACT_DUP keeps it (and its hits) until a full search returns a verdict.
  */
@@ -223,7 +224,11 @@ export function stampReport(agent: unknown, list: CommitList, now: Date): Record
     // clear a known EXACT_DUP: a failed search (UNVERIFIED) or a missing
     // row says nothing about whether the duplicate closed.
     const keepsDup = c.mode === 'RECHECK' && c.prior?.bucket === 'EXACT_DUP' && bucket === 'UNVERIFIED';
-    const carried = c.prior && (c.mode === 'CARRY' || keepsDup) ? c.prior : null;
+    // A verified verdict carries: past a delta search (CARRY), and past the
+    // full search of a reworded commit, whose diff, and so its file overlap
+    // with the old hits, did not change. UNVERIFIED never carries.
+    const verified = c.prior !== null && !RECHECK_BUCKETS.has(c.prior.bucket);
+    const carried = c.prior && (verified || keepsDup) ? c.prior : null;
     if (carried) bucket = worstOf([bucket, carried.bucket]);
     // The delta search's hits come first, so a re-found item keeps its newest state.
     const hits = dedupeHits([...got.flatMap(r => (Array.isArray(r.hits) ? r.hits : [])), ...(carried && Array.isArray(carried.hits) ? carried.hits : [])]);
@@ -283,7 +288,8 @@ export const COMMITS_USAGE = `gstack-pr-prep-commits <list|stamp|self|paths> [op
           the old verdict), RECHECK (audited
           before as UNVERIFIED or EXACT_DUP, or under another subject:
           full searches, the verdict is re-derived, but a known EXACT_DUP
-          stays until a full search returns a verdict); release-only commits
+          stays until a full search returns a verdict and a reworded
+          commit keeps its verified one); release-only commits
           (only VERSION, CHANGELOG.md, the agents digest, and package.json
           with nothing but its version changed) and empty commits are
           skipped and listed
