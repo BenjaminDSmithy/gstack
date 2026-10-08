@@ -123,25 +123,23 @@ function git(cwd: string, ...a: string[]): string {
  * and `origin`) on feat/x, one commit past upstream's first main. Upstream
  * main then moves, so only a real fetch finds its SHA.
  */
-function forkTopology(prefix: string) {
+function forkTopology(prefix: string, upBranch = 'main') {
   const root = fs.mkdtempSync(path.join(tmp, `${prefix}-`));
   const up = path.join(root, 'up', 'garrytan', 'gstack.git');
   const fork = path.join(root, 'fork', 'me', 'gstack.git');
-  for (const bare of [up, fork]) {
-    fs.mkdirSync(bare, { recursive: true });
-    git(bare, 'init', '-q', '--bare', '-b', 'main');
-  }
-  const seed = (dir: string, remote: string, file: string) => {
+  git(path.dirname(root), 'init', '-q', '--bare', '-b', upBranch, up);
+  git(path.dirname(root), 'init', '-q', '--bare', '-b', 'main', fork);
+  const seed = (dir: string, remote: string, file: string, branch: string) => {
     fs.mkdirSync(dir);
-    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'init', '-q', '-b', branch);
     fs.writeFileSync(path.join(dir, file), file);
     git(dir, 'add', file);
     git(dir, 'commit', '-q', '-m', `seed ${file}`);
-    git(dir, 'push', '-q', remote, 'main');
+    git(dir, 'push', '-q', remote, branch);
   };
-  seed(path.join(root, 'fork-seed'), fork, 'fork.txt');
+  seed(path.join(root, 'fork-seed'), fork, 'fork.txt', 'main');
   const upSeed = path.join(root, 'up-seed');
-  seed(upSeed, up, 'base.txt');
+  seed(upSeed, up, 'base.txt', upBranch);
   const clone = path.join(root, 'clone');
   git(root, 'clone', '-q', '-o', 'upstream', up, clone);
   git(clone, 'remote', 'add', 'origin', fork);
@@ -152,8 +150,8 @@ function forkTopology(prefix: string) {
   fs.writeFileSync(path.join(upSeed, 'later.txt'), 'later');
   git(upSeed, 'add', 'later.txt');
   git(upSeed, 'commit', '-q', '-m', 'later');
-  git(upSeed, 'push', '-q', up, 'main');
-  return { clone, fork, upMain: git(up, 'rev-parse', 'main') };
+  git(upSeed, 'push', '-q', up, upBranch);
+  return { clone, fork, upMain: git(up, 'rev-parse', upBranch) };
 }
 
 // zsh reads `$BASE:r` as its `:r` (drop the extension) modifier, and macOS
@@ -170,19 +168,47 @@ describe('pr-prep Step 1: the upstream base pin', () => {
   });
 
   let topo: ReturnType<typeof forkTopology>;
+  let master: ReturnType<typeof forkTopology>;
   beforeAll(() => {
     topo = forkTopology('step1');
+    master = forkTopology('step1-master', 'master');
   });
+
+  /** gh answers the repo it resolves and that repo's default branch, nothing else. */
+  const ghFor = (defaultBranch: string) => stubDir('gh', [
+    'case "$*" in',
+    '  "repo view --json nameWithOwner -q .nameWithOwner") echo garrytan/gstack ;;',
+    `  "repo view garrytan/gstack --json defaultBranchRef -q .defaultBranchRef.name") echo ${defaultBranch} ;;`,
+    '  *) exit 1 ;;',
+    'esac',
+  ].join('\n'));
 
   for (const shell of ALL_SHELLS) {
     test(`under ${shell}: pins upstream's main by SHA through the remote that names the repo`, () => {
-      const stub = stubDir('gh', 'case "$1 $2" in "repo view") echo garrytan/gstack ;; *) exit 1 ;; esac');
-      const r = run(shell, STEP1_BLOCK, { stub, cwd: topo.clone });
+      const r = run(shell, STEP1_BLOCK, { stub: ghFor('main'), cwd: topo.clone });
       expect(r.out).not.toContain('UNVERIFIED');
       expect(r.out).toContain(`PR_PREP_BASE: garrytan/gstack@main ${topo.upMain} via upstream`);
       expect(r.code).toBe(0);
     });
+
+    // No block ever sets $BASE_BRANCH ({{BASE_BRANCH_DETECT}} names the base in
+    // prose only), so a block that read it pinned `main` on every run, and an
+    // upstream whose default is another branch was UNVERIFIED every time.
+    test(`under ${shell}: pins the upstream's own default branch when it is not main`, () => {
+      const r = run(shell, STEP1_BLOCK, { stub: ghFor('master'), cwd: master.clone });
+      expect(r.out).not.toContain('UNVERIFIED');
+      expect(r.out).toContain(`PR_PREP_BASE: garrytan/gstack@master ${master.upMain} via upstream`);
+      expect(r.code).toBe(0);
+    });
   }
+
+  test('an unresolved default branch is UNVERIFIED, never a guessed main', () => {
+    const stub = stubDir('gh', 'case "$*" in "repo view --json nameWithOwner -q .nameWithOwner") echo garrytan/gstack ;; *) exit 1 ;; esac');
+    const r = run(SHELLS[0], STEP1_BLOCK, { stub, cwd: topo.clone });
+    expect(r.out).toContain('UNVERIFIED');
+    expect(r.out).not.toContain('PR_PREP_BASE: garrytan/gstack@');
+    expect(r.code).toBe(0);
+  });
 });
 
 // `gh pr create --head <login>:<branch>` opens whatever the fork's branch

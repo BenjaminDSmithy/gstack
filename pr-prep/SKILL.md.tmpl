@@ -114,8 +114,9 @@ and `gh pr create` in the open mode. For each one:
    or have only the commits-being-audited. Abort cleanly if the
    working tree has unrelated mid-edit state.
 
-2. Determine the base branch (already set by `{{BASE_BRANCH_DETECT}}`
-   into `$BASE_BRANCH`). Honor `--base <name>` flag override.
+2. The base is the upstream repo's default branch, which the block below
+   reads from `gh` (no block sets `$BASE_BRANCH`). With `--base <name>`,
+   write that name into the block's `BASE=` line instead.
 
 3. Resolve the upstream repo via `gh repo view --json nameWithOwner -q .nameWithOwner`
    (override via `--repo owner/name`), then the git remote whose fetch URL
@@ -161,11 +162,11 @@ and `gh pr create` in the open mode. For each one:
    zero, abort with "no commits to audit".
 
 ```bash
-BASE="${BASE_BRANCH:-main}"
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+BASE=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null)
 UP_REMOTE=$(git remote | while IFS= read -r r; do u=$(git remote get-url "$r" 2>/dev/null); case "$u" in (*/"$REPO"|*:"$REPO"|*/"$REPO".git|*:"$REPO".git) printf '%s\n' "$r" ;; esac; done | head -n 1)
-if [ -z "$REPO" ] || [ -z "$UP_REMOTE" ]; then
-  echo "PR_PREP_BASE: unresolved (repo '${REPO:-?}', no git remote names it) - the audit is UNVERIFIED"
+if [ -z "$REPO" ] || [ -z "$BASE" ] || [ -z "$UP_REMOTE" ]; then
+  echo "PR_PREP_BASE: unresolved (repo '${REPO:-?}', base '${BASE:-?}', remote '${UP_REMOTE:-none}') - the audit is UNVERIFIED"
   exit 0
 fi
 git fetch -q --no-tags "$UP_REMOTE" "+refs/heads/${BASE}:refs/pr-prep/${UP_REMOTE}/${BASE}" || { echo "PR_PREP_BASE: fetch failed - the audit is UNVERIFIED"; exit 0; }
@@ -667,7 +668,7 @@ with no arguments, which is the audit. When invoked by `/ship` (or with `GSTACK_
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--base <name>` | the detected base | Upstream base branch, pinned by SHA |
+| `--base <name>` | upstream's default branch | Upstream base branch, pinned by SHA |
 | `--repo owner/name` | from `gh repo view` | Upstream repo for queries |
 | `--force` | off | Proceed past EXACT_DUP (still print report) |
 
