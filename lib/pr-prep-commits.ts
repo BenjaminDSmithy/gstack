@@ -208,7 +208,8 @@ const SHA_PREFIX_RE = /^[0-9a-f]{7,64}$/i;
  * `worst`, and the agent's own `worst` is a floor. A row that names no
  * commit between the base and HEAD (a typo, a wrong --base, a sha rewritten
  * since `list`) or names it by fewer than 7 hex characters refuses the whole
- * report (code 2): dropping it could hide an EXACT_DUP. A commit with a
+ * report (code 2): dropping it could hide an EXACT_DUP (commitsMain then
+ * writes a refused report that keeps one). A commit with a
  * verified prior verdict (CARRY, or a RECHECK after a reword) takes the worse
  * of it and the new search; a commit the
  * agent did not report is UNVERIFIED, except that a RECHECK of a known
@@ -285,6 +286,37 @@ function writeAtomic(file: string, text: string): void {
   atomicWriteSync(file, text, { mode: 0o600 });
 }
 
+/** Every bucket an agent report names, its rows' and its own `worst`, read leniently: never throws. */
+function reportedBuckets(file: string | undefined): unknown[] {
+  try {
+    const a: unknown = file ? JSON.parse(fs.readFileSync(file, 'utf8')) : null;
+    if (!a || typeof a !== 'object') return [];
+    const { commits, worst } = a as { commits?: unknown; worst?: unknown };
+    const rows = Array.isArray(commits) ? commits : [];
+    return [...rows.map(r => (r && typeof r === 'object' ? (r as { bucket?: unknown }).bucket : null)), worst].filter(b => b !== undefined && b !== null);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * A refused stamp still writes --out: /ship removes the old report before
+ * the audit, so writing nothing read as "no report", UNVERIFIED, and an
+ * EXACT_DUP the agent did report stopped blocking. The refused report
+ * never ranks below UNVERIFIED and keeps any EXACT_DUP a row or the
+ * agent's own `worst` names. The persistent copy, the next list's prior,
+ * is left alone. Returns the worst written, or null when the write failed.
+ */
+function writeRefused(out: string, why: string, report: string | undefined, now: Date): Bucket | null {
+  const worst = worstOf(['UNVERIFIED', ...reportedBuckets(report)]);
+  try {
+    writeAtomic(out, JSON.stringify({ summary: `stamp refused: ${why}`, worst, refused: true, commits: [], generated_at: now.toISOString() }) + '\n');
+    return worst;
+  } catch {
+    return null;
+  }
+}
+
 function readJson<T>(file: string | null): T | null {
   if (!file || !fs.existsSync(file)) return null;
   try {
@@ -313,16 +345,20 @@ export const COMMITS_USAGE = `gstack-pr-prep-commits <list|stamp|self|paths> [op
           skipped commits and the report's own worst, mark unreported
           commits UNVERIFIED, refuse a row that names no listed or skipped
           commit by 7+ hex characters; stamp repo, head, base_sha,
-          generated_at and audited patch-ids; write --out, then --persist (the next
-          list's prior), atomically; a failed --persist is a WARN line,
-          never a failed stamp
+          generated_at and audited patch-ids; write --out, then
+          --persist (the next list's prior), atomically; a failed
+          --persist is a WARN line, never a failed stamp. A refused or
+          failed stamp still writes --out as a refused report whose
+          worst is UNVERIFIED, or EXACT_DUP when a row or the report's
+          own worst says so, and never --persist
   self    drop this branch's own open PR from a candidate list on stdin
   paths   print the default persistent report path for this branch
 
 list and stamp need --base and --repo <owner/name>, the same on both.
 list prints \`RESULT OK <n> to audit, <m> skipped\` and then the JSON;
 stamp prints \`RESULT OK <worst> <out>\` and then the \`PR_PREP_REPORT:\`
-line. self and paths print only their data (it is redirected to a file
+line (\`PR_PREP_REPORT: <out> (<worst>, refused)\` after a refusal's
+RESULT line). self and paths print only their data (it is redirected to a file
 or read as a path). Any failure prints \`RESULT USAGE|ERROR <why>\`.
 
 Exit codes: 0 ok, 1 git failure, 2 usage or a malformed report.`;
@@ -402,11 +438,12 @@ export async function commitsMain(argv: string[], deps: { git?: GitRunner; out?:
     }
     throw new PrContextError(`unknown subcommand ${JSON.stringify(sub)}`, 2);
   } catch (error) {
-    if (error instanceof PrContextError) {
-      out(`RESULT ${error.code === 2 ? 'USAGE' : 'ERROR'} ${error.message}`);
-      return error.code;
+    const code = error instanceof PrContextError ? error.code : 1;
+    out(`RESULT ${code === 2 ? 'USAGE' : 'ERROR'} ${(error as Error).message}`);
+    if (sub === 'stamp' && flags.out) {
+      const worst = writeRefused(flags.out, (error as Error).message, flags.report, (deps.now ?? (() => new Date()))());
+      out(worst ? `PR_PREP_REPORT: ${flags.out} (${worst}, refused)` : `PR_PREP_REPORT: ${flags.out} not written`);
     }
-    out(`RESULT ERROR ${(error as Error).message}`);
-    return 1;
+    return code;
   }
 }

@@ -1035,7 +1035,7 @@ persistent copy:
 
 ```bash
 _PP_REPORT="${GSTACK_PR_PREP_REPORT:-/tmp/ship-pr-prep-$(git rev-parse --show-toplevel | git hash-object --stdin | cut -c1-8).json}"
-~/.claude/skills/gstack/bin/gstack-pr-prep-commits stamp --base <PR_PREP_BASE sha> --repo <PR_PREP_BASE repo> --report <raw fetches dir>/agent-report.json --out "$_PP_REPORT" || echo "PR_PREP_REPORT: invalid, not written" >&2
+~/.claude/skills/gstack/bin/gstack-pr-prep-commits stamp --base <PR_PREP_BASE sha> --repo <PR_PREP_BASE repo> --report <raw fetches dir>/agent-report.json --out "$_PP_REPORT" || echo "PR_PREP_STAMP: refused - fix agent-report.json and run this block again" >&2
 ```
 
 - `worst` is the highest-severity bucket across every commit, in the
@@ -1052,8 +1052,11 @@ _PP_REPORT="${GSTACK_PR_PREP_REPORT:-/tmp/ship-pr-prep-$(git rev-parse --show-to
 - The default path is keyed on the repo root, so audits in different
   worktrees of one project never share a report. `GSTACK_PR_PREP_REPORT`
   overrides it.
-- The report lands through a temp file and `mv` only after `jq` validates
-  it, so a crashed or malformed write leaves no file for the gate to trust.
+- The helper validates the report and writes it atomically. A refused
+  stamp (malformed JSON, or a row that names no listed commit by 7+ hex
+  characters) still writes a refused report, `worst` UNVERIFIED or
+  EXACT_DUP when your rows say so, and leaves the persistent copy alone:
+  fix `agent-report.json` and run the block again.
 
 ## Step 6: Refusal on EXACT_DUP
 

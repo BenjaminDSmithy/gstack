@@ -397,6 +397,34 @@ describe('CLI', () => {
     expect(listed.audit.map((c: { mode: string }) => c.mode)).toEqual(['CARRY', 'CARRY']);
     fs.writeFileSync(agent, '{"nope": 1}');
     expect(await run(['stamp', '--base', base, '--report', agent, '--out', ship])).toBe(2);
-    expect(JSON.parse(fs.readFileSync(ship, 'utf8')).worst).toBe('SIBLING');
+    expect(out.slice(1)).toEqual([`PR_PREP_REPORT: ${ship} (UNVERIFIED, refused)`]);
+    expect(JSON.parse(fs.readFileSync(ship, 'utf8'))).toMatchObject({ worst: 'UNVERIFIED', refused: true });
+    // The persistent copy, the next list's prior, keeps the last report that passed.
+    expect(JSON.parse(fs.readFileSync(persisted, 'utf8')).worst).toBe('SIBLING');
+  });
+
+  test('a refused stamp still writes a /ship report that keeps any EXACT_DUP it was given', async () => {
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(ROOT, 'home-refused') };
+    let out: string[] = [];
+    const agent = path.join(ROOT, 'agent-refused.json');
+    const ship = path.join(ROOT, 'ship-refused.json');
+    const stamp = async (report: unknown, b = base) => {
+      out = [];
+      fs.writeFileSync(agent, typeof report === 'string' ? report : JSON.stringify(report));
+      fs.rmSync(ship, { force: true });
+      const code = await commitsMain(['stamp', '--base', b, '--repo', UP, '--report', agent, '--out', ship, '--cwd', repo], { out: l => out.push(l), env });
+      return [code, out[0].split(' ').slice(0, 2).join(' '), JSON.parse(fs.readFileSync(ship, 'utf8')).worst];
+    };
+    // One short sha refuses the report; the duplicate the agent found must still block /ship.
+    expect(await stamp({ summary: 's', commits: [{ sha: sha.c1, bucket: 'EXACT_DUP' }, { sha: sha.c4.slice(0, 6), bucket: 'CLEAN' }] })).toEqual([2, 'RESULT USAGE', 'EXACT_DUP']);
+    expect(out[1]).toBe(`PR_PREP_REPORT: ${ship} (EXACT_DUP, refused)`);
+    expect(await stamp({ summary: 's', worst: 'exact_dup', commits: [{ sha: 'deadbeefcafe', bucket: 'CLEAN' }] })).toEqual([2, 'RESULT USAGE', 'EXACT_DUP']);
+    // A wrong --base fails in git; a refusal with no duplicate in it is UNVERIFIED, never CLEAN.
+    expect(await stamp({ summary: 's', commits: [{ sha: sha.c1, bucket: 'EXACT_DUP' }] }, 'no-such-ref')).toEqual([1, 'RESULT ERROR', 'EXACT_DUP']);
+    expect(await stamp({ summary: 's', commits: [{ sha: sha.c1.slice(0, 6), bucket: 'CLEAN' }] })).toEqual([2, 'RESULT USAGE', 'UNVERIFIED']);
+    expect(await stamp('not json')).toEqual([2, 'RESULT USAGE', 'UNVERIFIED']);
+    // Nothing refused reaches the persistent copy.
+    expect(await commitsMain(['paths', '--cwd', repo], { out: l => out.push(l), env })).toBe(0);
+    expect(fs.existsSync(out.at(-1)!)).toBe(false);
   });
 });
