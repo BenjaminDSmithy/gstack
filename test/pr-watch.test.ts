@@ -610,6 +610,37 @@ describe('enable and disable', () => {
     expect(fs.existsSync(file)).toBe(false);
     expect((await run('disable', 7, 'acme/gw')).code).toBe(0);
   });
+
+  test('enable says when the watch is under a state root the LaunchAgent would not scan by default', async () => {
+    const gh = ((args: string[]) => (args[0] === 'pr' && args[1] === 'view'
+      ? { status: 0, stderr: '', stdout: JSON.stringify({ number: 7, state: 'OPEN', isDraft: false, headRefOid: 'c'.repeat(40), url: 'https://github.com/acme/gw/pull/7', headRepositoryOwner: { login: 'me' }, headRepository: { name: 'gw' }, headRefName: 'pr/y', baseRefName: 'main' }) }
+      : { status: 1, stdout: '', stderr: 'unexpected' })) as GhRunner;
+    const home = path.join(ROOT, 'enable-root');
+    const enable = async (root: string) => {
+      const out: string[] = [];
+      const env = { ...process.env, HOME: home, GSTACK_STATE_ROOT: root, GSTACK_PROJECT_SLUG: 'me-gw' };
+      expect(await watchMain(['enable', '--pr', '7', '--repo', 'acme/gw', '--cwd', ROOT], { gh, env, out: l => out.push(l) })).toBe(0);
+      return out;
+    };
+    const relocated = await enable(path.join(home, 'relocated'));
+    expect(relocated[0]).toMatch(/^RESULT ENABLED /);
+    expect(relocated.find(l => l.startsWith('NOTE '))).toContain(path.join(home, 'relocated'));
+    expect((await enable(path.join(home, '.gstack'))).some(l => l.startsWith('NOTE '))).toBe(false);
+  });
+});
+
+describe('LaunchAgent plist', () => {
+  test('the README install fills every placeholder in the plist template, and the plist pins the state root', () => {
+    const dir = path.join(import.meta.dir, '..', 'contrib', 'pr-watch');
+    const plist = fs.readFileSync(path.join(dir, 'com.gstack.pr-watch.plist.template'), 'utf8');
+    const install = fs.readFileSync(path.join(dir, 'README.md'), 'utf8').split('\n').find(l => l.includes('com.gstack.pr-watch.plist.template')) ?? '';
+    const placeholders = [...new Set(plist.match(/@[A-Z_]+@/g) ?? [])].sort();
+    const filled = [...new Set([...install.matchAll(/s\|(@[A-Z_]+@)\|/g)].map(m => m[1]))].sort();
+    expect(filled).toEqual(placeholders);
+    // The runner and gstack-pr-watch both resolve the root from this variable under launchd.
+    expect(plist).toMatch(/<key>GSTACK_STATE_ROOT<\/key><string>@STATE_ROOT@<\/string>/);
+    expect(plist).not.toContain('@HOME@/.gstack');
+  });
 });
 
 describe('size before the PR is open', () => {
