@@ -18,7 +18,8 @@
  * since then. Its earlier verdict carries forward, so `worst` never drops
  * because a commit was skipped; an UNVERIFIED or EXACT_DUP verdict is
  * searched in full again instead, since only a full search can confirm or
- * clear it. A re-run on an open PR scored the PR itself as EXACT_DUP;
+ * clear it, and a known EXACT_DUP stays until one runs. A re-run on an
+ * open PR scored the PR itself as EXACT_DUP;
  * `self` drops it before scoring.
  */
 
@@ -195,7 +196,8 @@ const SHA_PREFIX_RE = /^[0-9a-f]{7,64}$/i;
  * since `list`) or names it by fewer than 7 hex characters refuses the whole
  * report (code 2): dropping it could hide an EXACT_DUP. A CARRY commit's
  * bucket is the worse of its prior verdict and the delta search; a commit the
- * agent did not report is UNVERIFIED.
+ * agent did not report is UNVERIFIED, except that a RECHECK of a known
+ * EXACT_DUP keeps it (and its hits) until a full search returns a verdict.
  */
 export function stampReport(agent: unknown, list: CommitList, now: Date): Record<string, unknown> {
   const a = agent as AgentReport;
@@ -217,7 +219,11 @@ export function stampReport(agent: unknown, list: CommitList, now: Date): Record
   const commits = list.audit.map(c => {
     const got = rowsFor(c.sha);
     let bucket: string = got.length ? worstOf(got.map(r => r.bucket)) : 'UNVERIFIED';
-    const carried = c.mode === 'CARRY' && c.prior ? c.prior : null;
+    // A RECHECK re-derives the verdict, but only a full search that ran can
+    // clear a known EXACT_DUP: a failed search (UNVERIFIED) or a missing
+    // row says nothing about whether the duplicate closed.
+    const keepsDup = c.mode === 'RECHECK' && c.prior?.bucket === 'EXACT_DUP' && bucket === 'UNVERIFIED';
+    const carried = c.prior && (c.mode === 'CARRY' || keepsDup) ? c.prior : null;
     if (carried) bucket = worstOf([bucket, carried.bucket]);
     // The delta search's hits come first, so a re-found item keeps its newest state.
     const hits = dedupeHits([...got.flatMap(r => (Array.isArray(r.hits) ? r.hits : [])), ...(carried && Array.isArray(carried.hits) ? carried.hits : [])]);
@@ -276,7 +282,8 @@ export const COMMITS_USAGE = `gstack-pr-prep-commits <list|stamp|self|paths> [op
           only items updated since the day before that audit's stamp, keep
           the old verdict), RECHECK (audited
           before as UNVERIFIED or EXACT_DUP, or under another subject:
-          full searches, the verdict is re-derived); release-only commits
+          full searches, the verdict is re-derived, but a known EXACT_DUP
+          stays until a full search returns a verdict); release-only commits
           (only VERSION, CHANGELOG.md, the agents digest, and package.json
           with nothing but its version changed) and empty commits are
           skipped and listed
