@@ -959,12 +959,34 @@ export class SyncError extends PrContextError {
   }
 }
 
+/** The URL names OWNER/NAME on a path boundary (https, ssh, scp form, local path), `.git` optional. */
+function urlNamesRepo(url: string, repo: string): boolean {
+  const u = url.trim().replace(/\/+$/, '').replace(/\.git$/i, '').toLowerCase();
+  const want = repo.toLowerCase();
+  return u.endsWith(want) && u.length > want.length && '/:'.includes(u[u.length - want.length - 1]);
+}
+
+/**
+ * The head remote was matched by its FETCH URL; `git push` uses
+ * remote.<name>.pushurl and url.<base>.pushInsteadOf when set. Every URL a
+ * push to it would reach (as git expands them) must name the PR's head
+ * repository, or nothing is sent (30).
+ */
+function assertPushTarget(c: Ctx): void {
+  const r = c.d.git(['remote', 'get-url', '--push', '--all', c.headRemote], { cwd: c.cwd });
+  const urls = r.status === 0 ? r.stdout.split('\n').map(u => u.trim()).filter(Boolean) : [];
+  if (!urls.length) throw new PrContextError(`git remote get-url --push ${c.headRemote} failed: ${(r.error ?? r.stderr).trim()}`, SYNC_EXIT.ERROR);
+  const off = urls.filter(u => !urlNamesRepo(u, c.pr.headRepo));
+  if (off.length) throw new PrContextError(`a push to ${c.headRemote} would go to ${off.length} push URL(s) that are not ${c.pr.headRepo} (remote.${c.headRemote}.pushurl or a pushInsteadOf rule): nothing was sent`, SYNC_EXIT.PRECONDITION);
+}
+
 /**
  * The one push both writes make: `<sha>` to the PR head ref, fast-forward
  * only, receipted, classified by classifyPush. On a refusal it throws with
  * git's whole output (the hook's or the server's reason) as untrusted data.
  */
 function pushOrThrow(c: Ctx, cwd: string, sha: string, payloadClass: string): void {
+  assertPushTarget(c);
   const ref = `refs/heads/${c.pr.headRef}`;
   const r = receiptedSend({ host: 'github.com', payloadClass, consent: 'user ran /pr-prep', env: c.d.env }, () =>
     c.d.git(['push', '--porcelain', c.headRemote, `${sha}:${ref}`], { cwd, timeoutMs: 300_000 }));

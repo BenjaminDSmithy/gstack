@@ -651,6 +651,26 @@ describe('push', () => {
     expect((await run(t, ['retrigger', '--message', msg, '--yes'])).code).toBe(32);
   });
 
+  test('a push URL that is not the PR head repo is refused before anything is sent', async () => {
+    const t = topology('p10', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    recordValidation(t, s.sha, 0);
+    // The fetch URL names me/gstack (so the head remote matched); pushes would go elsewhere.
+    const elsewhere = path.join(t.base, 'elsewhere', 'other', 'repo.git');
+    fs.mkdirSync(elsewhere, { recursive: true });
+    git(elsewhere, 'init', '-q', '--bare', '-b', 'main');
+    git(t.clone, 'config', 'remote.origin.pushurl', elsewhere);
+    const r = await run(t, ['push', '--yes']);
+    expect(r.code, r.out.join('\n')).toBe(30);
+    expect(r.out[0]).toContain('push URL');
+    expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
+    expect(spawnSync('git', ['rev-parse', '--verify', '--quiet', 'refs/heads/pr/feat'], { cwd: elsewhere, timeout: 30_000 }).status).not.toBe(0);
+    expect(readStagedSync(stateDir(t), pr)?.sha).toBe(s.sha);
+    expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBeNull();
+  });
+
   test('a local pre-push hook refusal is exit 41 with the hook\'s own words, for push and retrigger', async () => {
     const t = topology('p6', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
     queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
