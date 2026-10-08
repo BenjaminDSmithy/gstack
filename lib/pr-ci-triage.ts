@@ -252,9 +252,18 @@ function ghJson<T>(d: TriageDeps, args: string[], what: string): T {
   }
 }
 
-function download(d: TriageDeps, repo: string, run: number, name: string): string | null {
+/**
+ * Let a queued SIGINT/SIGTERM/SIGHUP handler run. The gh calls are
+ * synchronous, so a signal that arrives during one is only handled at the
+ * next turn of the event loop: after every download and before the draft
+ * is written.
+ */
+const yieldToSignals = () => new Promise<void>(resolve => setImmediate(resolve));
+
+async function download(d: TriageDeps, repo: string, run: number, name: string): Promise<string | null> {
   const dir = d.tmp();
   const r = d.gh(['run', 'download', String(run), '-R', repo, '-n', name, '-D', dir]);
+  await yieldToSignals();
   if (r.status !== 0) return null;
   const files: string[] = [];
   const walk = (p: string) => {
@@ -334,7 +343,7 @@ function sameTreeGreen(d: TriageDeps, cwd: string, repo: string, pr: PrInfo, run
   return null;
 }
 
-function cmdRun(d: TriageDeps, f: Flags): number {
+async function cmdRun(d: TriageDeps, f: Flags): Promise<number> {
   if (!f.pr) throw new PrContextError('--pr is required', 2);
   const repo = f.repo ?? upstreamRepoFromGh(d.gh, f.cwd);
   const pr = readPr(d.gh, repo, parsePrRefFor(f.pr, repo));
@@ -376,10 +385,10 @@ function cmdRun(d: TriageDeps, f: Flags): number {
   const detail: string[] = [];
   const triaged: ShardTriage[] = [];
   for (const n of shards) {
-    const resFile = download(d, repo, runId, `windows-result-${n}`);
+    const resFile = await download(d, repo, runId, `windows-result-${n}`);
     const outcome = resFile ? parseOutcome(fs.readFileSync(resFile, 'utf8')) : null;
     const needsLog = outcome && outcome.status !== 'passed' && (outcome.failingFiles ?? []).length === 0;
-    const logFile = needsLog ? download(d, repo, runId, `windows-free-test-shard-logs-${n}`) : null;
+    const logFile = needsLog ? await download(d, repo, runId, `windows-free-test-shard-logs-${n}`) : null;
     const log = logFile ? fs.readFileSync(logFile, 'utf8') : null;
     const t = classifyShard(n, outcome, log);
     if (t.klass === 'HANG') t.sameTreeGreen = sameTreeGreen(d, f.cwd, repo, pr, run, n);
@@ -399,6 +408,7 @@ function cmdRun(d: TriageDeps, f: Flags): number {
     for (const line of detail) d.out(line);
     return TRIAGE_EXIT.NO_DRAFT;
   }
+  await yieldToSignals();
   const dir = prStateDir({ cwd: f.cwd, topic: topicFor(pr.headRef), env: d.env });
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = path.join(dir, `ci-retrigger-${runId}.txt`);
@@ -413,7 +423,7 @@ function cmdRun(d: TriageDeps, f: Flags): number {
 
 export interface DayCount { runs: number; failedRuns: number; crash: number; hang: number; real: number; other: number }
 
-function cmdOnset(d: TriageDeps, f: Flags): number {
+async function cmdOnset(d: TriageDeps, f: Flags): Promise<number> {
   const repo = f.repo ?? upstreamRepoFromGh(d.gh, f.cwd);
   const runs = ghJson<RunInfo[]>(d, ['run', 'list', '-R', repo, '--workflow', 'windows-free-tests.yml', '--limit', String(f.limit), '--json', RUN_FIELDS], 'gh run list')
     .filter(r => r.conclusion !== 'action_required' && r.conclusion !== 'cancelled' && r.status === 'completed');
@@ -430,12 +440,12 @@ function cmdOnset(d: TriageDeps, f: Flags): number {
       for (const n of failedShards((view.jobs ?? []).filter(x => x.conclusion === 'failure'))) {
         if (downloads >= CAP) { c.other++; continue; }
         downloads++;
-        const res = download(d, repo, r.databaseId, `windows-result-${n}`);
+        const res = await download(d, repo, r.databaseId, `windows-result-${n}`);
         const outcome = res ? parseOutcome(fs.readFileSync(res, 'utf8')) : null;
         let log: string | null = null;
         if (outcome && (outcome.exitCode === 3 || outcome.exitCode === 9) && downloads < CAP) {
           downloads++;
-          const lf = download(d, repo, r.databaseId, `windows-free-test-shard-logs-${n}`);
+          const lf = await download(d, repo, r.databaseId, `windows-free-test-shard-logs-${n}`);
           log = lf ? fs.readFileSync(lf, 'utf8') : null;
         }
         const t = classifyShard(n, outcome, log);
@@ -453,12 +463,62 @@ function cmdOnset(d: TriageDeps, f: Flags): number {
   return 0;
 }
 
-export async function triageMain(argv: string[], deps: Partial<TriageDeps> = {}): Promise<number> {
-  // Artifact downloads land under one scratch root, removed on the way out.
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-ci-triage-'));
+const SCRATCH_PREFIX = 'gstack-ci-triage-';
+const OWNER_FILE = '.owner';
+
+function pidAlive(pid: number): boolean {
   try {
-    return await triage(argv, { ...realDeps(), tmp: () => fs.mkdtempSync(path.join(scratch, 'a-')), ...deps });
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * Remove scratch roots whose recorded owner process is gone (a SIGKILL, or a
+ * crash before cleanup). A root without an owner file, or whose owner is
+ * alive, is left alone.
+ */
+export function sweepOrphanScratch(parent: string): void {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(parent).filter(e => e.startsWith(SCRATCH_PREFIX));
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    const root = path.join(parent, e);
+    let pid = NaN;
+    try {
+      pid = Number(fs.readFileSync(path.join(root, OWNER_FILE), 'utf8').trim());
+    } catch {
+      continue;
+    }
+    if (Number.isSafeInteger(pid) && pid > 0 && !pidAlive(pid)) fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+const SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+
+export async function triageMain(argv: string[], deps: Partial<TriageDeps> & { scratchParent?: string } = {}): Promise<number> {
+  // Artifact downloads (0.3-15 MB each) land under one scratch root that
+  // records its owner pid. It is removed on return, on SIGINT/SIGTERM/SIGHUP
+  // (then exit 128+signal), and by the next run's sweep if this process is
+  // killed outright.
+  const { scratchParent = os.tmpdir(), ...rest } = deps;
+  sweepOrphanScratch(scratchParent);
+  const scratch = fs.mkdtempSync(path.join(scratchParent, SCRATCH_PREFIX));
+  fs.writeFileSync(path.join(scratch, OWNER_FILE), `${process.pid}\n`);
+  const onSignal = (sig: NodeJS.Signals) => {
+    fs.rmSync(scratch, { recursive: true, force: true });
+    process.exit(128 + (os.constants.signals[sig] ?? 0));
+  };
+  for (const sig of SIGNALS) process.on(sig, onSignal);
+  try {
+    return await triage(argv, { ...realDeps(), tmp: () => fs.mkdtempSync(path.join(scratch, 'a-')), ...rest });
   } finally {
+    for (const sig of SIGNALS) process.off(sig, onSignal);
     fs.rmSync(scratch, { recursive: true, force: true });
   }
 }
@@ -470,8 +530,8 @@ async function triage(argv: string[], d: TriageDeps): Promise<number> {
   }
   try {
     const f = parseArgs(argv);
-    if (f.sub === 'run') return cmdRun(d, f);
-    if (f.sub === 'onset') return cmdOnset(d, f);
+    if (f.sub === 'run') return await cmdRun(d, f);
+    if (f.sub === 'onset') return await cmdOnset(d, f);
     throw new PrContextError(`unknown subcommand ${JSON.stringify(f.sub)}`, 2);
   } catch (error) {
     if (error instanceof PrContextError) {
