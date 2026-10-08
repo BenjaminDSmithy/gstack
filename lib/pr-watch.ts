@@ -228,6 +228,37 @@ function freshState(pr: PrInfo): PrState {
 
 // ── poll ────────────────────────────────────────────────────────────────────
 
+type Latched = PrState['signals']['latched'][number];
+const RANK = { P1: 1, P0: 2 } as const;
+
+/**
+ * Latch this poll's P0/P1 signals. A new id latches. An id already latched
+ * at a lower level (a P1 comment edited into a supersede notice, which
+ * keeps its comment id) latches again at the new level and loses its ack:
+ * the owner acknowledged the P1 text, not the P0. Lower or equal levels
+ * change nothing, so a latch only ever rises.
+ */
+function latchSignals(prev: PrState['signals'], signals: Signal[], now: Date): { latched: Latched[]; acked: string[]; fresh: Signal[] } {
+  const latched: Latched[] = prev.latched.map(l => ({ ...l }));
+  let acked = [...prev.acked];
+  const fresh: Signal[] = [];
+  for (const s of signals) {
+    if (s.level === 'P2') continue;
+    const entry = { id: s.id, level: s.level, kind: s.kind, at: s.at || now.toISOString(), ref: s.ref };
+    const i = latched.findIndex(l => l.id === s.id);
+    if (i === -1) {
+      if (acked.includes(s.id)) continue;
+      latched.push(entry);
+      fresh.push(s);
+    } else if (RANK[s.level] > RANK[latched[i].level]) {
+      latched[i] = entry;
+      acked = acked.filter(id => id !== s.id);
+      fresh.push(s);
+    }
+  }
+  return { latched, acked, fresh };
+}
+
 export interface PollResult { code: number; signals: Signal[]; fresh: Signal[]; unacked: Signal[]; state: string; error?: string }
 
 /** Upstream base commits citing `(#N)` or carrying our trailer, since the PR's merge base. */
@@ -278,12 +309,11 @@ export function poll(d: WatchDeps, repo: string, n: number, cwd: string): PollRe
     let unacked: Signal[] = [];
     withPrLock(dir, () => {
       const st = readStateFor(dir, pr) ?? freshState(pr);
-      const known = new Set(st.signals.latched.map(s => s.id));
-      fresh = signals.filter(s => s.level !== 'P2' && !known.has(s.id) && !st.signals.acked.includes(s.id));
-      const latched = [...st.signals.latched, ...fresh.map(s => ({ id: s.id, level: s.level as 'P0' | 'P1', kind: s.kind, at: s.at || d.now().toISOString(), ref: s.ref }))];
-      writeState(dir, { ...st, signals: { latched, acked: st.signals.acked } });
+      const ack = latchSignals(st.signals, signals, d.now());
+      fresh = ack.fresh;
+      writeState(dir, { ...st, signals: { latched: ack.latched, acked: ack.acked } });
       const byId = new Map(signals.map(s => [s.id, s]));
-      unacked = latched.filter(l => !st.signals.acked.includes(l.id)).map(l => byId.get(l.id) ?? { ...l, who: '' } as Signal);
+      unacked = ack.latched.filter(l => !ack.acked.includes(l.id)).map(l => byId.get(l.id) ?? { ...l, who: '' } as Signal);
     });
     const code = unacked.some(s => s.level === 'P0') ? WATCH_EXIT.P0 : unacked.some(s => s.level === 'P1') ? WATCH_EXIT.P1 : WATCH_EXIT.QUIET;
     return { code, signals, fresh, unacked, state: pull.merged ? 'merged' : (pull.state ?? '?') };
