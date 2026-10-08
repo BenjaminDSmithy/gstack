@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { validationEnv, selectTests, judgeBunRun, bunPinFrom, macosNamedFrom, validateMain, defaultTool, bunfigPreload, writeCiGitConfig, type ValidateDeps, type ToolRunner } from '../lib/pr-validate';
+import { validationEnv, selectTests, judgeBunRun, bunPinFrom, macosNamedFrom, validateMain, defaultTool, bunfigPreload, writeCiGitConfig, shellcheckTargetsFrom, type ValidateDeps, type ToolRunner } from '../lib/pr-validate';
 import { prStateDir, topicFor, readStateFor, type GhRunner } from '../lib/pr-context';
 
 setDefaultTimeout(180_000);
@@ -192,6 +192,10 @@ describe('workflow parsing', () => {
     expect(bunPinFrom(null)).toBeNull();
     expect(macosNamedFrom('jobs: {}')).toEqual([]);
   });
+  test('reads the files quality-gate.yml shellchecks', () => {
+    expect(shellcheckTargetsFrom("jobs:\n  gate:\n    steps:\n      - name: Install ShellCheck\n        run: shellcheck --version\n      - name: ShellCheck setup and build boundaries\n        run: >-\n          shellcheck --severity=error\n          setup\n          scripts/build.sh\n      - name: Next\n        run: echo done\n")).toEqual(['setup', 'scripts/build.sh']);
+    expect(shellcheckTargetsFrom(null)).toEqual([]);
+  });
 });
 
 describe('run, select and declare against a fixture PR tree', () => {
@@ -354,6 +358,19 @@ describe('run, select and declare against a fixture PR tree', () => {
     const envOf = (l: string) => rec.calls.find(c => c.line.startsWith(l))!.env;
     expect(envOf('bun test').GSTACK_EXPECT_BINARIES).toBe('1');
     expect(envOf('bun run build:gates').GSTACK_EXPECT_BINARIES).toBeUndefined();
+  });
+
+  test('the shellcheck mirror covers what CI shellchecks, including the extensionless setup', async () => {
+    let tree = '';
+    const rec = recorder(() => tree);
+    const f = fixture('shellcheck', "test('x', () => expect(y).toBe(2));", {
+      base: { '.github/workflows/quality-gate.yml': "jobs:\n  gate:\n    steps:\n      - name: Install ShellCheck\n        run: shellcheck --version\n      - name: ShellCheck setup and build boundaries\n        run: >-\n          shellcheck --severity=error\n          setup\n          scripts/build.sh\n      - name: Next\n        run: echo done\n", setup: '#!/bin/bash\necho 1\n' },
+      pr: { 'lib/y.ts': 'export const y = 2;\n', setup: '#!/bin/bash\necho 2\n', 'scripts/x.sh': '#!/bin/bash\necho x\n' },
+      deps: { tool: rec.tool, which: cmd => cmd === 'shellcheck' },
+    });
+    tree = f.tree;
+    expect(await f.call(['run'])).toBe(0);
+    expect(rec.calls.map(c => c.line)).toContain('shellcheck --severity=error scripts/x.sh setup');
   });
 
   test('a runner/dependency change keeps the run red unless the owner accepts the full-suite risk', async () => {

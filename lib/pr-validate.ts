@@ -55,7 +55,8 @@ commit in the PR state.
 
   run       preconditions + selection + per-file runs + mirrors
             (typecheck, typecheck:test, the added-line secret scan,
-            shellcheck when shell files changed); exit 0 green, 1 red
+            shellcheck on changed *.sh files and the files CI's quality
+            gate shellchecks); exit 0 green, 1 red
   select    print the selection and the rule that picked each file
   declare   record test paths that must always run for this PR (free
             test files of the tree only; voids a recorded verdict that
@@ -308,6 +309,16 @@ export function bunPinFrom(workflow: string | null): string | null {
   return workflow ? (/bun-version:\s*['"]?(\d+\.\d+\.\d+)/.exec(workflow)?.[1] ?? null) : null;
 }
 
+/** The files quality-gate.yml's ShellCheck step names (`shellcheck --severity=error <files...>`). */
+export function shellcheckTargetsFrom(workflow: string | null): string[] {
+  const flag = 'shellcheck --severity=error';
+  const at = workflow ? workflow.indexOf(flag) : -1;
+  if (!workflow || at < 0) return [];
+  const rest = workflow.slice(at + flag.length);
+  const end = rest.search(/\n\s*-\s+(name|uses|run|if|with):|\n\S/);
+  return (end < 0 ? rest : rest.slice(0, end)).split(/\s+/).filter(t => /^[\w.][\w./-]*$/.test(t));
+}
+
 /** The files CI's macos-named-regressions job re-runs on the default (symlinked) temp root. */
 export function macosNamedFrom(workflow: string | null): string[] {
   if (!workflow) return [];
@@ -413,6 +424,12 @@ function resolveCtx(d: ValidateDeps, f: Flags): Ctx {
 }
 
 /** Both sides of a rename: a test that still names or imports the old path must run. */
+/** A file at the pinned upstream base, or null. */
+function showBase(c: Ctx, file: string): string | null {
+  const r = c.d.git(['show', `${c.base}:${file}`], { cwd: c.tree });
+  return r.status === 0 ? r.stdout : null;
+}
+
 function changedFiles(c: Ctx, mb: string): string[] {
   return gitOk(c.d, c.tree, ['diff', '--name-only', '--no-renames', mb, 'HEAD'], 'git diff').split('\n').filter(Boolean);
 }
@@ -551,10 +568,7 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
     for (const r of range.slice(0, 20)) d.out(`  ${r}`);
   }
 
-  const workflow = (() => {
-    const r = d.git(['show', `${c.base}:.github/workflows/free-tests.yml`], { cwd: c.tree });
-    return r.status === 0 ? r.stdout : null;
-  })();
+  const workflow = showBase(c, '.github/workflows/free-tests.yml');
   const pin = bunPinFrom(workflow);
   const have = tool('bun', ['--version'], 30_000).stdout.trim();
   line(`bun-pin ${pin ? `want=${pin} have=${have}` : 'no pin found'} rc=${pin && pin !== have ? 1 : 0}`, !!pin && pin !== have);
@@ -630,7 +644,9 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
     const r = tool(runner, [scanner], 120_000, diff.stdout);
     line(`mirror secret-scan rc=${r.status}`, r.status !== 0);
   }
-  const shellChanged = changed.filter(f => /\.sh$/.test(f) && fs.existsSync(path.join(c.tree, f)));
+  // CI shellchecks a named list (the extensionless `setup` among it); *.sh files are checked too.
+  const ciShell = new Set(shellcheckTargetsFrom(showBase(c, '.github/workflows/quality-gate.yml')));
+  const shellChanged = changed.filter(f => (/\.sh$/.test(f) || ciShell.has(f)) && fs.existsSync(path.join(c.tree, f)));
   if (shellChanged.length && d.which('shellcheck')) {
     const r = tool('shellcheck', ['--severity=error', ...shellChanged], 300_000);
     line(`mirror shellcheck rc=${r.status} (${shellChanged.length} file(s))`, r.status !== 0);
