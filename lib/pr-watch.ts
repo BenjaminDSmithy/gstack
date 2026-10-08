@@ -428,6 +428,11 @@ function printSignals(d: WatchDeps, r: PollResult, n: number): void {
   for (const s of r.unacked) if (s.excerpt) d.out(envelope(s.excerpt, `pr-${n}-${s.id}`));
   if (r.unacked.some(s => s.level === 'P0')) {
     d.out('NEXT stop every push and body publish for this PR, show the owner the signal, and suggest turning Auto-fix off; a follow-up PR is the owner\'s call. After the owner has read it: gstack-pr-watch ack <id>');
+  } else if (r.unacked.length) {
+    // A conflict latches like any P1 (the plan's pre-write gate), so it is acked
+    // once the owner has seen it; only then can the sync push that fixes it pass.
+    const conflict = r.unacked.some(s => s.kind.startsWith('mergeable-'));
+    d.out(`NEXT show the owner each signal; writes for this PR refuse until then. After the owner has read it: gstack-pr-watch ack <id>${conflict ? '; then the sync mode resolves the merge conflict or behind base' : ''}`);
   }
 }
 

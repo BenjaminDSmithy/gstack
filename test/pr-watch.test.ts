@@ -331,7 +331,10 @@ describe('poll, ack and the write gate', () => {
     const data: FakeData = { pull: { mergeable_state: 'dirty', head: { sha: 'b'.repeat(40) } } };
     const gh = fakeGh(t, data);
     const argv = (sub: string, ...rest: string[]) => [sub, '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone, ...rest];
-    expect(await watchMain(argv('poll'), { gh, env, out: () => {} })).toBe(11);
+    const out: string[] = [];
+    expect(await watchMain(argv('poll'), { gh, env, out: l => out.push(l) })).toBe(11);
+    // The next step for a conflict: the owner reads it, it is acked, then the sync mode resolves it.
+    expect(out.find(l => l.startsWith('NEXT '))).toMatch(/ack.*sync/);
     data.pull = { mergeable_state: 'clean' };
     expect(await watchMain(argv('poll'), { gh, env, out: () => {} })).toBe(11);
     expect(pollForWrite(gateDeps(gh, env), 'acme/gw', 7, t.clone).ok).toBe(false);
