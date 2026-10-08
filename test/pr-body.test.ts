@@ -13,7 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   normalizeBody, renderFactsBlock, spliceFacts, stripFacts, carryLiveness, lostOwnerContent, lintBody, livenessOf,
-  publishedVersions, scanOutgoing, lineDiff, bodyMain, manifestWithoutVersion, liveDiffKey, FACTS_BEGIN, FACTS_END, sha256, type Facts, type BodyDeps,
+  publishedVersions, scanOutgoing, lineDiff, bodyMain, manifestWithoutVersion, liveDiffKey, BODY_EXIT, BODY_USAGE, FACTS_BEGIN, FACTS_END, sha256, type Facts, type BodyDeps,
 } from '../lib/pr-body';
 import { prStateDir, topicFor, readStateFor, writeState, defaultGit, type GhRunner, type PrState } from '../lib/pr-context';
 import { listReceipts } from '../lib/egress-receipt';
@@ -336,7 +336,7 @@ function fixture(name: string, liveInitial: string, opts: {
     return git(seed, 'rev-parse', 'HEAD');
   };
   const pushCommit = (text: string) => pushFiles({ 'lib/x.ts': `export const x = ${JSON.stringify(text)};\n` }, `fix: ${text}`);
-  return { base, clone, out, call, publish, acceptLive, shaOf, pushCommit, pushFiles, dir, edits, log, deps, getLive: () => live, setLive: (text: string) => { live = text; }, env };
+  return { base, up, fork, clone, out, call, publish, acceptLive, shaOf, pushCommit, pushFiles, dir, edits, log, deps, getLive: () => live, setLive: (text: string) => { live = text; }, env };
 }
 const prRef = { repo: 'acme/gx', number: 9, headRef: 'pr/b', headOwner: 'me' };
 
@@ -715,6 +715,20 @@ describe('publish', () => {
     expect(f.edits).toHaveLength(0);
     expect(listReceipts(path.join(f.base, 'home')).filter(r => r.sink === 'pr-prep')).toEqual([]);
     expect(await f.publish(file, ...f.acceptLive(file))).toBe(0);
+  });
+
+  test('a base branch gone from its remote exits 40 for facts, render and publish; --help documents every exit code', async () => {
+    const f = fixture('gone', TEMPLATE);
+    const file = await rendered(f);
+    git(f.up, 'update-ref', '-d', 'refs/heads/main');
+    for (const argv of [['facts'], ['render'], ['publish', '--body', file, '--body-sha256', f.shaOf(file), '--yes']]) {
+      f.out.length = 0;
+      expect(await f.call(argv), argv[0]).toBe(40);
+      expect(f.out[0]).toMatch(/^RESULT ERROR refs\/heads\/main is gone /);
+    }
+    expect(f.edits).toHaveLength(0);
+    const documented = BODY_USAGE.slice(BODY_USAGE.indexOf('Exit codes:'));
+    for (const code of new Set(Object.values(BODY_EXIT))) expect(documented, String(code)).toMatch(new RegExp(`\\b${code}\\b`));
   });
 
   test('a refusing pre-write gate stops an OPEN PR\'s publish: injected, and the real watch poll on a maintainer comment', async () => {

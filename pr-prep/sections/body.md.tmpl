@@ -52,6 +52,11 @@ the body's sha256 from render's `RESULT` line. On yes:
 - Exit 22: a redaction finding. HIGH blocks. For each MEDIUM, show the
   owner the finding, and pass its key in `--confirm-redaction` only after
   their yes. Versions the repo already published are not findings.
+- Exit 40 (render or publish): the PR's head or base branch is gone from
+  its remote, or kept moving during the fetch. Find out what moved, then
+  render again.
+- Exit 45: another pr-prep run holds this PR's lock. Wait for it, then
+  run publish again.
 - `RESULT ERROR ... read-back`: a concurrent edit replaced what was sent.
   The pre-publish body is saved beside the state. Tell the owner; do not
   re-publish automatically.
