@@ -150,6 +150,20 @@ describe('stampReport', () => {
     expect(r2.worst).toBe('CLEAN');
   });
 
+  test('a carried commit lists each upstream hit once and keeps its highest score', () => {
+    const first = listAuditCommits(defaultGit, repo, base, null);
+    const hit = (score: number) => ({ ref: '#3000', title: 't', state: 'OPEN', score });
+    let prior = stampReport({ summary: 's', commits: [{ sha: sha.c1, bucket: 'OVERLAP', topScore: 0.45, hits: [hit(0.45)] }, { sha: sha.c4, bucket: 'CLEAN' }] }, first, now) as Record<string, any>;
+    // Two later runs whose delta search finds #3000 again because it was updated.
+    for (let i = 0; i < 2; i++) {
+      const l = listAuditCommits(defaultGit, repo, base, prior as PriorReport);
+      expect(l.audit[0].mode).toBe('CARRY');
+      prior = stampReport({ summary: 's', commits: [{ sha: sha.c1, bucket: 'SIBLING', topScore: 0.2, hits: [hit(0.2)] }, { sha: sha.c4, bucket: 'CLEAN' }] }, l, now) as Record<string, any>;
+    }
+    expect(prior.commits[0]).toMatchObject({ bucket: 'OVERLAP', topScore: 0.45 });
+    expect(prior.commits[0].hits).toEqual([hit(0.2)]);
+  });
+
   test('every row the agent reported counts toward worst, and its own worst is a floor', () => {
     const l = listAuditCommits(defaultGit, repo, base, null);
     const st = (commits: { sha: string; bucket: string }[], worst?: string) =>
