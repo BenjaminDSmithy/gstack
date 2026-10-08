@@ -17,7 +17,8 @@
  * removes it. Only a scratch merge made (a detached worktree of this
  * repository whose admin dir carries merge's marker) is ever removed, and
  * only through `git worktree remove`; anything else at that path is left
- * alone and named. `merge` leaves a committed sync in the scratch worktree and a
+ * alone and named. A signal ends a merge where it stands (no handler could
+ * run inside its synchronous steps); `abort` then removes the scratch. `merge` leaves a committed sync in the scratch worktree and a
  * `sync.json` beside the PR state; `push` publishes exactly that commit.
  *
  * gstack-shaped trees only: the merged tree must carry bin/gstack-next-version,
@@ -661,25 +662,18 @@ function cmdMerge(c: Ctx): number {
   }
   fs.mkdirSync(path.dirname(scratch), { recursive: true });
   gitOk(d, c.cwd, ['worktree', 'add', '--detach', scratch, p.h0], 'git worktree add');
-  let done = false;
-  const onSignal = () => {
-    if (!done) removeScratch(c, scratch, true);
-    process.exit(130);
-  };
-  process.once('SIGINT', onSignal);
-  process.once('SIGTERM', onSignal);
+  // No signal listener: stageSync is synchronous (spawnSync throughout), so a
+  // JS handler could never run before it returns, and installing one would
+  // only replace the default action and swallow SIGINT/SIGTERM. A signal ends
+  // the merge; `abort` removes the scratch it leaves (merge says so next time).
   try {
     markScratch(c, scratch, p.h0);
     const r = stageSync(c, p, pre, scratch, upToDate, dry, generatedConflicts);
-    done = r.staged !== null;
-    if (!done) removeScratch(c, scratch, true);
+    if (r.staged === null) removeScratch(c, scratch, true);
     return r.code;
   } catch (error) {
     removeScratch(c, scratch, true);
     throw error;
-  } finally {
-    process.removeListener('SIGINT', onSignal);
-    process.removeListener('SIGTERM', onSignal);
   }
 }
 
