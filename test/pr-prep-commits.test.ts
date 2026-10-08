@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { listAuditCommits, stampReport, dropSelf, worstOf, searchQualifier, commitsMain } from '../lib/pr-prep-commits';
+import { listAuditCommits, stampReport, dropSelf, worstOf, searchQualifier, commitsMain, type PriorReport } from '../lib/pr-prep-commits';
 import { defaultGit } from '../lib/pr-context';
 
 setDefaultTimeout(60_000);
@@ -20,19 +20,35 @@ let repo = '';
 let base = '';
 const sha: Record<string, string> = {};
 
-function git(...args: string[]): string {
-  const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8', timeout: 30_000, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com' } });
+function gitIn(dir: string, ...args: string[]): string {
+  const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 30_000, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com' } });
   if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
   return r.stdout.trim();
 }
-function commit(name: string, files: Record<string, string>, msg: string): void {
+const git = (...args: string[]) => gitIn(repo, ...args);
+/** Write (or, for null, delete) files, commit them and return the new sha. */
+function commitIn(dir: string, files: Record<string, string | null>, msg: string): string {
   for (const [f, t] of Object.entries(files)) {
-    fs.mkdirSync(path.dirname(path.join(repo, f)), { recursive: true });
-    fs.writeFileSync(path.join(repo, f), t);
+    if (t === null) {
+      fs.rmSync(path.join(dir, f));
+      continue;
+    }
+    fs.mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
+    fs.writeFileSync(path.join(dir, f), t);
   }
-  git('add', '-A');
-  git('commit', '-q', '--allow-empty', '-m', msg);
-  sha[name] = git('rev-parse', 'HEAD');
+  gitIn(dir, 'add', '-A');
+  gitIn(dir, 'commit', '-q', '--allow-empty', '-m', msg);
+  return gitIn(dir, 'rev-parse', 'HEAD');
+}
+function commit(name: string, files: Record<string, string>, msg: string): void {
+  sha[name] = commitIn(repo, files, msg);
+}
+/** A fresh repo under ROOT with one base commit; returns its dir and base sha. */
+function freshRepo(name: string, files: Record<string, string>): { dir: string; base: string } {
+  const dir = path.join(ROOT, name);
+  fs.mkdirSync(dir);
+  gitIn(dir, 'init', '-q', '-b', 'main');
+  return { dir, base: commitIn(dir, files, 'base') };
 }
 
 beforeAll(() => {
@@ -121,6 +137,23 @@ describe('stampReport', () => {
     expect(worstOf(['CLEAN', 'SIBLING', 'EXACT_DUP', 'UNVERIFIED'])).toBe('EXACT_DUP');
     // An unknown bucket ranks as UNVERIFIED; it must not hide a later EXACT_DUP.
     expect(worstOf(['MAYBE', 'EXACT_DUP'])).toBe('EXACT_DUP');
+  });
+});
+
+describe('a revert and a re-apply share a patch-id', () => {
+  test('both commits carry the worse of the two verdicts', () => {
+    const now = new Date('2026-10-08T00:00:00Z');
+    const { dir, base: b } = freshRepo('revert', { 'lib/z.ts': 'z\n' });
+    const A = commitIn(dir, { 'lib/r.ts': 'r\n' }, 'feat: r');
+    const R = commitIn(dir, { 'lib/r.ts': null }, 'Revert "feat: r"');
+    const A2 = commitIn(dir, { 'lib/r.ts': 'r\n' }, 'feat: r');
+    const l1 = listAuditCommits(defaultGit, dir, b, null);
+    expect(l1.audit[0].patchId).toBe(l1.audit[2].patchId);
+    const r1 = stampReport({ summary: 's', commits: [{ sha: A, bucket: 'OVERLAP' }, { sha: R, bucket: 'CLEAN' }, { sha: A2, bucket: 'CLEAN' }] }, l1, now);
+    const l2 = listAuditCommits(defaultGit, dir, b, r1 as PriorReport);
+    expect(l2.audit.map(c => `${c.mode}:${c.prior?.bucket}`)).toEqual(['CARRY:OVERLAP', 'CARRY:CLEAN', 'CARRY:OVERLAP']);
+    const r2 = stampReport({ summary: 's', commits: [A, R, A2].map(s => ({ sha: s, bucket: 'CLEAN' })) }, l2, now) as Record<string, any>;
+    expect(r2.worst).toBe('OVERLAP');
   });
 });
 
