@@ -614,6 +614,39 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(f.out).toContain('bun-pin want=1.4.1 have=1.4.2 rc=1');
   });
 
+  test('the tree changes during the run: an edit or a commit after the preconditions is red; a build output rewritten by a precondition is not', async () => {
+    const BUILT = 'lib/diagram-render/dist/BUILD_INFO.json';
+    const build = { ...CI_TREE, [BUILT]: '{"at":1}\n' };
+    const runWith = async (name: string, onTest: (tree: string) => void) => {
+      let tree = '';
+      const rec = recorder(() => tree, {
+        onCall: l => {
+          // build:gates rewrites a tracked bundle, as the real diagram-render build does.
+          if (l === 'bun run build:gates') write(tree, BUILT, '{"at":2}\n');
+          if (l.startsWith('bun test test/x.test.ts')) onTest(tree);
+        },
+      });
+      const f = fixture(name, "test('x', () => expect(y).toBe(2));", { base: build, deps: { tool: rec.tool } });
+      tree = f.tree;
+      return { f, rc: await f.call(['run']) };
+    };
+    const quiet = await runWith('tree-quiet', () => {});
+    expect(quiet.rc).toBe(0);
+
+    const edited = await runWith('tree-edit', tree => write(tree, 'lib/y.ts', 'export const y = 3;\n'));
+    expect(edited.rc).toBe(1);
+    expect(edited.f.out.find(l => l.startsWith('tree changed during the run'))).toContain('lib/y.ts');
+    expect(readStateFor(edited.f.dir, pr)!.validation).toMatchObject({ worst: 1 });
+
+    const committed = await runWith('tree-commit', tree => {
+      write(tree, 'docs/later.md', 'later\n');
+      git(tree, 'add', 'docs/later.md');
+      git(tree, 'commit', '-q', '-m', 'later');
+    });
+    expect(committed.rc).toBe(1);
+    expect(committed.f.out.find(l => l.startsWith('tree changed during the run'))).toMatch(/HEAD moved from \w{12} to \w{12}/);
+  });
+
   test('gen:skill-docs output that is not committed is red', async () => {
     let tree = '';
     const rec = recorder(() => tree, { onCall: l => { if (l === 'bun run gen:skill-docs --host all') write(tree, 'drift/SKILL.md', 'stale\n'); } });
