@@ -9,7 +9,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { validationEnv, selectTests, uncoveredCode, relativeImports, judgeBunRun, bunPinFrom, macosNamedFrom, validateMain, defaultTool, bunfigPreload, writeCiGitConfig, shellcheckTargetsFrom, type ValidateDeps, type ToolRunner } from '../lib/pr-validate';
+import { validationEnv, selectTests, uncoveredCode, relativeImports, systemTempDir, judgeBunRun, bunPinFrom, macosNamedFrom, validateMain, defaultTool, bunfigPreload, writeCiGitConfig, shellcheckTargetsFrom, type ValidateDeps, type ToolRunner } from '../lib/pr-validate';
 import { prStateDir, topicFor, readStateFor, defaultGit, type GhRunner, type GitRunner } from '../lib/pr-context';
 
 setDefaultTimeout(180_000);
@@ -294,6 +294,17 @@ describe('judgeBunRun on real bun runs', () => {
   });
 });
 
+describe('systemTempDir', () => {
+  // CI's macOS jobs see the default per-user temp root behind the /var symlink, not a caller's TMPDIR.
+  test.skipIf(process.platform !== 'darwin')('is macOS\'s per-user temp root: symlinked, and never the caller\'s TMPDIR', () => {
+    const dir = systemTempDir();
+    expect(fs.existsSync(dir)).toBe(true);
+    expect(dir.startsWith('/var/folders/')).toBe(true);
+    expect(fs.realpathSync(dir)).not.toBe(path.resolve(dir));
+    if (process.env.TMPDIR) expect(path.resolve(dir)).not.toBe(path.resolve(process.env.TMPDIR));
+  });
+});
+
 describe('workflow parsing', () => {
   const wf = `jobs:\n  free:\n    steps:\n      - uses: oven-sh/setup-bun@v2\n        with:\n          bun-version: 1.4.2\n  macos-named-regressions:\n    steps:\n      - run: |\n          files=(test/one.test.ts browse/test/two.test.ts)\n`;
   test('reads the Bun pin and the macOS named regressions', () => {
@@ -544,6 +555,17 @@ describe('run, select and declare against a fixture PR tree', () => {
     for (const k of ['GSTACK_HOME', 'GSTACK_STATE_ROOT', 'GSTACK_USER_RENDER_DIR', 'CODEX_HOME', 'XDG_CONFIG_HOME', 'SOME_TOOL_DIR']) expect(env[k], k).toBeUndefined();
     // The browser cache still comes from the caller's home, as the free runner's private HOME does it.
     expect(env.PLAYWRIGHT_BROWSERS_PATH!.startsWith(`${home}/`)).toBe(true);
+  });
+
+  test('without a build:gates script the tests are not armed with GSTACK_EXPECT_BINARIES', async () => {
+    let tree = '';
+    const rec = recorder(() => tree);
+    const pkg = { name: 'fx', version: '1.0.0', scripts: { 'gen:skill-docs': 'x', 'build:cso': 'x' } };
+    const f = fixture('no-gates', "test('x', () => expect(y).toBe(2));", { base: { ...CI_TREE, 'package.json': JSON.stringify(pkg) }, deps: { tool: rec.tool } });
+    tree = f.tree;
+    expect(await f.call(['run'])).toBe(0);
+    expect(rec.calls.some(c => c.line === 'bun run build:gates')).toBe(false);
+    expect(rec.calls.find(c => c.line.startsWith('bun test'))!.env.GSTACK_EXPECT_BINARIES).toBeUndefined();
   });
 
   test('the shellcheck mirror covers what CI shellchecks, including the extensionless setup', async () => {
