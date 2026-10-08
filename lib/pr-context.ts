@@ -736,6 +736,19 @@ export function prStateDir(opts: { cwd: string; topic: string; env?: NodeJS.Proc
   return path.join(root, 'projects', slug, 'pr-drafts', opts.topic);
 }
 
+/**
+ * One PR's state.json. Identity is repo, number, headRef and headOwner
+ * (assertStateFor). Nothing else here is an identity pin: every call
+ * re-derives who may write from GitHub and git (readPr, viewerLogin and
+ * assertWritableIdentity, remoteForRepo for the head and upstream
+ * remotes, gstack-pr-sync's push-URL check), so no helper trusts a stored
+ * value for that. Three fields are informational and read by no helper:
+ * headRemote and upstreamRemote (filled only when gstack-pr-sync creates
+ * the state, null when another helper did; never updated), and
+ * defaultBranch (the PR's base ref when the state was created, not the
+ * repository's default branch). audit is always null:
+ * gstack-pr-prep-commits keeps its record in audit.json.
+ */
 export interface PrState {
   v: 1; topic: string; repo: string; number: number | null; headRef: string; headOwner: string;
   headRemote: string | null; upstreamRemote: string | null; defaultBranch: string;
