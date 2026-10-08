@@ -9,6 +9,7 @@
  *   gstack-pr-body render  --pr <n|url> [...] [--template <path>] [--out <path>]
  *   gstack-pr-body publish --pr <n|url> [...] --body <path> --body-sha256 <hex> --yes
  *                          [--accept-live-diff <live sha256>] [--confirm-redaction <key,...>]
+ *                          [--accept-rewritten-stale <stale push sha>]
  *   gstack-pr-body check   --pr <n|url> [...]
  *
  * Volatile facts (head, base, version, merges of the base branch, the
@@ -87,6 +88,11 @@ Options:
                             the owner saw and accepted; it binds that live body
                             to this outgoing body, so a change to either one
                             gets a new diff and a new value
+  --accept-rewritten-stale HEX
+                            the stale push (12+ hex) publish named as missing
+                            from the PR head's history after a force-push or
+                            rebase; only on the owner's yes, after they saw it.
+                            The body must still name the current head
   --confirm-redaction K,..  the owner confirmed each MEDIUM finding key
                             (id@line:col#<line hash>, as REDACTION printed it)
 
@@ -96,7 +102,7 @@ diff, a body that is not the approved sha256, or a facts block that is
 not the generated one), 22 redaction (HIGH, or MEDIUM not confirmed),
 30 precondition (PR not OPEN, the pre-write gate or a gate older than
 60 s, facts naming an older head, or a body_stale_since push outside the
-head's history), 40 for check: liveness pending; for facts, render and
+head's history without --accept-rewritten-stale for it), 40 for check: liveness pending; for facts, render and
 publish: the PR's head or base branch is gone from its remote or kept
 moving while it was fetched (fetch, then run again), 45 another pr-prep
 run holds this PR's state lock (publish; wait for it, then run again).
@@ -464,13 +470,13 @@ const realDeps = (): BodyDeps => ({
 
 interface Flags {
   sub: string; pr: string | null; repo: string | null; cwd: string; template: string | null; out: string | null;
-  body: string | null; bodySha: string | null; acceptLiveDiff: string | null; confirm: string[]; argv: string[];
+  body: string | null; bodySha: string | null; acceptLiveDiff: string | null; acceptRewrittenStale: string | null; confirm: string[]; argv: string[];
 }
-const VALUE_FLAGS = ['--pr', '--repo', '--cwd', '--template', '--out', '--body', '--body-sha256', '--accept-live-diff', '--confirm-redaction'];
+const VALUE_FLAGS = ['--pr', '--repo', '--cwd', '--template', '--out', '--body', '--body-sha256', '--accept-live-diff', '--accept-rewritten-stale', '--confirm-redaction'];
 const SHA_PREFIX_RE = /^[0-9a-f]{12,64}$/;
 
 export function parseBodyArgs(argv: string[]): Flags {
-  const f: Flags = { sub: argv[0] ?? '', pr: null, repo: null, cwd: process.cwd(), template: null, out: null, body: null, bodySha: null, acceptLiveDiff: null, confirm: [], argv };
+  const f: Flags = { sub: argv[0] ?? '', pr: null, repo: null, cwd: process.cwd(), template: null, out: null, body: null, bodySha: null, acceptLiveDiff: null, acceptRewrittenStale: null, confirm: [], argv };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--') break;
@@ -491,6 +497,11 @@ export function parseBodyArgs(argv: string[]): Flags {
       if (!SHA_PREFIX_RE.test(v)) throw new PrContextError(`${a} needs a sha256 or its first 12+ hex characters`, 2);
       if (a === '--body-sha256') f.bodySha = v;
       else f.acceptLiveDiff = v;
+    }
+    else if (a === '--accept-rewritten-stale') {
+      const v = val().toLowerCase();
+      if (!SHA_PREFIX_RE.test(v)) throw new PrContextError(`${a} needs the stale push's commit id, at least its first 12 hex characters`, 2);
+      f.acceptRewrittenStale = v;
     }
     else if (a === '--yes') { /* requireApproval */ }
     else throw new PrContextError(`unknown option ${a}`, 2);
@@ -969,7 +980,13 @@ function cmdPublish(c: Ctx): number {
     const stale = state?.bodyStaleSince ?? null;
     if (stale && stale !== now.headOid) {
       const r = d.git(['merge-base', '--is-ancestor', stale, now.headOid], { cwd: c.f.cwd });
-      if (r.status !== 0) throw new PrContextError(`the body has been stale since the push of ${s12(stale)}, which is not in the PR head's history (${s12(now.headOid)}); find out what replaced that push before publishing`, BODY_EXIT.PRECONDITION);
+      // The branch was rewritten after that push (a squash and force-push, or a rebase "Update branch"). Only
+      // a publish clears the mark and sync push and retrigger refuse until then, so the owner, shown this,
+      // may accept that one push by its id: the body still has to name the current head.
+      const accepted = c.f.acceptRewrittenStale !== null && stale.startsWith(c.f.acceptRewrittenStale);
+      if (r.status !== 0 && !accepted) {
+        throw new PrContextError(`the body has been stale since the push of ${s12(stale)}, which is not in the PR head's history (${s12(now.headOid)}); find out what replaced that push, show the owner, and only on their yes publish with --accept-rewritten-stale ${s12(stale)}`, BODY_EXIT.PRECONDITION);
+      }
     }
     const live = liveBody(c);
     // GitHub already holds exactly the approved bytes: an earlier publish

@@ -61,6 +61,12 @@ the body's sha256 from render's `RESULT` line. On yes:
   facts describe an older head. Render again, show the owner, and ask
   again with the new sha256. A sync or `ci:` push marks the body stale
   (`body-stale-since=` on each RESULT line) until this publish clears it.
+- Exit 30 saying the stale push is not in the PR head's history: the
+  branch was rewritten after that push (a force-push, or GitHub's "Update
+  branch" rebase), and sync push and retrigger stay refused until a
+  publish. Find out what replaced the push and tell the owner. Only on
+  their yes, re-run publish with `--accept-rewritten-stale <sha>`, the sha
+  the refusal printed.
 - Exit 22: a redaction finding. HIGH blocks. For each MEDIUM, show the
   owner the finding, and pass its key in `--confirm-redaction` only after
   their yes. Versions the repo already published are not findings.

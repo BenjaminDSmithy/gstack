@@ -591,6 +591,33 @@ describe('publish', () => {
     expect(f.out[0]).toContain('body-stale-since=none');
   });
 
+  test('a stale mark a branch rewrite removed blocks publish until the owner accepts that push by its sha; then it clears', async () => {
+    // A sync push marked the body stale, then the owner squashed and force-pushed (or GitHub's "Update branch"
+    // rebased): the marked push is in no history the PR has, and sync push and retrigger refuse (32) until a publish.
+    const f = fixture('stale-rewritten', TEMPLATE);
+    const file = await rendered(f);
+    const gone = git(f.clone, 'commit-tree', 'HEAD^{tree}', '-m', 'the sync push a force-push replaced');
+    writeState(f.dir, {
+      v: 1, topic: topicFor('pr/b'), repo: 'acme/gx', number: 9, headRef: 'pr/b', headOwner: 'me', headRemote: null, upstreamRemote: null,
+      defaultBranch: 'main', focused: null, validation: null, bodyStaleSince: gone, lastPublishedBodySha256: null, signals: { latched: [], acked: [] }, audit: null,
+    });
+    f.out.length = 0;
+    expect(await f.publish(file, ...f.acceptLive(file))).toBe(30);
+    expect(f.out[0]).toMatch(/^RESULT PRECONDITION .*not in the PR head's history/);
+    expect(f.out[0]).toContain(`--accept-rewritten-stale ${gone.slice(0, 12)}`);
+    // Only the push the refusal named: any other sha, or a malformed one, is refused.
+    f.out.length = 0;
+    expect(await f.publish(file, ...f.acceptLive(file), '--accept-rewritten-stale', 'f'.repeat(12))).toBe(30);
+    expect(await f.publish(file, ...f.acceptLive(file), '--accept-rewritten-stale', 'HEAD')).toBe(2);
+    expect(f.edits).toHaveLength(0);
+    f.out.length = 0;
+    expect(await f.publish(file, ...f.acceptLive(file), '--accept-rewritten-stale', gone.slice(0, 12))).toBe(0);
+    expect(f.out[0]).toContain(`cleared-stale=${gone.slice(0, 12)}`);
+    expect(f.edits).toHaveLength(1);
+    expect(readStateFor(f.dir, prRef)!.bodyStaleSince).toBeNull();
+    expect(BODY_USAGE).toContain('--accept-rewritten-stale');
+  });
+
   test('every publish RESULT line reports body-stale-since, refusals and thrown preconditions included', async () => {
     const f = fixture('stale-every', TEMPLATE);
     const file = await rendered(f);
