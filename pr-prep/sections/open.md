@@ -1,0 +1,71 @@
+<!-- AUTO-GENERATED from open.md.tmpl — do not edit directly -->
+<!-- Regenerate: bun run gen:skill-docs -->
+## Mode: open (before the upstream PR exists)
+
+Opening a PR on someone else's repo is the owner's decision. This mode
+prepares everything, then waits for an explicit instruction in chat that
+names the branch ("open the PR for pr/hook-check-gaps"). A yes to anything
+else is not that instruction.
+
+### 1. The audit is fresh
+
+Run the audit (no arguments) first if this branch has no report, or if the
+report's `head` is not `git rev-parse HEAD`. Do not open over EXACT_DUP.
+
+### 2. Size against what upstream merges
+
+```bash
+~/.claude/skills/gstack/bin/gstack-pr-watch size --repo <upstream owner/name>
+```
+
+`RESULT GREEN|AMBER|RED` compares churn and files (release files excluded)
+with merged contributor PRs. Commits are shown, not scored: upstream
+squash-merges. On RED, ask the owner with AskUserQuestion whether to split
+the branch first or open as is: a 74-commit, +4632-line contributor PR read
+RED and was rewritten upstream inside a 220-file maintainer wave. Never
+decide this yourself.
+
+### 3. The body template
+
+Write `<state dir>/body.tmpl.md` with the Write tool (`gstack-pr-prep-commits
+paths` prints the state dir's `audit.json`; the template goes beside it).
+Use the upstream PR template's headings verbatim (read
+`.github/PULL_REQUEST_TEMPLATE.md` from the pinned base). Put `<!-- pr-prep:facts -->`
+where the current state belongs (usually under the live-evidence heading).
+Keep head, base, version, merges, CI and test counts OUT of the prose: the
+facts block owns them, and they go stale on every push. Never state another
+PR's version claim.
+
+In the liveness section write `Screenshot to follow from @<your login>.`
+(`gh api user --jq .login`) and leave checklist box 1 unticked, unless the
+login is the repo owner (owner exemption).
+
+### 4. Open as a draft (only on the owner's explicit instruction)
+
+Render the first body (`gstack-pr-body render` needs the PR number, so for
+the first open copy the template and replace `<!-- pr-prep:facts -->` with a short
+"facts follow after the first push" line), then, with the owner's go-ahead
+in this turn:
+
+```bash
+~/.claude/skills/gstack/bin/gstack-egress-receipt write --sink pr-prep --host github.com --class pr-create --payload-file <body file> --consent "user ran /pr-prep"
+gh pr create --draft --repo <upstream owner/name> --head <your login>:<branch> --base <base> --title "<title>" --body-file <body file>
+```
+
+### 5. Hand the liveness step to the owner
+
+Tell the owner, as a checklist:
+1. Type `GSTACK PR` live into a real surface and screenshot it.
+2. Attach it in the PR's Liveness proof section, tick box 1, delete the
+   placeholder line.
+3. Close any other open edit of the description first: GitHub keeps the
+   last save, and an old tab overwrites the screenshot.
+4. Mark the PR ready for review (`gh pr ready`) when they are satisfied.
+
+Then verify with `/pr-prep liveness`. The agent never attaches, paints or
+uploads a screenshot and never runs `gh pr ready`.
+
+### 6. Keep watching
+
+Offer the owner `gstack-pr-watch enable` for this PR and the opt-in
+LaunchAgent in `contrib/pr-watch/README.md` (the owner installs it).

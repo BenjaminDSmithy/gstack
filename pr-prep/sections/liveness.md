@@ -1,0 +1,18 @@
+<!-- AUTO-GENERATED from liveness.md.tmpl — do not edit directly -->
+<!-- Regenerate: bun run gen:skill-docs -->
+## Mode: liveness (the owner's screenshot)
+
+```bash
+~/.claude/skills/gstack/bin/gstack-pr-body check --pr <number> --repo <upstream owner/name>
+```
+
+- `RESULT ATTACHED`: a `user-attachments` image is in the live body,
+  checklist box 1 is ticked, the placeholder is gone, and every image
+  answers 200.
+- `RESULT PENDING` (exit 40): give the owner the open mode's step 5
+  checklist again, naming what is missing.
+- `RESULT EXEMPT`: the PR author is the repo owner.
+
+The screenshot is the owner's: never attach, upload, paint or edit one, and
+never run `gh pr ready`. If the owner asks you to attach it through their
+browser, that is a separate, explicit request for that one action.

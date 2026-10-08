@@ -577,6 +577,24 @@ do not launch the downstream skill or open a browser.`,
     mustContain: ['6 Decision Principles', 'TASTE DECISION', 'USER CHALLENGE', 'consensus', 'Restore Point'],
     maxSizeRatio: 1.127, // Four validated outside invocations replace raw CLI calls; phases keep independent coverage. fork: single-select AskUserQuestion doctrine (+774B) over upstream's 1.1149; measured 1.1225 (2026-10-08, v1.91.33.0)
   },
+  // fork-only: /pr-prep's lifecycle modes (open/sync/body/watch/ci/liveness)
+  // load one section each; the audit and /ship's Step 1.5 never read one.
+  'pr-prep': {
+    skill: 'pr-prep',
+    expectedSections: ['open.md', 'sync.md', 'body.md', 'watch.md', 'ci.md', 'liveness.md'],
+    requiredReads: ['sync.md'],
+    scenario:
+      "Run /pr-prep sync for upstream PR 3066 of garrytan/gstack. Simulate every helper (gstack-pr-watch, gstack-pr-sync, gstack-pr-validate): state what you would run and the result you expect instead of executing it, and do NOT push or publish anything. Do NOT use AskUserQuestion.",
+    staticInvariants: {
+      mustStayInSkeleton: ['## Detect command', '## Write safety (every mode)', 'FETCH_STATUS:', 'gstack-pr-prep-commits stamp', 'PR_PREP_BASE'],
+      mustPrecedeStop: ['## Detect command', '## Write safety (every mode)'],
+      mustMoveToSection: ['gstack-pr-sync merge', 'gstack-pr-body publish --pr', 'gstack-pr-ci-triage run', 'gstack-pr-watch ack', 'gstack-pr-body check'],
+    },
+    behavioral: 'none',
+    maxSkeletonBytes: 68_500, // measured 67,195 (2026-10-08, v1.91.33.0 + fork)
+    minUnionBytes: 78_000, // measured union 79,353
+    mustContain: ['EXACT_DUP', 'UNVERIFIED', 'gstack-pr-sync push', 'gstack-pr-sync retrigger', '--accept-live-diff', 'Screenshot to follow'],
+  },
   spec: {
     skill: 'spec',
     expectedSections: ['gate-and-file.md'],

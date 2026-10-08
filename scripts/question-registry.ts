@@ -447,6 +447,50 @@ export const QUESTIONS = {
   },
 
   // -----------------------------------------------------------------------
+  // /pr-prep (fork) — writes to someone else's open PR: always the owner's call
+  // -----------------------------------------------------------------------
+  'pr-prep-sync-push': {
+    id: 'pr-prep-sync-push',
+    skill: 'pr-prep',
+    category: 'approval',
+    door_type: 'one-way',
+    options: ['approve', 'deny'],
+    description: 'Push the staged upstream sync (merge of the base, re-version) to the open PR branch?',
+  },
+  'pr-prep-body-publish': {
+    id: 'pr-prep-body-publish',
+    skill: 'pr-prep',
+    category: 'approval',
+    door_type: 'one-way',
+    options: ['approve', 'deny'],
+    description: "Replace the open PR's description with the regenerated body?",
+  },
+  'pr-prep-ci-retrigger-push': {
+    id: 'pr-prep-ci-retrigger-push',
+    skill: 'pr-prep',
+    category: 'approval',
+    door_type: 'one-way',
+    options: ['approve', 'deny'],
+    description: 'Push an empty ci: commit to re-run a flaked Windows shard on the open PR?',
+  },
+  'pr-prep-open-pr': {
+    id: 'pr-prep-open-pr',
+    skill: 'pr-prep',
+    category: 'approval',
+    door_type: 'one-way',
+    options: ['approve', 'deny'],
+    description: 'Open the draft PR against the upstream repo?',
+  },
+  'pr-prep-size-split': {
+    id: 'pr-prep-size-split',
+    skill: 'pr-prep',
+    category: 'routing',
+    door_type: 'two-way',
+    options: ['accept', 'reject'],
+    description: 'The branch reads RED against merged contributor PRs: split it before opening, or open as is?',
+  },
+
+  // -----------------------------------------------------------------------
   // /land-and-deploy — merge + deploy + verify
   // -----------------------------------------------------------------------
   'land-and-deploy-merge-confirm': {

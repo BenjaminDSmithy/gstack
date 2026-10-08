@@ -106,7 +106,8 @@ describe('pr-prep Step 3: fetch health is checked before the guard', () => {
 
   for (const shell of SHELLS) {
     describe.skipIf(!HAVE_JQ)(`under ${shell}`, () => {
-      const env = { REPO: 'acme/widgets', QUERY: 'synopsis truncate' };
+      // _PP_PAUSE=0: the block spaces its searches 1 s apart for GitHub's secondary limit; the stub has none.
+      const env = { REPO: 'acme/widgets', QUERY: 'synopsis truncate', _PP_PAUSE: '0' };
 
       test('failed gh -> FETCH FAILED x4, UNVERIFIED, and NO envelope', () => {
         const stub = stubDir('gh', `echo 'unknown command "issue open" for "gh"' >&2\nexit 1`);

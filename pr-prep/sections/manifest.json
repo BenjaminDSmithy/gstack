@@ -1,0 +1,44 @@
+{
+  "$schema": "https://gstack.dev/schemas/section-manifest.json",
+  "skill": "pr-prep",
+  "version": 1,
+  "note": "PASSIVE registry. The skeleton's Detect command table is the ONLY place that decides WHEN to read a section; the modes are mutually exclusive, so at most one section loads per invocation, and an invocation from /ship never loads one.",
+  "sections": [
+    {
+      "id": "open",
+      "file": "open.md",
+      "title": "open: size check, draft PR, liveness handoff",
+      "trigger": "running the open mode (the first argument is `open`)"
+    },
+    {
+      "id": "sync",
+      "file": "sync.md",
+      "title": "sync: merge upstream into an open PR, re-version, push after the owner's yes",
+      "trigger": "running the sync mode (the first argument is `sync`)"
+    },
+    {
+      "id": "body",
+      "file": "body.md",
+      "title": "body: regenerate the PR description from live facts",
+      "trigger": "running the body mode (the first argument is `body`)"
+    },
+    {
+      "id": "watch",
+      "file": "watch.md",
+      "title": "watch: maintainer and bot signals, supersession",
+      "trigger": "running the watch mode (the first argument is `watch`)"
+    },
+    {
+      "id": "ci",
+      "file": "ci.md",
+      "title": "ci: Windows shard flake triage and the empty ci: re-run",
+      "trigger": "running the ci mode (the first argument is `ci`)"
+    },
+    {
+      "id": "liveness",
+      "file": "liveness.md",
+      "title": "liveness: check the owner's screenshot handoff",
+      "trigger": "running the liveness mode (the first argument is `liveness`)"
+    }
+  ]
+}
