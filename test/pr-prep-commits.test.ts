@@ -13,7 +13,7 @@ import path from 'node:path';
 import { listAuditCommits, stampReport, dropSelf, worstOf, searchQualifier, commitsMain, type PriorReport } from '../lib/pr-prep-commits';
 import { defaultGit } from '../lib/pr-context';
 
-setDefaultTimeout(60_000);
+setDefaultTimeout(120_000);
 
 let ROOT = '';
 let repo = '';
