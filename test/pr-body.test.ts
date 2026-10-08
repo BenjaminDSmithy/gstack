@@ -246,7 +246,12 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
   const http = async (url: string) => (url.includes('dead') ? 404 : 200);
   const call = (argv: string[]) => bodyMain([...argv, '--pr', '9', '--repo', 'acme/gx', '--cwd', clone], { gh, env, out: l => out.push(l), now: () => new Date('2026-10-08T01:00:00Z'), http });
   const dir = prStateDir({ cwd: clone, topic: topicFor('pr/b'), env });
-  return { base, clone, out, call, dir, edits, getLive: () => live, setLive: (text: string) => { live = text; }, env };
+  const shaOf = (file: string) => sha256(fs.readFileSync(file, 'utf8')).slice(0, 12);
+  // publish as the skill runs it: the owner's yes bound to the body's sha256.
+  const publish = (file: string, ...extra: string[]) => call(['publish', '--body', file, '--body-sha256', shaOf(file), '--yes', ...extra]);
+  // The owner accepted the live body as it is right now.
+  const acceptLive = () => ['--accept-live-diff', sha256(normalizeBody(live)).slice(0, 12)];
+  return { base, clone, out, call, publish, acceptLive, shaOf, dir, edits, getLive: () => live, setLive: (text: string) => { live = text; }, env };
 }
 const prRef = { repo: 'acme/gx', number: 9, headRef: 'pr/b', headOwner: 'me' };
 
@@ -349,14 +354,15 @@ describe('publish', () => {
   test('needs --yes; the first publish over a hand-written body needs --accept-live-diff; then one edit, receipted', async () => {
     const f = fixture('pub', TEMPLATE.replace('Screenshot to follow from @me.', IMG66).replace(BOX1_OPEN, BOX1_DONE));
     const file = await rendered(f);
-    expect(await f.call(['publish', '--body', file])).toBe(2);
+    expect(await f.call(['publish', '--body', file, '--body-sha256', f.shaOf(file)])).toBe(2);
     f.out.length = 0;
-    expect(await f.call(['publish', '--body', file, '--yes'])).toBe(20);
-    expect(f.out[0]).toMatch(/^RESULT REFUSED /);
+    expect(await f.publish(file)).toBe(20);
+    expect(f.out[0]).toMatch(/^RESULT REFUSED .*live-sha256=[0-9a-f]{12}/);
+    const shown = f.out[0].match(/live-sha256=([0-9a-f]{12})/)![1];
     expect(f.out.join('\n')).toContain('BEGIN UNTRUSTED TRACKER CONTENT');
     expect(f.edits).toHaveLength(0);
     const home = path.join(f.base, 'home');
-    expect(await f.call(['publish', '--body', file, '--yes', '--accept-live-diff'])).toBe(0);
+    expect(await f.publish(file, '--accept-live-diff', shown)).toBe(0);
     expect(f.edits).toHaveLength(1);
     expect(f.getLive()).toContain(IMG66);
     const st = readStateFor(f.dir, prRef)!;
@@ -364,19 +370,47 @@ describe('publish', () => {
     expect(st.bodyStaleSince).toBeNull();
     expect(listReceipts(home).filter(r => r.sink === 'pr-prep').at(-1)).toMatchObject({ payload_class: 'pr-body-edit', status: 'exit:0' });
     // The second publish of an unchanged live body needs no live-diff acceptance.
-    expect(await f.call(['publish', '--body', file, '--yes'])).toBe(0);
+    expect(await f.publish(file)).toBe(0);
     expect(f.edits).toHaveLength(2);
+  });
+
+  test('the yes is bound to the body sha256 and the live-diff acceptance to the live body that was shown', async () => {
+    const f = fixture('bind', TEMPLATE);
+    const file = await rendered(f);
+    f.out.length = 0;
+    expect(await f.call(['publish', '--body', file, '--yes', ...f.acceptLive()])).toBe(2);
+    expect(f.out[0]).toMatch(/^RESULT USAGE .*--body-sha256/);
+    // The owner approved one body; the file now holds another.
+    const approved = f.shaOf(file);
+    fs.appendFileSync(file, 'Added after the question.\n');
+    f.out.length = 0;
+    expect(await f.call(['publish', '--body', file, '--body-sha256', approved, '--yes', ...f.acceptLive()])).toBe(20);
+    expect(f.out[0]).toMatch(/^RESULT REFUSED .*sha256/);
+    expect(f.edits).toHaveLength(0);
+    fs.writeFileSync(file, normalizeBody(fs.readFileSync(file, 'utf8').replace('Added after the question.\n', '')));
+    // The owner saw the diff against one live body; a second web edit lands before the re-run.
+    f.setLive(`${f.getLive()}OWNER-NOTE-A\n`);
+    f.out.length = 0;
+    expect(await f.publish(file)).toBe(20);
+    const shown = f.out[0].match(/live-sha256=([0-9a-f]{12})/)![1];
+    expect(f.out.join('\n')).toContain('OWNER-NOTE-A');
+    f.setLive(`${f.getLive()}OWNER-NOTE-B\n`);
+    f.out.length = 0;
+    expect(await f.publish(file, '--accept-live-diff', shown)).toBe(20);
+    expect(f.out.join('\n')).toContain('OWNER-NOTE-B');
+    expect(f.edits).toHaveLength(0);
+    expect(await f.publish(file, '--accept-live-diff', 'zz')).toBe(2);
   });
 
   test('the live-vs-new diff is a real line diff: a moved section and a dropped duplicate show', async () => {
     const f = fixture('reorder', TEMPLATE);
     const file = await rendered(f);
-    expect(await f.call(['publish', '--body', file, '--yes', '--accept-live-diff'])).toBe(0);
+    expect(await f.publish(file, ...f.acceptLive())).toBe(0);
     const published = f.getLive();
     const liveness = published.slice(published.indexOf('## Liveness proof'), published.indexOf('## Checklist'));
     f.setLive(liveness + published.replace(liveness, ''));
     f.out.length = 0;
-    expect(await f.call(['publish', '--body', file, '--yes'])).toBe(20);
+    expect(await f.publish(file)).toBe(20);
     const text = f.out.join('\n');
     expect(text).not.toContain('(empty body)');
     expect(text).toMatch(/^- ## Liveness proof/m);
@@ -390,13 +424,13 @@ describe('publish', () => {
     const tmpl = TEMPLATE.replace('Because.', 'Because the resolver at 8.8.8.8 and main\'s 1.0.0.0 differ.');
     const file = await rendered(f, tmpl);
     f.out.length = 0;
-    expect(await f.call(['publish', '--body', file, '--yes', '--accept-live-diff'])).toBe(22);
+    expect(await f.publish(file, ...f.acceptLive())).toBe(22);
     expect(f.out[0]).toMatch(/^RESULT REDACTION /);
     const keys = f.out.filter(l => l.startsWith('REDACTION MEDIUM')).map(l => l.split(' ')[2]);
     expect(keys).toHaveLength(1);
     expect(keys[0]).toStartWith('pii.ip_public@');
     expect(f.edits).toHaveLength(0);
-    expect(await f.call(['publish', '--body', file, '--yes', '--accept-live-diff', '--confirm-redaction', keys[0]])).toBe(0);
+    expect(await f.publish(file, ...f.acceptLive(), '--confirm-redaction', keys[0])).toBe(0);
     expect(f.edits).toHaveLength(1);
   });
 
@@ -409,26 +443,26 @@ describe('publish', () => {
     const bad = path.join(f.base, 'bad.md');
     fs.writeFileSync(bad, normalizeBody(spliceFacts(TEMPLATE.replace('Because.', 'Because 1.0.2.0 is claimed by #12.'), renderFactsBlock(FACTS))));
     f.out.length = 0;
-    expect(await f.call(['publish', '--body', bad, '--yes', '--accept-live-diff'])).toBe(20);
+    expect(await f.publish(bad, ...f.acceptLive())).toBe(20);
     expect(f.out[0]).toMatch(/^RESULT REFUSED /);
     expect(f.out.some(l => l.startsWith('LINT') && l.includes('version claim'))).toBe(true);
     expect(f.edits).toHaveLength(0);
     const two = path.join(f.base, 'two.md');
     fs.writeFileSync(two, normalizeBody(`${renderFactsBlock({ ...FACTS, head: '0'.repeat(40) })}\n\n${spliceFacts(TEMPLATE, renderFactsBlock(FACTS))}`));
     f.out.length = 0;
-    expect(await f.call(['publish', '--body', two, '--yes', '--accept-live-diff'])).toBe(20);
+    expect(await f.publish(two, ...f.acceptLive())).toBe(20);
     expect(f.out[0]).toMatch(/^RESULT REFUSED .*exactly one facts block/);
     expect(f.edits).toHaveLength(0);
 
     const closed = fixture('closed', TEMPLATE, { state: 'CLOSED' });
     const file = await rendered(closed);
-    expect(await closed.call(['publish', '--body', file, '--yes', '--accept-live-diff'])).toBe(30);
+    expect(await closed.publish(file, ...closed.acceptLive())).toBe(30);
     expect(closed.edits).toHaveLength(0);
 
     const web = fixture('web', TEMPLATE.replace('Screenshot to follow from @me.', IMG66), { webEditDropsImages: true });
     const wfile = await rendered(web);
     web.out.length = 0;
-    expect(await web.call(['publish', '--body', wfile, '--yes', '--accept-live-diff'])).toBe(1);
+    expect(await web.publish(wfile, ...web.acceptLive())).toBe(1);
     expect(web.out[0]).toMatch(/^RESULT ERROR /);
     expect(web.edits).toHaveLength(1);
     expect(web.out.some(l => l.startsWith('VANISHED attachment'))).toBe(true);
