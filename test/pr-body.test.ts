@@ -56,6 +56,15 @@ describe('pure helpers', () => {
     expect(renderFactsBlock({ ...FACTS, validation: { sha: 'a'.repeat(40), worst: 0, summary: 'x' } })).toContain('Validation: not run at this head.');
   });
 
+  test('VERSION is compared as four numbers: "above" only when it is above the base', () => {
+    expect(renderFactsBlock({ ...FACTS, version: '1.10.0.0', baseVersion: '1.9.0.0' })).toContain('`VERSION` 1.10.0.0, above `main`\'s 1.9.0.0.');
+    for (const [ours, base] of [['1.0.1.0', '1.0.2.0'], ['1.0.2.0', '1.0.2.0']]) {
+      const block = renderFactsBlock({ ...FACTS, version: ours, baseVersion: base });
+      expect(block).toContain(`\`VERSION\` ${ours}, at or below \`main\`'s ${base} (needs a sync).`);
+      expect(block).not.toContain('above');
+    }
+  });
+
   test('spliceFacts fills <!-- pr-prep:facts --> or replaces the previous block, and refuses a template with neither', () => {
     const once = spliceFacts(TEMPLATE, renderFactsBlock(FACTS));
     const again = spliceFacts(once, renderFactsBlock({ ...FACTS, commits: 9 }));
