@@ -640,6 +640,35 @@ describe('scratch cleanup', () => {
     expect(leftovers(parent)).toEqual([]);
   });
 
+  test('an orphan root the sweep cannot delete, or a scratch parent it cannot use, still ends in a RESULT line', async () => {
+    const parent = path.join(ROOT, 'sweep-stuck');
+    const orphan = path.join(parent, 'gstack-ci-triage-old');
+    const locked = path.join(orphan, 'locked');
+    fs.mkdirSync(locked, { recursive: true });
+    fs.writeFileSync(path.join(locked, 'partial.bin'), 'x');
+    fs.writeFileSync(path.join(orphan, '.owner'), `${spawnSync('true', [], { timeout: 10_000 }).pid}\n`);
+    fs.chmodSync(locked, 0o555);
+    const gh = (() => ({ status: 1, stdout: '', stderr: 'HTTP 502' })) as GhRunner;
+    try {
+      const out: string[] = [];
+      const err: string[] = [];
+      const code = await triageMain(['run', '--pr', '3', '--repo', 'acme/gt', '--cwd', repoDir], { gh, out: l => out.push(l), err: l => err.push(l), scratchParent: parent });
+      expect(code).toBe(1);
+      expect(out[0]).toMatch(/^RESULT ERROR gh pr view/);
+      // the sweep named the root it could not remove, on stderr, and moved on
+      expect(err.some(l => l.includes(orphan))).toBe(true);
+      expect(leftovers(parent)).toEqual(['gstack-ci-triage-old']);
+    } finally {
+      fs.chmodSync(locked, 0o755);
+    }
+    // a scratch parent that does not exist: the first artifact download cannot get a root
+    const missing: string[] = [];
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(ROOT, 'sweep-stuck-state') };
+    const crash = fakeGh([{ id: 960, sha: B, shard: 4, fixture: '37346036310' }], []);
+    expect(await triageMain(['run', '--pr', '3', '--repo', 'acme/gt', '--cwd', repoDir], { gh: crash, env, out: l => missing.push(l), err: () => {}, scratchParent: path.join(ROOT, 'no-such-parent') })).toBe(1);
+    expect(missing).toEqual([expect.stringMatching(/^RESULT ERROR ENOENT.*mkdtemp/)]);
+  });
+
   test('SIGTERM during an artifact download removes the scratch root, and a dead run\'s root is swept at the next start', async () => {
     const tmp = path.join(ROOT, 'sigtmp');
     const fakebin = path.join(ROOT, 'fakebin');

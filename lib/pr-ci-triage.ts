@@ -290,10 +290,15 @@ export function draftMessage(x: { run: number; head: string; shards: ShardTriage
 
 // ── deps ────────────────────────────────────────────────────────────────────
 
-export interface TriageDeps { gh: GhRunner; git: GitRunner; env: NodeJS.ProcessEnv; out: (line: string) => void; tmp: () => string }
+export interface TriageDeps {
+  gh: GhRunner; git: GitRunner; env: NodeJS.ProcessEnv; out: (line: string) => void;
+  /** Notes that are not part of the machine-read report (stderr). */
+  err: (line: string) => void;
+  tmp: () => string;
+}
 
 const realDeps = (): Omit<TriageDeps, 'tmp'> => ({
-  gh: defaultGh, git: defaultGit, env: process.env, out: l => process.stdout.write(l + '\n'),
+  gh: defaultGh, git: defaultGit, env: process.env, out: l => process.stdout.write(l + '\n'), err: l => process.stderr.write(l + '\n'),
 });
 
 interface RunInfo { databaseId: number; headSha: string; headBranch?: string; event?: string; conclusion?: string; createdAt?: string; status?: string; jobs?: { databaseId: number; name: string; conclusion: string }[] }
@@ -600,27 +605,44 @@ function pidAlive(pid: number): boolean {
   }
 }
 
+const errCode = (error: unknown): string => (error as NodeJS.ErrnoException).code ?? (error as Error).message;
+
+/** Remove one scratch root; a failure is a note naming the root, never a throw (cleanup must not end the triage). */
+function removeScratch(root: string, warn: (line: string) => void): void {
+  try {
+    fs.rmSync(root, { recursive: true, force: true });
+  } catch (error) {
+    warn(`NOTE could not remove the artifact scratch ${stripControl(root)} (${errCode(error)}): remove it by hand`);
+  }
+}
+
 /**
  * Remove scratch roots whose recorded owner process is gone (a SIGKILL, or a
- * crash before cleanup). A root without an owner file, or whose owner is
- * alive, is left alone.
+ * crash before cleanup). Best effort: only a real directory the current
+ * user owns is considered (another user can plant a name in a shared /tmp);
+ * a root without an owner file, or whose owner is alive, is left alone; one
+ * that cannot be read or removed is named on `warn` and skipped.
  */
-export function sweepOrphanScratch(parent: string): void {
+export function sweepOrphanScratch(parent: string, warn: (line: string) => void = l => process.stderr.write(`${l}\n`)): void {
   let entries: string[];
   try {
     entries = fs.readdirSync(parent).filter(e => e.startsWith(SCRATCH_PREFIX));
   } catch {
-    return;
+    return; // no readable parent: nothing of ours to sweep
   }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
   for (const e of entries) {
     const root = path.join(parent, e);
     let pid = NaN;
     try {
+      const st = fs.lstatSync(root);
+      if (!st.isDirectory() || (uid !== null && st.uid !== uid)) continue;
       pid = Number(fs.readFileSync(path.join(root, OWNER_FILE), 'utf8').trim());
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') warn(`NOTE could not read the leftover scratch ${stripControl(root)} (${errCode(error)}): left in place`);
       continue;
     }
-    if (Number.isSafeInteger(pid) && pid > 0 && !pidAlive(pid)) fs.rmSync(root, { recursive: true, force: true });
+    if (Number.isSafeInteger(pid) && pid > 0 && !pidAlive(pid)) removeScratch(root, warn);
   }
 }
 
@@ -628,23 +650,31 @@ const SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
 
 export async function triageMain(argv: string[], deps: Partial<TriageDeps> & { scratchParent?: string } = {}): Promise<number> {
   // Artifact downloads (0.3-15 MB each) land under one scratch root that
-  // records its owner pid. It is removed on return, on SIGINT/SIGTERM/SIGHUP
-  // (then exit 128+signal), and by the next run's sweep if this process is
-  // killed outright.
+  // records its owner pid, made at the first download. It is removed on
+  // return, on SIGINT/SIGTERM/SIGHUP (then exit 128+signal), and by the next
+  // run's sweep if this process is killed outright. A root that cannot be
+  // made is an error the triage reports (RESULT ERROR, exit 1).
   const { scratchParent = os.tmpdir(), ...rest } = deps;
-  sweepOrphanScratch(scratchParent);
-  const scratch = fs.mkdtempSync(path.join(scratchParent, SCRATCH_PREFIX));
-  fs.writeFileSync(path.join(scratch, OWNER_FILE), `${process.pid}\n`);
+  const base = { ...realDeps(), ...rest };
+  sweepOrphanScratch(scratchParent, base.err);
+  let scratch: string | null = null;
+  const tmp = (): string => {
+    if (!scratch) {
+      scratch = fs.mkdtempSync(path.join(scratchParent, SCRATCH_PREFIX));
+      fs.writeFileSync(path.join(scratch, OWNER_FILE), `${process.pid}\n`);
+    }
+    return fs.mkdtempSync(path.join(scratch, 'a-'));
+  };
   const onSignal = (sig: NodeJS.Signals) => {
-    fs.rmSync(scratch, { recursive: true, force: true });
+    if (scratch) removeScratch(scratch, base.err);
     process.exit(128 + (os.constants.signals[sig] ?? 0));
   };
   for (const sig of SIGNALS) process.on(sig, onSignal);
   try {
-    return await triage(argv, { ...realDeps(), tmp: () => fs.mkdtempSync(path.join(scratch, 'a-')), ...rest });
+    return await triage(argv, { tmp, ...base });
   } finally {
     for (const sig of SIGNALS) process.off(sig, onSignal);
-    fs.rmSync(scratch, { recursive: true, force: true });
+    if (scratch) removeScratch(scratch, base.err);
   }
 }
 
