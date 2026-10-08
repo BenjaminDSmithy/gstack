@@ -85,6 +85,18 @@ describe('pure classification', () => {
     expect(draftable({ ...classifyShard(5, { ...hang, unattributedFailures: 3 }, hangLog), sameTreeGreen: '150' })).toBe(false);
   });
 
+  test('an abort is a CRASH draft only after exit 3 or 9: the same log after any other exit is not', () => {
+    const log = read('37346036310-shard.log.txt');
+    const crash = result('37346036310');
+    for (const exitCode of [1, null, 124]) {
+      const t = classifyShard(4, { ...crash, exitCode }, log);
+      expect(t.klass).not.toBe('CRASH');
+      expect(draftable(t)).toBe(false);
+      // draftable() checks the exit code on its own, not only through the class
+      expect(draftable({ ...classifyShard(4, crash, log), outcome: { ...crash, exitCode } })).toBe(false);
+    }
+  });
+
   test('the abort signature counts only as the log\'s last line: printed mid-run by a test, it is not the abort', () => {
     // In every real crash log the signature is the final line (7 of 7 measured). Here a test prints it, and Bun later dies of something else.
     const crash = result('37346036310');
@@ -286,6 +298,13 @@ describe('run', () => {
     const r = await triage([{ id: 650, sha: B, shard: 5, fixture: '37347305098' }, greenElsewhere]);
     expect(r.code).toBe(10);
     expect(r.out.some(l => l.startsWith('SHARD\t5\tHANG') && l.endsWith('same-tree-green none'))).toBe(true);
+    expect(draftFiles(r)).toEqual([]);
+  });
+
+  test('exit 1 with no failing test and an IOCP line ending the log is no draft', async () => {
+    const r = await triage([{ id: 653, sha: B, shards: { 4: { fixture: '37346036310', result: { ...result('37346036310'), exitCode: 1 } } } }]);
+    expect(r.code).toBe(10);
+    expect(r.out[0]).toBe('RESULT NO_DRAFT run=653 shards=4:UNKNOWN');
     expect(draftFiles(r)).toEqual([]);
   });
 
