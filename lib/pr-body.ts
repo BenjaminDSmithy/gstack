@@ -125,13 +125,13 @@ export function renderFactsBlock(f: Facts): string {
   return lines.join('\n');
 }
 
-/** Put the block at `{{FACTS}}`, or replace an existing block. */
+/** Put the block at `<!-- pr-prep:facts -->`, or replace an existing block. */
 export function spliceFacts(template: string, block: string): string {
-  if (template.includes('{{FACTS}}')) return template.replace('{{FACTS}}', block);
+  if (template.includes('<!-- pr-prep:facts -->')) return template.replace('<!-- pr-prep:facts -->', block);
   const a = template.indexOf(FACTS_BEGIN);
   const b = template.indexOf(FACTS_END);
   if (a >= 0 && b > a) return template.slice(0, a) + block + template.slice(b + FACTS_END.length);
-  throw new PrContextError('the template has neither {{FACTS}} nor a facts block', 2);
+  throw new PrContextError('the template has neither <!-- pr-prep:facts --> nor a facts block', 2);
 }
 
 export function stripFacts(body: string): string {
@@ -378,7 +378,7 @@ function today(d: BodyDeps): string {
 function cmdRender(c: Ctx): number {
   const { d } = c;
   const templatePath = c.f.template ?? path.join(c.stateDir, 'body.tmpl.md');
-  if (!fs.existsSync(templatePath)) throw new PrContextError(`no template at ${templatePath} (write one from the PR's current body, with {{FACTS}} where the facts go)`, 2);
+  if (!fs.existsSync(templatePath)) throw new PrContextError(`no template at ${templatePath} (write one from the PR's current body, with <!-- pr-prep:facts --> where the facts go)`, 2);
   const facts = collectFacts(c);
   fs.mkdirSync(c.stateDir, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(c.stateDir, 'facts.json'), JSON.stringify(facts, null, 2) + '\n', { mode: 0o600 });
