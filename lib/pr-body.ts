@@ -96,10 +96,13 @@ errors included, reports body-stale-since=<sha|none>.`;
 export const FACTS_BEGIN = '<!-- pr-prep:facts:begin v1 -->';
 export const FACTS_END = '<!-- pr-prep:facts:end -->';
 const ASSET_RE = /https:\/\/github\.com\/user-attachments\/assets\/[0-9a-fA-F-]{8,}/g;
-// GitHub task-list items: `-`, `*` or `+` bullets and `1.`/`1)` numbers; `[x]` or `[X]`.
-const TICKED_RE = /^\s*(?:[-*+]|\d+[.)]) \[[xX]\] .+$/gm;
-const TICK_PREFIX_RE = /^(?:[-*+]|\d+[.)]) \[[xX]\]/;
-const BOX1_RE = /^(\s*(?:[-*+]|\d+[.)]) \[)([ xX])(\] Liveness screenshot attached.*)$/m;
+// GitHub task-list items as GFM renders them checked: `-`, `*` or `+`
+// bullets and `1.`/`1)` numbers, any run of spaces or tabs around the box,
+// inside blockquotes too; `[x]` or `[X]`. A single-space-only pattern missed
+// `-  [x] a`, `- [x]<TAB>a` and `> - [x] a`, so their loss was never refused.
+const TICKED_RE = /^[ \t]*(?:>[ \t]*)*(?:[-*+]|\d+[.)])[ \t]+\[[xX]\][ \t]+\S.*$/gm;
+const TICK_PREFIX_RE = /^[ \t]*(?:>[ \t]*)*(?:[-*+]|\d+[.)])[ \t]+\[[xX]\][ \t]+/;
+const BOX1_RE = /^([ \t]*(?:>[ \t]*)*(?:[-*+]|\d+[.)])[ \t]+\[)([ xX])(\][ \t]+Liveness screenshot attached.*)$/m;
 const LIVENESS_HEADING_RE = /^## Liveness proof.*$/m;
 const PLACEHOLDER_RE = /Screenshot to follow|Pending: the live|\[OWNER: attach/i;
 
@@ -257,8 +260,8 @@ export function carryLiveness(next: string, live: string): string {
   return out;
 }
 
-/** A ticked line as compared: trimmed, any bullet or number as `-`, the box as `[x]`. */
-const tickKey = (line: string) => line.trim().replace(TICK_PREFIX_RE, '- [x]');
+/** A ticked line as compared: trimmed, any quote, bullet or number as `-`, the box as `[x]`, one space either side. */
+const tickKey = (line: string) => line.trim().replace(TICK_PREFIX_RE, '- [x] ');
 
 /** Every live attachment URL and ticked checklist line that the outgoing body would drop. */
 export function lostOwnerContent(live: string, next: string): string[] {

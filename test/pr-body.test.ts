@@ -108,6 +108,22 @@ describe('pure helpers', () => {
     }
   });
 
+  test('every GFM spelling of a ticked box is guarded: runs of spaces, a tab, a blockquote', () => {
+    // GitHub renders each of these as a checked box.
+    for (const tick of ['-  [x] Owner verified the Windows run by hand', '- [x]\tOwner verified the Windows run by hand', '> - [x] Owner verified the Windows run by hand', '1.  [X] Owner re-ran CI']) {
+      expect(lostOwnerContent(`${TEMPLATE}${tick}\n`, TEMPLATE), tick).toEqual([`ticked: ${tick}`]);
+    }
+    // One tick, spelled two ways, is the same tick.
+    expect(lostOwnerContent('-  [x] Owner ran it\n', '- [x] Owner ran it\n')).toEqual([]);
+    expect(lostOwnerContent('> * [X]\tOwner ran it\n', '- [x] Owner ran it\n')).toEqual([]);
+    // Box 1 ticked with two spaces is carried, and counts as ticked.
+    const live = TEMPLATE.replace('Screenshot to follow from @me.', IMG66).replace(BOX1_OPEN, BOX1_DONE.replace('- [x]', '-  [x]'));
+    expect(livenessOf(live).ticked).toBe(true);
+    const out = carryLiveness(TEMPLATE, live);
+    expect(out).toContain(BOX1_DONE);
+    expect(lostOwnerContent(live, out)).toEqual([]);
+  });
+
   test('lostOwnerContent finds an image anywhere (#3032 put it at the top) and lost ticks', () => {
     const live = `## Liveness screenshot attached\n${IMG32}\n\n${TEMPLATE.replace(BOX1_OPEN, BOX1_DONE)}`;
     const lost = lostOwnerContent(live, TEMPLATE);
