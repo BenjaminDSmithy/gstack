@@ -460,6 +460,26 @@ describe('merge', () => {
     expect(msg).not.toMatch(/kept|re-slotted/);
   });
 
+  test('bun install runs once, in the merged tree, so the tools use upstream\'s lockfile', async () => {
+    const t = topology('s18', {
+      base: d => write(d, 'bun.lock', '{"lockfileVersion":1,"deps":"old"}\n'),
+      pr: ourFeature,
+      main: d => { write(d, 'bun.lock', '{"lockfileVersion":1,"deps":"new from upstream"}\n'); write(d, 'src/b.txt', 'b9\n'); },
+    });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    const installs: string[] = [];
+    const tool: ToolRunner = (cmd, args, opts) => {
+      if (cmd === 'bun' && args[0] === 'install') {
+        installs.push(fs.readFileSync(path.join(opts.cwd, 'bun.lock'), 'utf8'));
+        return { status: 0, stdout: '', stderr: '' };
+      }
+      return defaultTool(cmd, args, opts);
+    };
+    const r = await run(t, ['merge'], { tool });
+    expect(r.code, r.out.join('\n')).toBe(0);
+    expect(installs).toEqual(['{"lockfileVersion":1,"deps":"new from upstream"}\n']);
+  });
+
   test('preconditions: a VERSION move with no entry, or two entries, stops with 30', async () => {
     const noEntry = topology('s6a', { pr: d => { write(d, 'src/a.txt', 'a1\nOURS\na3\n'); write(d, 'VERSION', '1.0.1.0\n'); }, main: d => write(d, 'src/b.txt', 'b9\n') });
     queue(noEntry, { version: '1.0.1.0', base_version: '1.0.0.0' });
