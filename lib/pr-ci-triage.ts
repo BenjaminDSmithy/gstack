@@ -334,8 +334,8 @@ function cmdRun(d: TriageDeps, f: Flags): number {
   else if (pending) stale.push(`run ${runId} has ${pending} unfinished job(s): wait for every shard to finish`);
   if (stale.length) {
     // Checked before any artifact is downloaded: nothing from a stale run is read or printed.
-    for (const s of stale) d.out(`STALE ${s}`);
     d.out(`RESULT NO_DRAFT run=${runId} stale: triage the newest finished run on the current head`);
+    for (const s of stale) d.out(`STALE ${s}`);
     return TRIAGE_EXIT.NO_DRAFT;
   }
   const failed = (run.jobs ?? []).filter(j => j.conclusion === 'failure');
@@ -345,6 +345,8 @@ function cmdRun(d: TriageDeps, f: Flags): number {
     d.out(`RESULT ${aggregate ? 'AGGREGATE' : 'NOTHING'} run=${runId} ${aggregate ? 'windows-free-tests failed with no failed shard: read its job log (plan, verify or a cancelled shard)' : 'no Windows shard failed'}`);
     return aggregate ? TRIAGE_EXIT.NO_DRAFT : TRIAGE_EXIT.NOTHING;
   }
+  // The per-shard detail is held back so the RESULT line prints first.
+  const detail: string[] = [];
   const triaged: ShardTriage[] = [];
   for (const n of shards) {
     const resFile = download(d, repo, runId, `windows-result-${n}`);
@@ -355,18 +357,19 @@ function cmdRun(d: TriageDeps, f: Flags): number {
     const t = classifyShard(n, outcome, log);
     if (t.klass === 'HANG') t.sameTreeGreen = sameTreeGreen(d, f.cwd, repo, pr, run, n);
     triaged.push(t);
-    d.out(`SHARD\t${n}\t${t.klass}${t.signature ? `(${t.signature})` : ''}\t${t.why}${t.inFlight ? `\tin-flight ${t.inFlight}` : ''}${t.klass === 'HANG' ? `\tsame-tree-green ${t.sameTreeGreen ?? 'none'}` : ''}`);
+    detail.push(`SHARD\t${n}\t${t.klass}${t.signature ? `(${t.signature})` : ''}\t${t.why}${t.inFlight ? `\tin-flight ${t.inFlight}` : ''}${t.klass === 'HANG' ? `\tsame-tree-green ${t.sameTreeGreen ?? 'none'}` : ''}`);
     const hidden = unprintableFailing(t.outcome);
-    if (hidden.length) d.out(envelope(hidden.join('\n'), `ci-run-${runId}-shard-${n}-failing`));
-    if (log) d.out(envelope(log.split('\n').slice(-12).join('\n'), `ci-run-${runId}-shard-${n}`));
+    if (hidden.length) detail.push(envelope(hidden.join('\n'), `ci-run-${runId}-shard-${n}-failing`));
+    if (log) detail.push(envelope(log.split('\n').slice(-12).join('\n'), `ci-run-${runId}-shard-${n}`));
   }
   const ok = triaged.filter(draftable);
   if (ok.length !== triaged.length) {
     for (const t of triaged.filter(x => !draftable(x))) {
-      if (t.klass === 'REAL') d.out(`BLAME shard ${t.shard}: run the failing file(s) on the PR head and on the base with gstack-pr-validate (declare them) before calling them pre-existing; a failure that passes on the base is this PR's`);
-      else d.out(`NO_DRAFT shard ${t.shard} ${t.klass}: ${t.klass === 'HANG' ? 'no earlier run of this tree passed the shard' : t.why}`);
+      if (t.klass === 'REAL') detail.push(`BLAME shard ${t.shard}: run the failing file(s) on the PR head and on the base with gstack-pr-validate (declare them) before calling them pre-existing; a failure that passes on the base is this PR's`);
+      else detail.push(`NO_DRAFT shard ${t.shard} ${t.klass}: ${t.klass === 'HANG' ? 'no earlier run of this tree passed the shard' : t.why}`);
     }
     d.out(`RESULT NO_DRAFT run=${runId} shards=${triaged.map(t => `${t.shard}:${t.klass}`).join(',')}`);
+    for (const line of detail) d.out(line);
     return TRIAGE_EXIT.NO_DRAFT;
   }
   const dir = prStateDir({ cwd: f.cwd, topic: topicFor(pr.headRef), env: d.env });
@@ -374,6 +377,7 @@ function cmdRun(d: TriageDeps, f: Flags): number {
   const file = path.join(dir, `ci-retrigger-${runId}.txt`);
   fs.writeFileSync(file, draftMessage({ run: runId, head: pr.headOid, shards: triaged }), { mode: 0o600 });
   d.out(`RESULT DRAFTED run=${runId} message=${file}`);
+  for (const line of detail) d.out(line);
   d.out(`NEXT with the owner's yes in this turn: gstack-pr-sync retrigger --pr ${pr.number} --repo ${repo} --cwd ${shq(f.cwd)} --message ${shq(file)} --yes (it builds and pushes the empty commit; never commit or push by hand), then gstack-pr-body publish (its facts name the new head)`);
   return TRIAGE_EXIT.DRAFTED;
 }
