@@ -42,7 +42,8 @@ export const TRIAGE_USAGE = `gstack-pr-ci-triage <run|onset> [options]
   run     triage the newest failed Windows Free Tests run on the PR's head
           (or --run <id>): per failed shard, read windows-result-<n>, and
           for a no-failing-test exit the shard-log artifact; classify REAL,
-          CRASH (IOCP or GLib signature), HANG, INFRA, AGGREGATE or UNKNOWN.
+          CRASH (an IOCP or GLib signature as the log's last line), HANG,
+          INFRA, AGGREGATE or UNKNOWN.
           When no shard log explains a failure, the job log's tail is
           printed (read-only gh api), inside the untrusted envelope
   onset   count failed shards per UTC day across recent runs (disclosure
@@ -117,6 +118,21 @@ export function safeTestPath(raw: string): string | null {
   return /^[A-Za-z0-9_@][A-Za-z0-9_@./-]*\.test\.[cm]?[jt]sx?$/.test(p) ? p : null;
 }
 
+/**
+ * The log's last non-blank line, ANSI and trailing CRs stripped. An abort
+ * signature counts only here: Bun prints it as it dies, so it is the final
+ * line of every measured crash log (7 of 7), while a test that prints the
+ * same text mid-run says nothing about how the shard ended.
+ */
+export function lastLogLine(log: string): string {
+  const lines = log.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = stripAnsiLine(lines[i]).replace(/\r+$/, '');
+    if (line.trim()) return line;
+  }
+  return '';
+}
+
 /** The last `::group::<file>:` line opened in the log: the test file bun was in when it stopped (null when it is not a test path). */
 export function inFlightFile(log: string): string | null {
   const groups = [...log.matchAll(/^::group::(.+?):?\s*$/gm)];
@@ -177,9 +193,10 @@ export function classifyShard(shard: number, outcome: ShardOutcome | null, log: 
   if (outcome.status === 'timed-out' && failing.length === 0) return { ...base, klass: 'HANG', why: `timed out after ${seconds(outcome.elapsedMs)} s` };
   if (outcome.status === 'failed' && (outcome.exitCode === 3 || outcome.exitCode === 9) && failing.length === 0) {
     if (!log) return { ...base, klass: 'UNKNOWN', why: `exit ${outcome.exitCode} with no failing test, but no shard log to read` };
-    const iocp = IOCP_RE.exec(log);
-    const signature = iocp ? 'IOCP' : GLIB_RE.test(log) ? 'GLib' : null;
-    if (!signature) return { ...base, klass: 'UNKNOWN', why: `exit ${outcome.exitCode} with no failing test and no known abort signature` };
+    const last = lastLogLine(log);
+    const iocp = IOCP_RE.exec(last);
+    const signature = iocp ? 'IOCP' : GLIB_RE.test(last) ? 'GLib' : null;
+    if (!signature) return { ...base, klass: 'UNKNOWN', why: `exit ${outcome.exitCode} with no failing test and no known abort signature at the end of the shard log` };
     const code = iocp ? String(Number(iocp[1])) : '';
     return { ...base, signature, klass: 'CRASH', why: iocp ? `Bun aborted: GetQueuedCompletionStatusEx error ${code}${IOCP_NAMES[code] ? ` (${IOCP_NAMES[code]})` : ''}` : 'GLib abort in g_system_thread_free' };
   }
