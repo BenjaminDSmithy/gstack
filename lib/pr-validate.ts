@@ -56,8 +56,9 @@ A file passes only with exit 0, no "(fail)" line and a
 Changed code (anything but release files and *.md) that no passing
 selected test covers is red (NO_TESTS), never "0/0 green": declare the
 tests that cover it.
-A change to package.json beyond .version, bun.lock, tsconfig or the
-free-suite runner needs the full suite: the selection prints FULL and
+A change to package.json beyond .version, bun.lock, tsconfig,
+bunfig.toml or its preload files, or the free-suite runner needs the
+full suite: the selection prints FULL and
 the run stays red unless --accept-full-risk (CI runs the full suite).
 
 Options:
@@ -88,7 +89,11 @@ export function validationEnv(base: NodeJS.ProcessEnv, tmpdir: string, seedBase:
 
 // ── selection ───────────────────────────────────────────────────────────────
 
-const FULL_RE = /^(bun\.lock|bun\.lockb|patches\/.*|tsconfig[^/]*\.json|scripts\/test-free-shards\.ts|scripts\/lib\/(shard-engine|windows-curation|free-[^/]*)\.ts)$/;
+// Changes that reach every free test: dependencies, compiler config, bun's
+// own test config and its preload (bunfig.toml preloads test-setup.ts into
+// every file), and the free runner with its import closure (the paid-set
+// helper decides what counts as a free test).
+const FULL_RE = /^(bun\.lock|bun\.lockb|bunfig\.toml|test-setup\.ts|patches\/.*|tsconfig[^/]*\.json|scripts\/test-free-shards\.ts|scripts\/lib\/(shard-engine|windows-curation|free-[^/]*)\.ts|test\/helpers\/paid-test-set\.ts)$/;
 const SKILL_SURFACE_RE = /(^|\/)SKILL\.md\.tmpl$|^scripts\/resolvers\/|^scripts\/gen-skill-docs\.ts$|^hosts\//;
 const CODE_RE = /^(bin|lib|scripts)\//;
 const CLASS_SKILL = ['test/gen-skill-docs.test.ts', 'test/skill-validation.test.ts', 'test/catalog-budget.test.ts', 'test/context-budget-ratchet.test.ts'];
@@ -134,9 +139,9 @@ function importedChange(spec: string, changed: Set<string>): string | undefined 
  * Pure. `changed` is `git diff --name-only <merge base with the pinned
  * upstream> HEAD`; `pkgVersionOnly` says package.json changed only in
  * .version (a release, not a dependency change); `source(f)` returns a
- * test file's text.
+ * test file's text; `preload` lists the tree's bunfig.toml preload files.
  */
-export function selectTests(x: { changed: string[]; universe: string[]; declared: string[]; pkgVersionOnly: boolean; source: (f: string) => string }): Selection {
+export function selectTests(x: { changed: string[]; universe: string[]; declared: string[]; pkgVersionOnly: boolean; source: (f: string) => string; preload?: string[] }): Selection {
   const universe = new Set(x.universe);
   const picks = new Map<string, Set<string>>();
   const add = (f: string, rule: string) => {
@@ -146,7 +151,7 @@ export function selectTests(x: { changed: string[]; universe: string[]; declared
   };
   const full: string[] = [];
   for (const f of x.changed) {
-    if (FULL_RE.test(f) || (f === 'package.json' && !x.pkgVersionOnly)) full.push(f);
+    if (FULL_RE.test(f) || (x.preload ?? []).includes(f) || (f === 'package.json' && !x.pkgVersionOnly)) full.push(f);
     if (universe.has(f)) add(f, 'changed');
     if (SKILL_SURFACE_RE.test(f)) CLASS_SKILL.forEach(t => add(t, `class:skill(${f})`));
     if (CODE_RE.test(f) && !/\.test\.ts$/.test(f)) CLASS_CODE.forEach(t => add(t, `class:code(${f})`));
@@ -203,6 +208,14 @@ export function judgeBunRun(file: string, r: GhResult): FileVerdict {
   else if (failLine || v.fail > 0) why = 'a (fail) line';
   else if (!ran) why = 'no "Ran N tests" line: the run was cut short';
   return { ...v, ok: why === 'ok', why };
+}
+
+/** The `[test] preload` files of a bunfig.toml, repo-relative (string or array form). */
+export function bunfigPreload(toml: string | null): string[] {
+  if (!toml) return [];
+  const m = /^\s*preload\s*=\s*(\[[^\]]*\]|"[^"\n]*"|'[^'\n]*')/m.exec(toml);
+  if (!m) return [];
+  return [...m[1].matchAll(/["']([^"'\n]+)["']/g)].map(q => path.posix.normalize(q[1]).replace(/^\.\//, ''));
 }
 
 export function bunPinFrom(workflow: string | null): string | null {
@@ -358,7 +371,8 @@ function selection(c: Ctx, state: PrState | null): { sel: Selection; mb: string;
       return '';
     }
   };
-  return { sel: selectTests({ changed, universe, declared, pkgVersionOnly: pkgVersionOnly(c, mb), source }), mb, changed };
+  const preload = bunfigPreload(source('bunfig.toml') || null);
+  return { sel: selectTests({ changed, universe, declared, pkgVersionOnly: pkgVersionOnly(c, mb), source, preload }), mb, changed };
 }
 
 // ── subcommands ─────────────────────────────────────────────────────────────
