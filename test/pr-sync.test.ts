@@ -234,10 +234,10 @@ async function run(t: Topo, argv: string[], extra: Partial<SyncDeps> = {}): Prom
 const stateDir = (t: Topo) => prStateDir({ cwd: t.clone, topic: topicFor('pr/feat'), env: envFor(t) });
 const pr = { repo: 'acme/gstack', number: 7, headRef: 'pr/feat', headOwner: 'me' };
 
-function recordValidation(t: Topo, sha: string, worst: 0 | 1): void {
+function recordValidation(t: Topo, sha: string, worst: 0 | 1, summary = worst ? '1 red' : 'all green'): void {
   const dir = stateDir(t);
   const s = readStateFor(dir, pr) as PrState;
-  writeState(dir, { ...s, validation: { sha, worst, summary: worst ? '1 red' : 'all green', at: NOW.toISOString() } });
+  writeState(dir, { ...s, validation: { sha, worst, summary, at: NOW.toISOString() } });
 }
 
 const ourFeature = (d: string) => {
@@ -694,6 +694,23 @@ describe('push', () => {
     const rt = await run(t, ['retrigger', '--message', msg, '--yes'], slow());
     expect(rt.code, rt.out.join('\n')).toBe(30);
     expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
+  });
+
+  test('a validation that waived the full suite needs --accept-full-risk on the push too', async () => {
+    const t = topology('p13', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    // gstack-pr-validate run --accept-full-risk records this summary (lib/pr-validate.ts).
+    recordValidation(t, s.sha, 0, '3/3 selected files green; FULL waived (bunfig.toml): the full suite did not run');
+    expect((await run(t, ['status'])).out[0]).toContain('validation=green-full-waived');
+    const refused = await run(t, ['push', '--yes']);
+    expect(refused.code, refused.out.join('\n')).toBe(31);
+    expect(refused.out[0]).toContain('--accept-full-risk');
+    expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
+    const r = await run(t, ['push', '--yes', '--accept-full-risk']);
+    expect(r.code, r.out.join('\n')).toBe(0);
+    expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.sha);
   });
 
   test('a push URL that is not the PR head repo is refused before anything is sent', async () => {

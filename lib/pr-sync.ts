@@ -7,7 +7,7 @@
  *
  *   gstack-pr-sync plan   --pr <n|url> [--repo o/r] [--cwd <pr worktree>]
  *   gstack-pr-sync merge  --pr <n|url> [...] [--worktree-root <dir>] [--fork-claims]
- *   gstack-pr-sync push   --pr <n|url> [...] --yes [--accept-diff-change]
+ *   gstack-pr-sync push   --pr <n|url> [...] --yes [--accept-diff-change] [--accept-full-risk]
  *   gstack-pr-sync abort  --pr <n|url> [...]
  *   gstack-pr-sync status --pr <n|url> [...]
  *
@@ -73,6 +73,9 @@ Options:
   --fork-claims           also read open fork PRs' VERSION (advisory, <= 40 reads)
   --yes                   the owner approved this push in this turn
   --accept-diff-change    push even though the code-diff proof says CHANGED
+  --accept-full-risk      push a validation that waived the full suite
+                          (its summary says "FULL waived"); only with the
+                          owner's yes to that waiver in this turn
   --message FILE          retrigger: the drafted ci: commit message
 
 First line of output: RESULT <WORD> ...
@@ -80,12 +83,13 @@ First line of output: RESULT <WORD> ...
 Exit codes: 0 synced/pushed/ok, 1 error, 2 usage or approval missing,
 10 nothing to do, 20 code conflict (resolve by hand), 21 code diff changed
 (review; push needs --accept-diff-change), 30 precondition, 31 validation
-missing or red for the staged commit, 32 PR body still stale from an earlier
-push, 40 remote moved or not fast-forward, 41 a pre-push hook or the
-remote refused the push (stop and report; never --no-verify),
-45 lock busy, 50 a sync is already staged, the scratch path holds something
-gstack-pr-sync did not make, or the local branch has unpushed commits,
-60 the version queue could not be read (never guessed).`;
+missing, red, or a waived full suite without --accept-full-risk for the
+staged commit, 32 PR body still stale from an earlier push, 40 remote moved
+or not fast-forward, 41 a pre-push hook or the remote refused the push
+(stop and report; never --no-verify), 45 lock busy, 50 a sync is already
+staged, the scratch path holds something gstack-pr-sync did not make, or
+the local branch has unpushed commits, 60 the version queue could not be
+read (never guessed).`;
 
 // ── pure helpers ────────────────────────────────────────────────────────────
 
@@ -98,6 +102,8 @@ const GENERATED_EXTRA = ['review/design-checklist.md', 'lib/dom-dump.js', 'gstac
 const RELEASE_TOOLING = ['bin/gstack-next-version', 'bin/gstack-version-bump', 'lib/version-source.ts', 'scripts/gen-agents-digest.ts', 'scripts/detect-bump.ts'];
 const PLATFORM_FILES = ['bin/gstack-next-version', 'bin/gstack-version-bump', 'scripts/detect-bump.ts', 'scripts/gen-agents-digest.ts'];
 const DIGEST = 'agents-digest/gstack-AGENTS.md';
+/** The marker gstack-pr-validate puts in a summary when --accept-full-risk let a FULL trigger pass. */
+const FULL_WAIVED_RE = /\bFULL waived \(/;
 /** A write follows its pre-write gate within this many seconds, or it is not sent. */
 const GATE_MAX_AGE_S = 60;
 
@@ -349,13 +355,13 @@ export function freshState(pr: PrInfo, extra: { headRemote: string | null; upstr
 
 interface Flags {
   sub: string; pr: string | null; repo: string | null; cwd: string; worktreeRoot: string | null;
-  forkClaims: boolean; acceptDiffChange: boolean; message: string | null; argv: string[];
+  forkClaims: boolean; acceptDiffChange: boolean; acceptFullRisk: boolean; message: string | null; argv: string[];
 }
 
 const VALUE_FLAGS = ['--pr', '--repo', '--cwd', '--worktree-root', '--message'];
 
 export function parseSyncArgs(argv: string[]): Flags {
-  const f: Flags = { sub: argv[0] ?? '', pr: null, repo: null, cwd: process.cwd(), worktreeRoot: null, forkClaims: false, acceptDiffChange: false, message: null, argv };
+  const f: Flags = { sub: argv[0] ?? '', pr: null, repo: null, cwd: process.cwd(), worktreeRoot: null, forkClaims: false, acceptDiffChange: false, acceptFullRisk: false, message: null, argv };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--') break;
@@ -371,6 +377,7 @@ export function parseSyncArgs(argv: string[]): Flags {
     else if (a === '--message') f.message = path.resolve(val());
     else if (a === '--fork-claims') f.forkClaims = true;
     else if (a === '--accept-diff-change') f.acceptDiffChange = true;
+    else if (a === '--accept-full-risk') f.acceptFullRisk = true;
     else if (a === '--yes') { /* checked by requireApproval */ }
     else throw new PrContextError(`unknown option ${a}`, 2);
   }
@@ -1021,6 +1028,10 @@ function cmdPush(c: Ctx): number {
     if (state?.bodyStaleSince) throw new PrContextError(`the PR body is still stale since the push of ${state.bodyStaleSince.slice(0, 12)}: publish the body first`, SYNC_EXIT.BODY_STALE);
     if (!state?.validation || state.validation.sha !== staged.sha) throw new PrContextError(`no validation recorded for ${staged.sha.slice(0, 12)}: run gstack-pr-validate in ${staged.scratch}`, SYNC_EXIT.VALIDATION);
     if (state.validation.worst !== 0) throw new PrContextError(`validation of ${staged.sha.slice(0, 12)} is red (${state.validation.summary})`, SYNC_EXIT.VALIDATION);
+    // gstack-pr-validate --accept-full-risk records "FULL waived (<files>)": green without the full suite.
+    if (FULL_WAIVED_RE.test(state.validation.summary) && !c.f.acceptFullRisk) {
+      throw new PrContextError(`validation of ${staged.sha.slice(0, 12)} waived the full suite (${state.validation.summary}): push it only with the owner's yes to that waiver, then pass --accept-full-risk`, SYNC_EXIT.VALIDATION);
+    }
     if (staged.proof === 'CHANGED' && !c.f.acceptDiffChange) throw new PrContextError(`the code-diff proof says CHANGED (${staged.changedFiles.join(', ')}); review, then pass --accept-diff-change`, SYNC_EXIT.DIFF_CHANGED);
     if (!isOurScratch(c, staged.scratch)) throw new PrContextError(`${staged.scratch} is no longer the scratch worktree this sync was staged in: abort and re-sync`, SYNC_EXIT.PRECONDITION);
     const head = gitOk(d, staged.scratch, ['rev-parse', 'HEAD'], 'git rev-parse').trim();
@@ -1128,7 +1139,8 @@ function cmdStatus(c: Ctx): number {
     return SYNC_EXIT.SYNCED;
   }
   const state = readStateFor(c.stateDir, c.pr);
-  const validated = state?.validation?.sha === staged.sha ? (state.validation.worst === 0 ? 'green' : 'red') : 'missing';
+  const v = state?.validation?.sha === staged.sha ? state.validation : null;
+  const validated = !v ? 'missing' : v.worst !== 0 ? 'red' : FULL_WAIVED_RE.test(v.summary) ? 'green-full-waived' : 'green';
   c.d.out(`RESULT STAGED sha=${staged.sha.slice(0, 12)} kind=${staged.kind} version=${staged.oldVersion}->${staged.version} proof=${staged.proof} validation=${validated} scratch=${staged.scratch}`);
   return SYNC_EXIT.SYNCED;
 }
