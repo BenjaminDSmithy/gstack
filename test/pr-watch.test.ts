@@ -653,6 +653,15 @@ describe('size before the PR is open', () => {
     expect((await size(path.join(clone, 'sub'))).first).toBe(root.first);
   });
 
+  test('release files count, as they do in pulls/N and in the merged-PR baseline', async () => {
+    // #3066's head: 568 churn and 7 files with them (GitHub's numbers), 521 and 3 without.
+    const clone = branch('size-release', false);
+    fs.writeFileSync(path.join(clone, 'VERSION'), '1.0.0.0\n');
+    fs.writeFileSync(path.join(clone, 'CHANGELOG.md'), '# Changelog\n\n');
+    git(clone, 'add', '-A'); git(clone, 'commit', '-q', '-m', 'chore: release');
+    expect((await size(clone)).first).toMatch(/^RESULT RED churn=3003 files=32 commits=2/);
+  });
+
   test('a branch with no merge base is an error, never a GREEN zero', async () => {
     const r = await size(branch('size-orphan', true));
     expect(r.code).toBe(1);
