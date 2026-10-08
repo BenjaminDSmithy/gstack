@@ -148,6 +148,31 @@ describe('selectTests', () => {
     expect(uncoveredCode(changed, sel(changed, { declared: ['test/a.test.ts'] }), () => true)).toEqual([]);
   });
 
+  test('the class tripwires run for every root they scan: make-pdf/test, ios-qa, browser-skills, browse/src, design/src, hosts', () => {
+    const picked = (f: string) => sel([f]).files.flatMap(s => s.rules.map(r => `${s.file} ${r}`));
+    for (const f of ['make-pdf/test/brand-new.test.ts', 'ios-qa/daemon/test/new.test.ts', 'ios-qa/scripts/new.test.ts', 'browser-skills/x/new.test.ts']) {
+      expect(picked(f), f).toContain(`test/spawnsync-timeout-tripwire.test.ts class:test(${f})`);
+    }
+    for (const f of ['browse/src/foo.ts', 'design/src/foo.ts', 'hosts/foo.ts']) {
+      expect(picked(f), f).toContain(`test/egress-receipt-wiring.test.ts class:code(${f})`);
+    }
+  });
+
+  test('the class roots cannot drift from the roots the tripwires themselves scan', () => {
+    const REPO = path.resolve(import.meta.dir, '..');
+    const literal = (file: string, name: string) => {
+      const m = new RegExp(`const ${name} = \\[([^\\]]*)\\]`).exec(fs.readFileSync(path.join(REPO, file), 'utf8'));
+      expect(m, `${file} ${name}`).not.toBeNull();
+      return [...m![1].matchAll(/'([^']+)'/g)].map(q => q[1]);
+    };
+    const scan = literal('test/spawnsync-timeout-tripwire.test.ts', 'SCAN_ROOTS');
+    const sweep = literal('test/egress-receipt-wiring.test.ts', 'SWEEP');
+    expect(scan.length).toBeGreaterThan(3);
+    expect(sweep.length).toBeGreaterThan(3);
+    for (const root of scan) expect(sel([`${root}/zz-new.test.ts`]).files.map(f => f.file), root).toContain('test/spawnsync-timeout-tripwire.test.ts');
+    for (const root of sweep) expect(sel([`${root}/zz-new.ts`]).files.map(f => f.file), root).toContain('test/egress-receipt-wiring.test.ts');
+  });
+
   test('a path named in a test source selects it; release files never do', () => {
     expect(sel(['docs/notes.txt']).files.map(f => f.file)).toEqual(['test/a.test.ts']);
     expect(sel(['CHANGELOG.md']).files.map(f => f.file)).not.toContain('test/a.test.ts');
