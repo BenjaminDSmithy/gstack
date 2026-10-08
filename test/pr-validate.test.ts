@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { validationEnv, selectTests, judgeBunRun, bunPinFrom, macosNamedFrom, validateMain, defaultTool, type ValidateDeps } from '../lib/pr-validate';
+import { validationEnv, selectTests, judgeBunRun, bunPinFrom, macosNamedFrom, validateMain, defaultTool, bunfigPreload, type ValidateDeps } from '../lib/pr-validate';
 import { prStateDir, topicFor, readStateFor, type GhRunner } from '../lib/pr-context';
 
 setDefaultTimeout(180_000);
@@ -93,6 +93,16 @@ describe('selectTests', () => {
     expect(sel(['tsconfig.test.json', 'scripts/test-free-shards.ts']).full).toHaveLength(2);
     expect(sel(['package.json'], { pkgVersionOnly: false }).full).toEqual(['package.json']);
     expect(sel(['package.json']).full).toEqual([]);
+    expect(sel(['scripts/lib/shard-engine.ts']).full).toEqual(['scripts/lib/shard-engine.ts']);
+  });
+
+  test('bunfig.toml, its preload files and the free/paid split helper touch every test: FULL', () => {
+    for (const f of ['bunfig.toml', 'test-setup.ts', 'test/helpers/paid-test-set.ts']) expect(sel([f]).full, f).toEqual([f]);
+    expect(sel(['test/helpers/new-preload.ts']).full).toEqual([]);
+    expect(sel(['test/helpers/new-preload.ts'], { preload: ['test/helpers/new-preload.ts'] }).full).toEqual(['test/helpers/new-preload.ts']);
+    expect(bunfigPreload('[test]\n# comment\npreload = [\n  "./test-setup.ts",\n  "./test/helpers/b.ts",\n]\n')).toEqual(['test-setup.ts', 'test/helpers/b.ts']);
+    expect(bunfigPreload('[test]\npreload = "./one.ts"\n')).toEqual(['one.ts']);
+    expect(bunfigPreload(null)).toEqual([]);
   });
 
   test('declared files always run; files outside the free universe never do', () => {
