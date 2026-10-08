@@ -148,7 +148,19 @@ describe('pure helpers', () => {
     const body = spliceFacts(TEMPLATE.replace('Because.', 'Call 123456789012 now.'), renderFactsBlock({ ...FACTS, head: `123456789012${'a'.repeat(28)}` }));
     const phoneLines = (r: ReturnType<typeof scan>) => r.findings.filter(f => f.id === 'pii.phone.e164').map(f => f.line);
     expect(phoneLines(scan(body, { repoVisibility: 'public' }))).toEqual([3, 9, 15]);
-    expect(phoneLines(scanOutgoing(body, []))).toEqual([3]);
+    const head = `123456789012${'a'.repeat(28)}`;
+    expect(phoneLines(scanOutgoing(body, [], [head, FACTS.codeSha, FACTS.baseSha]))).toEqual([3]);
+    // Without the ids the block's own digits are findings again: only a known id is exempt.
+    expect(phoneLines(scanOutgoing(body, [], []))).toEqual([3, 9, 15]);
+  });
+
+  test('a backticked number in the facts block that is not one of its commit ids is still scanned', () => {
+    const block = renderFactsBlock({ ...FACTS, validation: { sha: FACTS.head, worst: 0, summary: 'card on file `4111111111111111`, call `61291234567`' } });
+    const body = spliceFacts(TEMPLATE, block);
+    const ids = [FACTS.head, FACTS.codeSha, FACTS.baseSha, FACTS.diff.patchId, ...FACTS.merges.map(m => m.upstream)];
+    const kinds = scanOutgoing(body, [], ids).findings.map(f => f.id);
+    expect(kinds).toContain('pii.cc');
+    expect(kinds.some(k => k.startsWith('pii.phone'))).toBe(true);
   });
 
   test('manifestWithoutVersion blanks only the top-level version, else keeps the text', () => {
