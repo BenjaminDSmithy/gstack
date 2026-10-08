@@ -249,6 +249,16 @@ describe('run', () => {
     expect(r.out.some(l => l.includes('same-tree-green 150'))).toBe(true);
   });
 
+  test('the machine-readable RESULT line comes first, whatever the verdict', async () => {
+    const verdicts = [
+      await triage([{ id: 600, sha: B, shard: 4, fixture: '37346036310' }]),
+      await triage([{ id: 601, sha: B, shard: 2, result: { status: 'failed', exitCode: 1, failingFiles: ['test/x.test.ts'] } }]),
+      await triage([{ id: 602, sha: A, shard: 4, fixture: '37346036310' }], ['--run', '602']),
+      await triage([]),
+    ];
+    expect(verdicts.map(v => v.out[0].split(' ').slice(0, 2).join(' '))).toEqual(['RESULT DRAFTED', 'RESULT NO_DRAFT', 'RESULT NO_DRAFT', 'RESULT NOTHING']);
+  });
+
   test('a draft over shards with different causes gives each shard its own evidence line', async () => {
     const draftOf = (r: { out: string[] }) => fs.readFileSync(r.out.find(l => l.startsWith('RESULT DRAFTED'))!.match(/message=(\S+)/)![1], 'utf8');
     // IOCP on shard 4 and a real GLib abort (run 37252003926 shard 2) on shard 2
