@@ -599,12 +599,12 @@ branch name wherever the instructions say "the base branch" or `<default>`.
 ```bash
 BASE="${BASE_BRANCH:-main}"
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
-UP_REMOTE=$(git remote | while IFS= read -r r; do u=$(git remote get-url "$r" 2>/dev/null); case "$u" in */"$REPO"|*:"$REPO"|*/"$REPO".git|*:"$REPO".git) printf '%s\n' "$r" ;; esac; done | head -n 1)
+UP_REMOTE=$(git remote | while IFS= read -r r; do u=$(git remote get-url "$r" 2>/dev/null); case "$u" in (*/"$REPO"|*:"$REPO"|*/"$REPO".git|*:"$REPO".git) printf '%s\n' "$r" ;; esac; done | head -n 1)
 if [ -z "$REPO" ] || [ -z "$UP_REMOTE" ]; then
   echo "PR_PREP_BASE: unresolved (repo '${REPO:-?}', no git remote names it) - the audit is UNVERIFIED"
   exit 0
 fi
-git fetch -q --no-tags "$UP_REMOTE" "+refs/heads/$BASE:refs/pr-prep/$UP_REMOTE/$BASE" || { echo "PR_PREP_BASE: fetch failed - the audit is UNVERIFIED"; exit 0; }
+git fetch -q --no-tags "$UP_REMOTE" "+refs/heads/${BASE}:refs/pr-prep/${UP_REMOTE}/${BASE}" || { echo "PR_PREP_BASE: fetch failed - the audit is UNVERIFIED"; exit 0; }
 BASE_SHA=$(git rev-parse "refs/pr-prep/$UP_REMOTE/$BASE")
 COMMITS=$(git rev-list --no-merges "$BASE_SHA"..HEAD 2>/dev/null)
 if [ -z "$COMMITS" ]; then

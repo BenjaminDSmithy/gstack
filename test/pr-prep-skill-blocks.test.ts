@@ -47,6 +47,19 @@ function sectionAfter(heading: string): string {
   return SKILL_MD.slice(at, next < 0 ? undefined : next);
 }
 
+/** Every top-level ```bash block (indented ones are list-item examples) in `text`. */
+const bashBlocks = (text: string): string[] => [...text.matchAll(/^```bash\n([\s\S]*?)\n```$/gm)].map((m) => m[1]);
+
+/** The first top-level bash block after `heading` that contains `token`, or throw. */
+function bashBlockWith(heading: string, token: string): string {
+  const at = SKILL_MD.indexOf(heading);
+  if (at < 0) throw new Error(`heading not found in pr-prep/SKILL.md: ${heading}`);
+  const block = bashBlocks(SKILL_MD.slice(at)).find((b) => b.includes(token));
+  if (!block) throw new Error(`no bash block with ${token} after: ${heading}`);
+  return block;
+}
+
+const STEP1_BLOCK = bashBlockWith('## Step 1: Pre-flight', 'PR_PREP_BASE');
 const FETCH_BLOCK = bashBlockAfter('## Step 3:').replaceAll('~/.claude/skills/gstack/bin/gstack-issue-guard', GUARD);
 const CODEX_BLOCK = bashBlockAfter('## Step 4.4:')
   .replaceAll('~/.claude/skills/gstack/bin/gstack-codex-probe', path.join(ROOT, 'bin', 'gstack-codex-probe'))
@@ -89,6 +102,80 @@ function run(shell: string, block: string, opts: { stub: string; cwd?: string; e
   });
   return { code: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}${r.error ? `\n[spawn error] ${r.error}` : ''}` };
 }
+
+// zsh reads `$BASE:r` as its `:r` (drop the extension) modifier, and macOS
+// /bin/bash 3.2 ends a `$(...)` at a case pattern's bare `)`. Either one made
+// every audit print `PR_PREP_BASE: fetch failed` (UNVERIFIED, no base SHA for
+// Steps 2 and 5b), which /ship's Step 1.5 never blocks on (2026-10-08).
+describe('pr-prep Step 1: the upstream base pin', () => {
+  test('no pr-prep shell block puts a colon straight after an unbraced variable (a zsh modifier)', () => {
+    const own = [SKILL_MD.slice(SKILL_MD.indexOf('## Detect command'))];
+    const sectionsDir = path.join(ROOT, 'pr-prep', 'sections');
+    for (const f of fs.readdirSync(sectionsDir).filter((n) => n.endsWith('.md'))) own.push(fs.readFileSync(path.join(sectionsDir, f), 'utf-8'));
+    const hits = own.flatMap(bashBlocks).flatMap((b) => b.split('\n')).filter((l) => /\$[A-Za-z_][A-Za-z0-9_]*:[A-Za-z&]/.test(l));
+    expect(hits).toEqual([]);
+  });
+
+  // The runner's bash, zsh, and macOS's /bin/bash 3.2 when it is another binary.
+  const shells = [...SHELLS, ...(fs.existsSync('/bin/bash') ? ['/bin/bash'] : [])]
+    .map((s) => ({ s, real: fs.realpathSync(s.startsWith('/') ? s : Bun.which(s)!) }))
+    .filter((x, i, all) => all.findIndex((y) => y.real === x.real) === i)
+    .map((x) => x.s);
+
+  let clone: string;
+  let upMain: string;
+  beforeAll(() => {
+    const git = (cwd: string, ...a: string[]) => {
+      const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', '-c', 'init.defaultBranch=main', ...a], {
+        cwd, encoding: 'utf-8', timeout: 30_000,
+      });
+      if (r.status !== 0) throw new Error(`git ${a.join(' ')}: ${r.stderr}`);
+      return r.stdout.trim();
+    };
+    const root = fs.mkdtempSync(path.join(tmp, 'step1-'));
+    const up = path.join(root, 'up', 'garrytan', 'gstack.git');
+    const fork = path.join(root, 'fork', 'me', 'gstack.git');
+    for (const bare of [up, fork]) {
+      fs.mkdirSync(bare, { recursive: true });
+      git(bare, 'init', '-q', '--bare', '-b', 'main');
+    }
+    // A fork whose main is unrelated and stale: Step 1 must pin upstream, never origin.
+    const seed = (dir: string, remote: string, file: string) => {
+      fs.mkdirSync(dir);
+      git(dir, 'init', '-q', '-b', 'main');
+      fs.writeFileSync(path.join(dir, file), file);
+      git(dir, 'add', file);
+      git(dir, 'commit', '-q', '-m', `seed ${file}`);
+      git(dir, 'push', '-q', remote, 'main');
+    };
+    seed(path.join(root, 'fork-seed'), fork, 'fork.txt');
+    const upSeed = path.join(root, 'up-seed');
+    seed(upSeed, up, 'base.txt');
+    clone = path.join(root, 'clone');
+    git(root, 'clone', '-q', '-o', 'upstream', up, clone);
+    git(clone, 'remote', 'add', 'origin', fork);
+    git(clone, 'checkout', '-q', '-b', 'feat/x');
+    fs.writeFileSync(path.join(clone, 'feat.txt'), 'feat');
+    git(clone, 'add', 'feat.txt');
+    git(clone, 'commit', '-q', '-m', 'feat: add feat');
+    // Upstream moves after the clone, so only a real fetch finds this SHA.
+    fs.writeFileSync(path.join(upSeed, 'later.txt'), 'later');
+    git(upSeed, 'add', 'later.txt');
+    git(upSeed, 'commit', '-q', '-m', 'later');
+    git(upSeed, 'push', '-q', up, 'main');
+    upMain = git(up, 'rev-parse', 'main');
+  });
+
+  for (const shell of shells) {
+    test(`under ${shell}: pins upstream's main by SHA through the remote that names the repo`, () => {
+      const stub = stubDir('gh', 'case "$1 $2" in "repo view") echo garrytan/gstack ;; *) exit 1 ;; esac');
+      const r = run(shell, STEP1_BLOCK, { stub, cwd: clone });
+      expect(r.out).not.toContain('UNVERIFIED');
+      expect(r.out).toContain(`PR_PREP_BASE: garrytan/gstack@main ${upMain} via upstream`);
+      expect(r.code).toBe(0);
+    });
+  }
+});
 
 describe('pr-prep Step 3: fetch health is checked before the guard', () => {
   test('block checks gh exit status and JSON shape before piping to the guard', () => {
