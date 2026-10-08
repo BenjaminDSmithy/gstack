@@ -121,6 +121,15 @@ describe('mode sections', () => {
     expectMentions(section('watch'), [['Stop', 'sync', 'publish'], ['Never', 'ack', 'owner']], 'watch section');
   });
 
+  test("watch's classes match the helper: a trailer alone is P2, a conflict is acked and then synced", () => {
+    // gstack-pr-watch reads our Co-authored-by trailer on a base commit as P0
+    // only when the commit cites or is linked to this PR (upstream credits
+    // per PR, so one credit sits on every open PR's base): P2 otherwise.
+    const watch = section('watch');
+    expectTokens(watch, ['credited-elsewhere', 'mergeable-dirty', 'mergeable-behind', 'capy-ai[bot]'], 'watch section');
+    expectMentions(watch, [['trailer', 'P2'], ['conflict', 'ack', 'sync']], 'watch section');
+  });
+
   test('sync merges, never rebases, and stops on a code conflict', () => {
     expectMentions(section('sync'), [['never', 'rebase'], ['code', 'conflict', 'STOP']], 'sync section');
   });
