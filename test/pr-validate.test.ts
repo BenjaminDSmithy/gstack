@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { validationEnv, selectTests, judgeBunRun, bunPinFrom, macosNamedFrom, validateMain, defaultTool, bunfigPreload, type ValidateDeps, type ToolRunner } from '../lib/pr-validate';
+import { validationEnv, selectTests, judgeBunRun, bunPinFrom, macosNamedFrom, validateMain, defaultTool, bunfigPreload, writeCiGitConfig, type ValidateDeps, type ToolRunner } from '../lib/pr-validate';
 import { prStateDir, topicFor, readStateFor, type GhRunner } from '../lib/pr-context';
 
 setDefaultTimeout(180_000);
@@ -34,16 +34,33 @@ function write(dir: string, rel: string, text: string): void {
 }
 
 describe('validationEnv', () => {
-  test('drops agent markers and provider credentials, sets CI git default, real TMPDIR and the seed base', () => {
+  test('drops agent markers, provider credentials and the caller\'s git config overrides; sets CI\'s git config, real TMPDIR and the seed base', () => {
     const env = validationEnv({
       PATH: '/usr/bin', HOME: '/h', CLAUDECODE: '1', AI_AGENT: 'claude', CLAUDE_CODE_X: 'y', GSTACK_SKIP_RENDER_HOOK: '1',
       EVALS: '1', EVALS_ALL: '1', GH_TOKEN: 't', GITHUB_TOKEN: 't', ANTHROPIC_API_KEY: 'k', OPENAI_API_KEY: 'k',
-      GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'a.b', GIT_CONFIG_VALUE_0: 'c',
-    }, '/real/tmp', 'abc');
-    for (const gone of ['CLAUDECODE', 'AI_AGENT', 'CLAUDE_CODE_X', 'GSTACK_SKIP_RENDER_HOOK', 'EVALS', 'EVALS_ALL', 'GH_TOKEN', 'GITHUB_TOKEN', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY']) {
+      GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'a.b', GIT_CONFIG_VALUE_0: 'c', GIT_CONFIG_PARAMETERS: "'x.y=z'", GIT_CONFIG_GLOBAL: '/dev/null',
+    }, '/real/tmp', 'abc', '/state/ci.gitconfig');
+    for (const gone of ['CLAUDECODE', 'AI_AGENT', 'CLAUDE_CODE_X', 'GSTACK_SKIP_RENDER_HOOK', 'EVALS', 'EVALS_ALL', 'GH_TOKEN', 'GITHUB_TOKEN', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY',
+      'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_PARAMETERS']) {
       expect(env[gone], gone).toBeUndefined();
     }
-    expect(env).toMatchObject({ PATH: '/usr/bin', HOME: '/h', TMPDIR: '/real/tmp/', GSTACK_FREE_SEED_BASE: 'abc', GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'a.b', GIT_CONFIG_KEY_1: 'init.defaultBranch', GIT_CONFIG_VALUE_1: 'main' });
+    expect(env).toMatchObject({ PATH: '/usr/bin', HOME: '/h', TMPDIR: '/real/tmp/', GSTACK_FREE_SEED_BASE: 'abc', GIT_CONFIG_GLOBAL: '/state/ci.gitconfig' });
+  });
+
+  test('git reads CI\'s global config instead of the caller\'s, and a test\'s own isolation hides it, as in CI', () => {
+    const dir = path.join(ROOT, 'gitcfg');
+    write(dir, 'home/.gitconfig', '[init]\n\tdefaultBranch = develop\n');
+    const env = validationEnv({ PATH: process.env.PATH, HOME: path.join(dir, 'home') }, dir, null, writeCiGitConfig(dir));
+    const head = (e: NodeJS.ProcessEnv, name: string) => {
+      const run = (args: string[]) => spawnSync('git', args, { cwd: dir, env: e, encoding: 'utf8', timeout: 30_000 });
+      expect(run(['init', '-q', name]).status).toBe(0);
+      return run(['-C', name, 'symbolic-ref', 'HEAD']).stdout.trim();
+    };
+    expect(head(env, 'plain')).toBe('refs/heads/main');
+    // CI sets init.defaultBranch with `git config --global`, which GIT_CONFIG_GLOBAL=/dev/null hides.
+    expect(head({ ...env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }, 'isolated')).toBe('refs/heads/master');
+    const cfg = spawnSync('git', ['config', '--global', '--get', 'user.email'], { env, encoding: 'utf8', timeout: 30_000 });
+    expect(cfg.stdout.trim()).toBe('free-tests-ci@gstack.test');
   });
 
   test('drops every bun agent-mode trigger and every credential-shaped name; keeps look-alike metadata', () => {
