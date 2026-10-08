@@ -25,9 +25,11 @@
  * at a background rate, so "it also happened elsewhere" never clears a run.
  * This helper never commits or pushes; with the owner's yes,
  * `gstack-pr-sync retrigger` builds and pushes the commit from the drafted
- * message.
+ * message, and only while the draft's binding (repo, PR, run, head and the
+ * message's sha256) still matches the PR's current head and newest run.
  */
 
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -413,6 +415,71 @@ export function pruneDrafts(dir: string): void {
   for (const e of entries) if (DRAFT_FILE_RE.test(e)) fs.rmSync(path.join(dir, e), { force: true });
 }
 
+/**
+ * The machine-readable binding beside each ci: draft (ci-retrigger-<run>.json):
+ * the repo, PR, run and head it was triaged on, and the sha256 of the exact
+ * message bytes. `gstack-pr-sync retrigger` pushes a draft only through
+ * readRetriggerDraft, so none of triage's gates can be skipped at the push.
+ */
+export interface RetriggerBinding {
+  v: 1; repo: string; pr: number; run: number; head: string; tree: string | null; messageSha256: string; triagedAt: string;
+  shards: { shard: number; klass: ShardClass; signature: 'IOCP' | 'GLib' | null; sameTreeGreen: string | null }[];
+}
+
+const MESSAGE_FILE_RE = /^ci-retrigger-(\d+)\.txt$/;
+const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex');
+
+/** Write a draft pair (message, then its binding) into the PR state dir; returns both paths. */
+export function writeRetriggerDraft(dir: string, x: { repo: string; pr: number; run: number; head: string; tree: string | null; message: string; shards: ShardTriage[] }): { message: string; binding: string } {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const message = path.join(dir, `ci-retrigger-${x.run}.txt`);
+  fs.writeFileSync(message, x.message, { mode: 0o600 });
+  const b: RetriggerBinding = {
+    v: 1, repo: x.repo, pr: x.pr, run: x.run, head: x.head, tree: x.tree, messageSha256: sha256(x.message), triagedAt: new Date().toISOString(),
+    shards: x.shards.map(t => ({ shard: t.shard, klass: t.klass, signature: t.signature, sameTreeGreen: t.sameTreeGreen })),
+  };
+  const binding = path.join(dir, `ci-retrigger-${x.run}.json`);
+  fs.writeFileSync(binding, `${JSON.stringify(b, null, 2)}\n`, { mode: 0o600 });
+  return { message, binding };
+}
+
+/**
+ * A ci: draft as `gstack-pr-sync retrigger` may push it: a
+ * ci-retrigger-<run>.txt in this PR's state dir, whose binding names this
+ * repo, PR and run and whose bytes are the ones triage wrote. Anything else
+ * throws PrContextError 30. The caller still compares binding.head (and
+ * binding.tree) with the head it pinned, and pushes the returned bytes, not
+ * a re-read of the file.
+ */
+export function readRetriggerDraft(file: string, expect: { stateDir: string; repo: string; pr: number }): { message: string; binding: RetriggerBinding } {
+  const refuse = (why: string): never => {
+    throw new PrContextError(`${why}: push only a draft gstack-pr-ci-triage wrote for this PR's current head (re-run it)`, 30);
+  };
+  let real = '';
+  let dir = '';
+  try {
+    real = fs.realpathSync(file);
+    dir = fs.realpathSync(expect.stateDir);
+  } catch {
+    refuse(`${file} is not a ci: draft in this PR's state dir`);
+  }
+  const m = MESSAGE_FILE_RE.exec(path.basename(real));
+  if (path.dirname(real) !== dir || !m) refuse(`${file} is not a ci-retrigger-<run>.txt draft in this PR's state dir (${dir})`);
+  const run = Number(m![1]);
+  let b: Partial<RetriggerBinding> = {};
+  try {
+    b = JSON.parse(fs.readFileSync(path.join(dir, `ci-retrigger-${run}.json`), 'utf8')) as Partial<RetriggerBinding>;
+  } catch {
+    refuse(`the draft for run ${run} has no readable binding (ci-retrigger-${run}.json)`);
+  }
+  if (b.v !== 1 || b.repo !== expect.repo || b.pr !== expect.pr || b.run !== run || typeof b.head !== 'string' || !OBJECT_ID_RE.test(b.head)) {
+    refuse(`the binding of the draft for run ${run} does not name ${expect.repo} PR ${expect.pr}, run ${run} and a head`);
+  }
+  const message = fs.readFileSync(real, 'utf8');
+  if (sha256(message) !== b.messageSha256) refuse(`the draft for run ${run} changed after triage wrote it`);
+  return { message, binding: b as RetriggerBinding };
+}
+
 function treeOf(d: TriageDeps, cwd: string, sha: string): string | null {
   const r = d.git(['rev-parse', `${sha}^{tree}`], { cwd });
   return r.status === 0 ? r.stdout.trim() : null;
@@ -534,15 +601,11 @@ async function cmdRun(d: TriageDeps, f: Flags): Promise<number> {
     return TRIAGE_EXIT.NO_DRAFT;
   }
   await yieldToSignals();
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const file = path.join(dir, `ci-retrigger-${runId}.txt`);
-  fs.writeFileSync(file, draftMessage({ run: runId, head: pr.headOid, shards: triaged }), { mode: 0o600 });
-  // The machine-readable binding: which head and run this draft was triaged on.
-  const binding = path.join(dir, `ci-retrigger-${runId}.json`);
-  fs.writeFileSync(binding, `${JSON.stringify({
-    v: 1, repo, pr: pr.number, run: runId, head: pr.headOid, tree: treeOf(d, f.cwd, pr.headOid), triagedAt: new Date().toISOString(),
-    shards: triaged.map(t => ({ shard: t.shard, klass: t.klass, signature: t.signature, sameTreeGreen: t.sameTreeGreen })),
-  }, null, 2)}\n`, { mode: 0o600 });
+  // The message and its binding: the head, run and bytes the push will be checked against.
+  const { message: file, binding } = writeRetriggerDraft(dir, {
+    repo, pr: pr.number, run: runId, head: pr.headOid, tree: treeOf(d, f.cwd, pr.headOid),
+    message: draftMessage({ run: runId, head: pr.headOid, shards: triaged }), shards: triaged,
+  });
   d.out(`RESULT DRAFTED run=${runId} message=${file} binding=${binding}`);
   for (const line of detail) d.out(line);
   d.out(`NEXT with the owner's yes in this turn: gstack-pr-sync retrigger --pr ${pr.number} --repo ${repo} --cwd ${shq(f.cwd)} --message ${shq(file)} --yes (it builds and pushes the empty commit; never commit or push by hand), then gstack-pr-body publish (its facts name the new head)`);
