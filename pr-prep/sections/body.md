@@ -41,11 +41,12 @@ the body's sha256 from render's `RESULT` line. On yes:
 
 - Exit 20 naming the body's sha256: the file is not the body the owner
   approved (it was re-rendered). Ask again with the new sha256.
-- Exit 20 with `live-sha256=<x>`: the live body is not the one last
+- Exit 20 with `live-diff=<x>`: the live body is not the one last
   published here (an owner or maintainer edit, or the first publish over a
   hand-written body). Show the owner the enveloped diff, and only after
-  they accept it re-run with `--accept-live-diff <x>`. If the live body
-  changes again, publish shows a new diff and a new sha256.
+  they accept it re-run with `--accept-live-diff <x>`. `<x>` pairs that
+  live body with this rendered body: if either one changes, publish shows
+  a new diff and a new value.
 - Exit 30 naming the PR head: a push landed after the render, so the
   facts describe an older head. Render again, show the owner, and ask
   again with the new sha256. A sync or `ci:` push marks the body stale

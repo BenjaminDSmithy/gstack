@@ -13,7 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   normalizeBody, renderFactsBlock, spliceFacts, stripFacts, carryLiveness, lostOwnerContent, lintBody, livenessOf,
-  publishedVersions, scanOutgoing, lineDiff, bodyMain, manifestWithoutVersion, FACTS_BEGIN, FACTS_END, sha256, type Facts, type BodyDeps,
+  publishedVersions, scanOutgoing, lineDiff, bodyMain, manifestWithoutVersion, liveDiffKey, FACTS_BEGIN, FACTS_END, sha256, type Facts, type BodyDeps,
 } from '../lib/pr-body';
 import { prStateDir, topicFor, readStateFor, writeState, defaultGit, type GhRunner, type PrState } from '../lib/pr-context';
 import { listReceipts } from '../lib/egress-receipt';
@@ -281,8 +281,8 @@ function fixture(name: string, liveInitial: string, opts: { state?: string; view
   const shaOf = (file: string) => sha256(fs.readFileSync(file, 'utf8')).slice(0, 12);
   // publish as the skill runs it: the owner's yes bound to the body's sha256.
   const publish = (file: string, ...extra: string[]) => call(['publish', '--body', file, '--body-sha256', shaOf(file), '--yes', ...extra]);
-  // The owner accepted the live body as it is right now.
-  const acceptLive = () => ['--accept-live-diff', sha256(normalizeBody(live)).slice(0, 12)];
+  // The owner accepted the diff of the live body as it is right now against this body file.
+  const acceptLive = (file: string) => ['--accept-live-diff', liveDiffKey(normalizeBody(live), fs.readFileSync(file, 'utf8')).slice(0, 12)];
   // A code commit pushed to the fork's pr/b, the way a sync push or another push lands; returns its sha.
   // Any files, committed and pushed to the fork's pr/b; returns the commit's sha.
   const pushFiles = (files: Record<string, string>, subject: string) => {
@@ -461,8 +461,8 @@ describe('publish', () => {
     expect(await f.call(['publish', '--body', file, '--body-sha256', f.shaOf(file)])).toBe(2);
     f.out.length = 0;
     expect(await f.publish(file)).toBe(20);
-    expect(f.out[0]).toMatch(/^RESULT REFUSED .*live-sha256=[0-9a-f]{12}/);
-    const shown = f.out[0].match(/live-sha256=([0-9a-f]{12})/)![1];
+    expect(f.out[0]).toMatch(/^RESULT REFUSED live-diff=[0-9a-f]{12} /);
+    const shown = f.out[0].match(/live-diff=([0-9a-f]{12})/)![1];
     expect(f.out.join('\n')).toContain('BEGIN UNTRUSTED TRACKER CONTENT');
     expect(f.edits).toHaveLength(0);
     const home = path.join(f.base, 'home');
@@ -488,7 +488,7 @@ describe('publish', () => {
     };
     writeState(f.dir, state);
     f.out.length = 0;
-    expect(await f.publish(h1file, ...f.acceptLive())).toBe(30);
+    expect(await f.publish(h1file, ...f.acceptLive(h1file))).toBe(30);
     expect(f.out[0]).toMatch(new RegExp(`^RESULT PRECONDITION .*${h2.slice(0, 12)}.*re-render`));
     expect(f.edits).toHaveLength(0);
     f.out.length = 0;
@@ -499,7 +499,7 @@ describe('publish', () => {
     const h2file = await rendered(f);
     expect(f.out[0]).toContain('body-stale-since=');
     f.out.length = 0;
-    expect(await f.publish(h2file, ...f.acceptLive())).toBe(30);
+    expect(await f.publish(h2file, ...f.acceptLive(h2file))).toBe(30);
     expect(f.out[0]).toMatch(/^RESULT PRECONDITION .*not in the PR head's history/);
     // Stale since h2, and a later push h3 the body names: published, cleared.
     const h3 = f.pushCommit('three');
@@ -507,7 +507,7 @@ describe('publish', () => {
     const h3file = await rendered(f);
     expect(fs.readFileSync(h3file, 'utf8')).toContain(`Head \`${h3.slice(0, 12)}\``);
     f.out.length = 0;
-    expect(await f.publish(h3file, ...f.acceptLive())).toBe(0);
+    expect(await f.publish(h3file, ...f.acceptLive(h3file))).toBe(0);
     expect(f.out[0]).toContain(`cleared-stale=${h2.slice(0, 12)}`);
     expect(readStateFor(f.dir, prRef)!.bodyStaleSince).toBeNull();
     f.out.length = 0;
@@ -519,7 +519,7 @@ describe('publish', () => {
     const f = fixture('readback', TEMPLATE, { storeEdit: sent => `${sent}MAINTAINER-NOTE please split this PR\n` });
     const file = await rendered(f);
     f.out.length = 0;
-    expect(await f.publish(file, ...f.acceptLive())).toBe(1);
+    expect(await f.publish(file, ...f.acceptLive(file))).toBe(1);
     expect(f.out[0]).toMatch(/^RESULT ERROR /);
     const text = f.out.join('\n');
     expect(text.slice(text.indexOf('BEGIN UNTRUSTED TRACKER CONTENT'))).toContain('+ MAINTAINER-NOTE please split this PR');
@@ -531,7 +531,7 @@ describe('publish', () => {
     // The stored body kept the attachments and ticks but rewrote the facts block.
     const g = fixture('readback-facts', TEMPLATE, { storeEdit: sent => sent.replace(/Commits: \d+/, 'Commits: 999') });
     const gfile = await rendered(g);
-    expect(await g.publish(gfile, ...g.acceptLive())).toBe(1);
+    expect(await g.publish(gfile, ...g.acceptLive(gfile))).toBe(1);
     expect(fs.readdirSync(g.dir).some(n => n.startsWith('pr-body-restore-'))).toBe(true);
   });
 
@@ -541,7 +541,7 @@ describe('publish', () => {
     const r1 = await rendered(f);
     expect(diffLine(r1)).not.toContain('since the last publish');
     expect(diffLine(await rendered(f))).not.toContain('since the last publish');
-    expect(await f.publish(r1, ...f.acceptLive())).toBe(0);
+    expect(await f.publish(r1, ...f.acceptLive(r1))).toBe(0);
     f.pushCommit('two');
     expect(diffLine(await rendered(f))).toContain(', changed since the last publish');
     const r2 = await rendered(f);
@@ -555,7 +555,7 @@ describe('publish', () => {
     const diffLine = (file: string) => fs.readFileSync(file, 'utf8').split('\n').find(l => l.startsWith('- PR diff'))!;
     const r1 = await rendered(f);
     const first = diffLine(r1);
-    expect(await f.publish(r1, ...f.acceptLive())).toBe(0);
+    expect(await f.publish(r1, ...f.acceptLive(r1))).toBe(0);
     // A sync's re-version: VERSION, CHANGELOG and package.json's version only.
     f.pushFiles({ VERSION: '1.0.2.0\n', 'CHANGELOG.md': '# Changelog\n\n## [1.0.2.0] - 2026-10-03\n\n- ours\n\n## [1.0.0.0] - 2026-10-01\n\n- base\n', 'package.json': pkgJson('1.0.2.0') }, 'chore: re-version');
     expect(diffLine(await rendered(f))).toBe(first.replace(/\.$/, ', unchanged since the last publish.'));
@@ -572,7 +572,7 @@ describe('publish', () => {
     const hand = path.join(f.base, 'hand.md');
     fs.writeFileSync(hand, normalizeBody(fs.readFileSync(file, 'utf8').replace(IMG66, 'Screenshot to follow from @me.')));
     f.out.length = 0;
-    expect(await f.publish(hand, ...f.acceptLive())).toBe(20);
+    expect(await f.publish(hand, ...f.acceptLive(hand))).toBe(20);
     expect(f.out[0]).toMatch(/^RESULT REFUSED .*drop live owner content/);
     expect(f.out).toContain('LOST attachment https://github.com/user-attachments/assets/a3f4ccb0-1111-2222-3333-444455556666');
     expect(f.edits).toHaveLength(0);
@@ -591,12 +591,12 @@ describe('publish', () => {
       fs.writeFileSync(patched, edit(text));
       expect(fs.readFileSync(patched, 'utf8')).not.toBe(text);
       f.out.length = 0;
-      expect(await f.publish(patched, ...f.acceptLive())).toBe(20);
+      expect(await f.publish(patched, ...f.acceptLive(patched))).toBe(20);
       expect(f.out[0]).toMatch(/^RESULT REFUSED .*facts block .*render/);
     }
     expect(f.edits).toHaveLength(0);
     expect(listReceipts(path.join(f.base, 'home')).filter(r => r.sink === 'pr-prep')).toEqual([]);
-    expect(await f.publish(file, ...f.acceptLive())).toBe(0);
+    expect(await f.publish(file, ...f.acceptLive(file))).toBe(0);
   });
 
   test('a refusing pre-write gate stops an OPEN PR\'s publish: injected, and the real watch poll on a maintainer comment', async () => {
@@ -604,7 +604,7 @@ describe('publish', () => {
     const file = await rendered(f);
     f.deps.preWriteGate = () => ({ ok: false, reason: 'unacknowledged P0 superseded [x1]' });
     f.out.length = 0;
-    expect(await f.publish(file, ...f.acceptLive())).toBe(30);
+    expect(await f.publish(file, ...f.acceptLive(file))).toBe(30);
     expect(f.out[0]).toMatch(/^RESULT PRECONDITION pre-write gate: unacknowledged P0/);
     expect(f.edits).toHaveLength(0);
     expect(listReceipts(path.join(f.base, 'home')).filter(r => r.sink === 'pr-prep')).toEqual([]);
@@ -613,7 +613,7 @@ describe('publish', () => {
     const g = fixture('gate-watch', TEMPLATE, { comments: [comment] });
     const gfile = await rendered(g);
     g.out.length = 0;
-    expect(await g.publish(gfile, ...g.acceptLive())).toBe(30);
+    expect(await g.publish(gfile, ...g.acceptLive(gfile))).toBe(30);
     expect(g.out[0]).toMatch(/^RESULT PRECONDITION pre-write gate: unacknowledged P1/);
     expect(g.edits).toHaveLength(0);
   });
@@ -624,12 +624,12 @@ describe('publish', () => {
     f.pushCommit('two');
     let gates = 0;
     f.deps.preWriteGate = () => { gates++; return { ok: true, reason: 'ok' }; };
-    expect(await f.publish(h1file, ...f.acceptLive())).toBe(30);
+    expect(await f.publish(h1file, ...f.acceptLive(h1file))).toBe(30);
     expect(gates).toBe(0);
     const h2file = await rendered(f);
     f.deps.preWriteGate = () => { gates++; f.pushCommit('three'); return { ok: true, reason: 'ok' }; };
     f.out.length = 0;
-    expect(await f.publish(h2file, ...f.acceptLive())).toBe(30);
+    expect(await f.publish(h2file, ...f.acceptLive(h2file))).toBe(30);
     expect(gates).toBe(1);
     expect(f.out[0]).toMatch(/^RESULT PRECONDITION .*re-render/);
     expect(f.edits).toHaveLength(0);
@@ -639,13 +639,13 @@ describe('publish', () => {
     const f = fixture('bind', TEMPLATE);
     const file = await rendered(f);
     f.out.length = 0;
-    expect(await f.call(['publish', '--body', file, '--yes', ...f.acceptLive()])).toBe(2);
+    expect(await f.call(['publish', '--body', file, '--yes', ...f.acceptLive(file)])).toBe(2);
     expect(f.out[0]).toMatch(/^RESULT USAGE .*--body-sha256/);
     // The owner approved one body; the file now holds another.
     const approved = f.shaOf(file);
     fs.appendFileSync(file, 'Added after the question.\n');
     f.out.length = 0;
-    expect(await f.call(['publish', '--body', file, '--body-sha256', approved, '--yes', ...f.acceptLive()])).toBe(20);
+    expect(await f.call(['publish', '--body', file, '--body-sha256', approved, '--yes', ...f.acceptLive(file)])).toBe(20);
     expect(f.out[0]).toMatch(/^RESULT REFUSED .*sha256/);
     expect(f.edits).toHaveLength(0);
     fs.writeFileSync(file, normalizeBody(fs.readFileSync(file, 'utf8').replace('Added after the question.\n', '')));
@@ -653,7 +653,7 @@ describe('publish', () => {
     f.setLive(`${f.getLive()}OWNER-NOTE-A\n`);
     f.out.length = 0;
     expect(await f.publish(file)).toBe(20);
-    const shown = f.out[0].match(/live-sha256=([0-9a-f]{12})/)![1];
+    const shown = f.out[0].match(/live-diff=([0-9a-f]{12})/)![1];
     expect(f.out.join('\n')).toContain('OWNER-NOTE-A');
     f.setLive(`${f.getLive()}OWNER-NOTE-B\n`);
     f.out.length = 0;
@@ -661,6 +661,25 @@ describe('publish', () => {
     expect(f.out.join('\n')).toContain('OWNER-NOTE-B');
     expect(f.edits).toHaveLength(0);
     expect(await f.publish(file, '--accept-live-diff', 'zz')).toBe(2);
+  });
+
+  test('a live-diff acceptance covers one live body against one outgoing body, not a later render', async () => {
+    const NOTE = 'MAINTAINER-NOTE please keep this PR small.';
+    const withNote = (t: string) => t.replace('Because.', `Because.\n\n${NOTE}`);
+    const f = fixture('accept-pair', withNote(TEMPLATE));
+    const a = await rendered(f, withNote(TEMPLATE));
+    f.out.length = 0;
+    expect(await f.publish(a)).toBe(20);
+    const accepted = f.out[0].match(/live-diff=([0-9a-f]{12})/)![1];
+    expect(f.out.join('\n')).not.toContain(`- ${NOTE}`);
+    // A re-render from a template without the note: the owner never saw this diff.
+    const b = await rendered(f, TEMPLATE);
+    f.out.length = 0;
+    expect(await f.publish(b, '--accept-live-diff', accepted)).toBe(20);
+    expect(f.out.join('\n')).toContain(`- ${NOTE}`);
+    expect(f.out[0].match(/live-diff=([0-9a-f]{12})/)![1]).not.toBe(accepted);
+    expect(f.edits).toHaveLength(0);
+    expect(f.getLive()).toContain(NOTE);
   });
 
   test('nothing but the edit follows the last live-body read, and the gate runs within 60 s of the edit', async () => {
@@ -671,12 +690,12 @@ describe('publish', () => {
     // A gate whose poll took 61 s.
     f.deps.preWriteGate = () => { t += 61_000; return { ok: true, reason: 'ok' }; };
     f.out.length = 0;
-    expect(await f.publish(file, ...f.acceptLive())).toBe(30);
+    expect(await f.publish(file, ...f.acceptLive(file))).toBe(30);
     expect(f.out[0]).toMatch(/^RESULT PRECONDITION .*61 s/);
     expect(f.edits).toHaveLength(0);
     f.deps.preWriteGate = () => { t += 10_000; return { ok: true, reason: 'ok' }; };
     f.log.length = 0;
-    expect(await f.publish(file, ...f.acceptLive())).toBe(0);
+    expect(await f.publish(file, ...f.acceptLive(file))).toBe(0);
     const edit = f.log.indexOf('gh pr-edit');
     expect(f.log[edit - 1]).toBe('gh body-read');
     expect(f.log.slice(0, edit - 1)).not.toContain('gh body-read');
@@ -698,7 +717,7 @@ describe('publish', () => {
   test('the live-vs-new diff is a real line diff: a moved section and a dropped duplicate show', async () => {
     const f = fixture('reorder', TEMPLATE);
     const file = await rendered(f);
-    expect(await f.publish(file, ...f.acceptLive())).toBe(0);
+    expect(await f.publish(file, ...f.acceptLive(file))).toBe(0);
     const published = f.getLive();
     const liveness = published.slice(published.indexOf('## Liveness proof'), published.indexOf('## Checklist'));
     f.setLive(liveness + published.replace(liveness, ''));
@@ -717,13 +736,13 @@ describe('publish', () => {
     const tmpl = TEMPLATE.replace('Because.', 'Because the resolver at 8.8.8.8 and main\'s 1.0.0.0 differ.');
     const file = await rendered(f, tmpl);
     f.out.length = 0;
-    expect(await f.publish(file, ...f.acceptLive())).toBe(22);
+    expect(await f.publish(file, ...f.acceptLive(file))).toBe(22);
     expect(f.out[0]).toMatch(/^RESULT REDACTION /);
     const keys = f.out.filter(l => l.startsWith('REDACTION MEDIUM')).map(l => l.split(' ')[2]);
     expect(keys).toHaveLength(1);
     expect(keys[0]).toStartWith('pii.ip_public@');
     expect(f.edits).toHaveLength(0);
-    expect(await f.publish(file, ...f.acceptLive(), '--confirm-redaction', keys[0])).toBe(0);
+    expect(await f.publish(file, ...f.acceptLive(file), '--confirm-redaction', keys[0])).toBe(0);
     expect(f.edits).toHaveLength(1);
     // A re-render puts another address at the same line and column: the old yes does not cover it.
     const again = await rendered(f, tmpl.replace('8.8.8.8', '9.9.9.9'));
@@ -738,14 +757,14 @@ describe('publish', () => {
     const f = fixture('redact2', TEMPLATE);
     const file = await rendered(f, TEMPLATE.replace('Because.', 'Because 8.8.8.8 answers.\n\nAnd 8.8.4.4 too.'));
     f.out.length = 0;
-    expect(await f.publish(file, ...f.acceptLive())).toBe(22);
+    expect(await f.publish(file, ...f.acceptLive(file))).toBe(22);
     const keys = f.out.filter(l => l.startsWith('REDACTION MEDIUM')).map(l => l.split(' ')[2]);
     expect(keys).toHaveLength(2);
     expect(keys.every(k => k.startsWith('pii.ip_public@'))).toBe(true);
     f.out.length = 0;
-    expect(await f.publish(file, ...f.acceptLive(), '--confirm-redaction', keys[0])).toBe(22);
+    expect(await f.publish(file, ...f.acceptLive(file), '--confirm-redaction', keys[0])).toBe(22);
     expect(f.out.filter(l => l.startsWith('REDACTION MEDIUM')).map(l => l.split(' ')[2])).toEqual([keys[1]]);
-    expect(await f.publish(file, ...f.acceptLive(), '--confirm-redaction', keys.join(','))).toBe(0);
+    expect(await f.publish(file, ...f.acceptLive(file), '--confirm-redaction', keys.join(','))).toBe(0);
   });
 
   test('lint, a closed PR and a read-back that lost the image all stop without a second edit', async () => {
@@ -757,26 +776,26 @@ describe('publish', () => {
     const bad = path.join(f.base, 'bad.md');
     fs.writeFileSync(bad, normalizeBody(spliceFacts(TEMPLATE.replace('Because.', 'Because 1.0.2.0 is claimed by #12.'), renderFactsBlock({ ...FACTS, head: git(f.clone, 'rev-parse', 'HEAD') }))));
     f.out.length = 0;
-    expect(await f.publish(bad, ...f.acceptLive())).toBe(20);
+    expect(await f.publish(bad, ...f.acceptLive(bad))).toBe(20);
     expect(f.out[0]).toMatch(/^RESULT REFUSED /);
     expect(f.out.some(l => l.startsWith('LINT') && l.includes('version claim'))).toBe(true);
     expect(f.edits).toHaveLength(0);
     const two = path.join(f.base, 'two.md');
     fs.writeFileSync(two, normalizeBody(`${renderFactsBlock({ ...FACTS, head: '0'.repeat(40) })}\n\n${spliceFacts(TEMPLATE, renderFactsBlock(FACTS))}`));
     f.out.length = 0;
-    expect(await f.publish(two, ...f.acceptLive())).toBe(20);
+    expect(await f.publish(two, ...f.acceptLive(two))).toBe(20);
     expect(f.out[0]).toMatch(/^RESULT REFUSED .*exactly one facts block/);
     expect(f.edits).toHaveLength(0);
 
     const closed = fixture('closed', TEMPLATE, { state: 'CLOSED' });
     const file = await rendered(closed);
-    expect(await closed.publish(file, ...closed.acceptLive())).toBe(30);
+    expect(await closed.publish(file, ...closed.acceptLive(file))).toBe(30);
     expect(closed.edits).toHaveLength(0);
 
     const web = fixture('web', TEMPLATE.replace('Screenshot to follow from @me.', IMG66), { webEditDropsImages: true });
     const wfile = await rendered(web);
     web.out.length = 0;
-    expect(await web.publish(wfile, ...web.acceptLive())).toBe(1);
+    expect(await web.publish(wfile, ...web.acceptLive(wfile))).toBe(1);
     expect(web.out[0]).toMatch(/^RESULT ERROR /);
     expect(web.edits).toHaveLength(1);
     expect(web.out.some(l => l.startsWith('VANISHED attachment'))).toBe(true);

@@ -20,8 +20,9 @@
  * bytes: every `user-attachments/assets/<id>` URL and every ticked
  * checklist line in the live body must also be in the body we send, wherever
  * it sits, or nothing is sent. A live body that changed since our last
- * publish (an owner web edit) needs --accept-live-diff <its sha256> after
- * the owner has seen the enveloped diff of exactly that live body; the yes
+ * publish (an owner web edit) needs --accept-live-diff <live-diff> after
+ * the owner has seen the enveloped diff of exactly that live body against
+ * exactly this outgoing body (live-diff is the sha256 of the pair); the yes
  * (--yes) is bound to the body's sha256 (--body-sha256), so neither carries
  * over to bytes the owner did not see. GitHub keeps the last writer: an
  * owner tab left open on the description overwrites whatever is published
@@ -72,9 +73,10 @@ Options:
   --yes                     the owner approved this publish in this turn
   --body-sha256 HEX         the body sha256 (12+ hex, from render's RESULT line)
                             the owner approved; publish refuses other bytes
-  --accept-live-diff HEX    the live-body sha256 (12+ hex) printed with the diff
-                            the owner saw and accepted; a live body that changed
-                            since gets a new diff and a new sha256
+  --accept-live-diff HEX    the live-diff value (12+ hex) printed with the diff
+                            the owner saw and accepted; it binds that live body
+                            to this outgoing body, so a change to either one
+                            gets a new diff and a new value
   --confirm-redaction K,..  the owner confirmed each MEDIUM finding key
                             (id@line:col#<line hash>, as REDACTION printed it)
 
@@ -106,6 +108,14 @@ export function normalizeBody(text: string): string {
 }
 
 export const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
+
+/**
+ * What --accept-live-diff names: one live body paired with one outgoing
+ * body. The live body's sha256 alone let an acceptance given for the diff
+ * live -> A publish a later render B, whose diff from the live body (what
+ * B deletes from it) the owner never saw.
+ */
+export const liveDiffKey = (live: string, outgoing: string) => sha256(`${live}\0${outgoing}`);
 
 export interface Facts {
   at: string;
@@ -927,10 +937,11 @@ function cmdPublish(c: Ctx): number {
       printOwnerContent(d, 'LOST', lost, c.pr.number);
       return BODY_EXIT.REFUSED;
     }
-    const liveSha = sha256(live);
-    if (liveChanged(c, live) && !(c.f.acceptLiveDiff && liveSha.startsWith(c.f.acceptLiveDiff))) {
-      const again = c.f.acceptLiveDiff ? ' (it changed after the diff the owner accepted)' : '';
-      d.out(`RESULT REFUSED live-sha256=${liveSha.slice(0, 12)} the live body is not the one we last published${again} (an owner or maintainer edit, or the first publish over a hand-written body): show the owner the diff below; on their yes pass --accept-live-diff ${liveSha.slice(0, 12)}`);
+    const key = liveDiffKey(live, body);
+    const pair = key.slice(0, 12);
+    if (liveChanged(c, live) && !(c.f.acceptLiveDiff && key.startsWith(c.f.acceptLiveDiff))) {
+      const again = c.f.acceptLiveDiff ? ' (the live body or the outgoing body changed after the diff the owner accepted)' : '';
+      d.out(`RESULT REFUSED live-diff=${pair} the live body (sha256 ${sha256(live).slice(0, 12)}) is not the one we last published${again} (an owner or maintainer edit, or the first publish over a hand-written body): show the owner the diff below; on their yes pass --accept-live-diff ${pair}`);
       const diff = lineDiff(live, body);
       if (!diff) throw new PrContextError('the live body differs from the outgoing one but their diff is empty', 1);
       d.out(envelope(diff, `pr-${c.pr.number}-live-vs-new`));
