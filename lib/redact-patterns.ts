@@ -358,17 +358,24 @@ export function isCiRunIdentifier(span: string, match: RegExpExecArray): boolean
  * name merely ends in "version" (`` `/version` → ``, `api-version → `,
  * `proxyVersion → `) maps to an address, as does `gateway → 8.8.8.8`, and
  * both still report.
+ *
+ * Both regexes read at most VERSION_WINDOW chars before the value. Where that
+ * window cuts a line, its first char has no left neighbour, so a `\b` or `^`
+ * there would read the tail of "conversion" as a version key. Every gap is
+ * therefore at most 16 blanks: the longest match (45 chars) is shorter than
+ * the window, so a match never starts at a cut.
  */
+const VERSION_WINDOW = 48;
 const VERSION_DECLARATION_BEFORE =
-  /(?:\b[Vv]ersion|\bVERSION|[a-z0-9_]Version|[_-][Vv]ersion|_VERSION)["'\]]?(?:[ \t]*[:=(>][ \t]*|[ \t]+)["']?$/;
+  /(?:\b[Vv]ersion|\bVERSION|[a-z0-9_]Version|[_-][Vv]ersion|_VERSION)["'\]]?(?:[ \t]{0,16}[:=(>][ \t]{0,16}|[ \t]{1,16})["']?$/;
 const VERSION_WORD_BEFORE =
-  /(?:^|[ \t(*|[])`?(?:VERSION|[Vv]ersion)`?(?:[ \t]*(?:[:=]|->|=>|→)[ \t]*|[ \t]+)`?$/;
+  /(?:^|[ \t(*|[])`?(?:VERSION|[Vv]ersion)`?(?:[ \t]{0,16}(?:[:=]|->|=>|→)[ \t]{0,16}|[ \t]{1,16})`?$/;
 const CHANGELOG_HEADING_BEFORE = /^#{1,6}[ \t]+\[$/;
 export function isDeclaredVersion(match: RegExpExecArray): boolean {
   const input = match.input ?? "";
   const { start, end } = spanBounds(match);
   const lineStart = input.lastIndexOf("\n", start - 1) + 1;
-  const before = input.slice(Math.max(lineStart, start - 48), start);
+  const before = input.slice(Math.max(lineStart, start - VERSION_WINDOW), start);
   if (VERSION_DECLARATION_BEFORE.test(before) || VERSION_WORD_BEFORE.test(before)) return true;
   return CHANGELOG_HEADING_BEFORE.test(input.slice(lineStart, start)) && input[end] === "]";
 }

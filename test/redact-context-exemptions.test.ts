@@ -176,6 +176,11 @@ describe("pii.ip_public: a four-part version needs a version declaration (#2784)
       "GET /version -> 34.120.5.6",
       "DNS: `api-version` → 8.8.8.8",
       "proxyVersion → 8.8.8.8",
+      // Padding that starts the 48-char look-behind window exactly at the
+      // "version" inside "conversion" or "diversion": a word cut by the window
+      // edge is not a version key.
+      `conversion${" ".repeat(41)}8.8.8.8`,
+      `diversion${" ".repeat(20)}→${" ".repeat(20)}8.8.8.8`,
     ],
   );
 });
