@@ -5,10 +5,12 @@
  * exit 9) and 37347305098 shard 5 (a hang to the deadline). Fixtures are
  * the trimmed windows-result-<n> artifacts, the tails of the shard logs
  * (stored as `.log.txt` because the repo's .gitignore drops `*.log`) and
- * three real `gh run view --json ...,jobs` payloads (run-<id>.json). A
- * draft appears only for a fully evidenced CRASH, or a HANG whose
- * identical tree passed the shard earlier, on a finished run of the PR's
- * current head. The helper never commits or pushes.
+ * three real `gh run view --json ...,jobs` payloads (run-<id>.json). The
+ * hang's result keeps the real `revision` (dd879c47f, the PR head merged
+ * into 10315cf44, as the runner checked it out) and the shard's 108 planned
+ * files. A draft appears only for a fully evidenced CRASH, or a HANG whose
+ * shard passed in an earlier run that tested the same tree and files, on a
+ * finished run of the PR's current head. The helper never commits or pushes.
  */
 import { describe, test, expect, beforeAll, afterAll, setDefaultTimeout } from 'bun:test';
 import { spawn, spawnSync } from 'node:child_process';
@@ -150,8 +152,30 @@ beforeAll(() => {
 });
 afterAll(() => fs.rmSync(ROOT, { recursive: true, force: true }));
 
-/** One shard's artifacts: a fixture prefix (`<fixture>-result.json`, `<fixture>-shard.log.txt`), or explicit content. */
-interface ShardFx { fixture?: string; result?: Record<string, unknown>; log?: string | null }
+/**
+ * One shard's artifacts: a fixture prefix (`<fixture>-result.json`, `<fixture>-shard.log.txt`), or explicit content.
+ * `revision` and `files` set (or, as undefined, remove) the result's tested revision and planned file list.
+ */
+interface ShardFx { fixture?: string; result?: Record<string, unknown>; log?: string | null; revision?: string; files?: string[] }
+
+/** Real tested revisions (refs/pull/3032/merge as each run checked it out) and their trees, read with `gh api repos/garrytan/gstack/commits/<rev>`. */
+const REV_HANG = 'dd879c47fb62294e6f90b3c37086d6059482ad83'; // run 37347305098: bd7c2d8f0 merged into 10315cf44
+const REV_LATER_BASE = 'b5efff4e2ae7b84560cbd7d39c6ece0da0f60333'; // run 37504870219: 07f20bd96 merged into 5885157a9
+/** A merge GitHub recomputed with the same head and base: another commit id, the same tree. */
+const REV_SAME_TREE = '1111111111111111111111111111111111111111';
+const TREES: Record<string, string> = {
+  [REV_HANG]: 'c8791474e621be3e36669fd81e7092e4ad87f38a',
+  [REV_LATER_BASE]: '9c645938edaab8360b4847ff9b77b64e1b048aa7',
+  [REV_SAME_TREE]: 'c8791474e621be3e36669fd81e7092e4ad87f38a',
+};
+const HANG_FILES: string[] = JSON.parse(read('37347305098-result.json')).outcome.files;
+
+/** A run whose shard 5 job passed, with its own windows-result-5 (tested revision and files). */
+const greenRun = (id: number, sha: string, opts: { revision?: string; files?: string[]; conclusion?: string; status?: string } = {}) => ({
+  id, sha, conclusion: 'success',
+  jobs: [{ name: 'windows-free-shard (5)', conclusion: opts.conclusion ?? 'success' }],
+  shards: { 5: { result: { shard: 5, status: opts.status ?? 'passed', exitCode: 0, failingFiles: [], unattributedFailures: 0 }, revision: opts.revision ?? REV_SAME_TREE, files: opts.files ?? HANG_FILES } },
+});
 interface FakeRun {
   id: number; sha: string; shard?: number; fixture?: string; result?: Record<string, unknown>;
   shards?: Record<number, ShardFx>; conclusion?: string; status?: string; createdAt?: string;
@@ -161,7 +185,15 @@ interface FakeRun {
 }
 const shardsOf = (r: FakeRun): Record<number, ShardFx> => r.shards ?? (r.shard ? { [r.shard]: { fixture: r.fixture, result: r.result } } : {});
 
-function fakeGh(runs: FakeRun[], calls: string[][], headOid = B): GhRunner {
+/** The windows-result-<n> JSON a fake download writes: the fixture or explicit outcome, then the fx's revision and files. */
+function resultJson(fx: ShardFx): string {
+  const j = fx.result ? { outcome: { ...fx.result } } : JSON.parse(read(`${fx.fixture}-result.json`));
+  if ('revision' in fx) j.revision = fx.revision;
+  if ('files' in fx) j.outcome.files = fx.files;
+  return JSON.stringify(j);
+}
+
+function fakeGh(runs: FakeRun[], calls: string[][], headOid = B, trees: Record<string, string> = TREES): GhRunner {
   const view = (r: FakeRun) => ({
     databaseId: r.id, headSha: r.sha, headBranch: 'pr/t', event: 'pull_request', conclusion: r.conclusion ?? 'failure', status: r.status ?? 'completed', createdAt: r.createdAt ?? '2026-10-06T00:00:00Z',
     jobs: r.jobs ?? [
@@ -192,7 +224,7 @@ function fakeGh(runs: FakeRun[], calls: string[][], headOid = B): GhRunner {
       const fx = m ? shardsOf(r)[Number(m[2])] : undefined;
       if (m?.[1] === 'result' && fx && (fx.result || fx.fixture)) {
         fs.mkdirSync(dir, { recursive: true });
-        fs.writeFileSync(path.join(dir, `shard-${m[2]}.json`), fx.result ? JSON.stringify({ outcome: fx.result }) : read(`${fx.fixture}-result.json`));
+        fs.writeFileSync(path.join(dir, `shard-${m[2]}.json`), resultJson(fx));
         return ok('');
       }
       const log = fx?.log !== undefined ? fx.log : fx?.fixture && fs.existsSync(path.join(FX, `${fx.fixture}-shard.log.txt`)) ? read(`${fx.fixture}-shard.log.txt`) : null;
@@ -202,6 +234,10 @@ function fakeGh(runs: FakeRun[], calls: string[][], headOid = B): GhRunner {
         return ok('');
       }
       return { status: 1, stdout: '', stderr: 'no artifact' };
+    }
+    const commit = /^repos\/acme\/gt\/commits\/([0-9a-f]{40})$/.exec(args[1] ?? '');
+    if (args[0] === 'api' && commit && args[2] === '--jq' && args[3] === '.commit.tree.sha') {
+      return trees[commit[1]] ? { status: 0, stdout: `${trees[commit[1]]}\n`, stderr: '' } : { status: 1, stdout: '', stderr: 'gh: No commit found for SHA (HTTP 422)' };
     }
     const jobLog = /^repos\/acme\/gt\/actions\/jobs\/(\d+)\/logs$/.exec(args.at(-1) ?? '');
     if (args[0] === 'api' && jobLog) {
@@ -213,11 +249,11 @@ function fakeGh(runs: FakeRun[], calls: string[][], headOid = B): GhRunner {
 }
 
 let homes = 0;
-async function triage(runs: FakeRun[], extra: string[] = [], opts: { headOid?: string; cwd?: string; stateRoot?: string } = {}) {
+async function triage(runs: FakeRun[], extra: string[] = [], opts: { headOid?: string; cwd?: string; stateRoot?: string; trees?: Record<string, string> } = {}) {
   const calls: string[][] = [];
   const out: string[] = [];
   const env = { ...process.env, GSTACK_STATE_ROOT: opts.stateRoot ?? path.join(ROOT, `home-${++homes}`) };
-  const code = await triageMain(['run', '--pr', '3', '--repo', 'acme/gt', '--cwd', opts.cwd ?? repoDir, ...extra], { gh: fakeGh(runs, calls, opts.headOid ?? B), env, out: l => out.push(l) });
+  const code = await triageMain(['run', '--pr', '3', '--repo', 'acme/gt', '--cwd', opts.cwd ?? repoDir, ...extra], { gh: fakeGh(runs, calls, opts.headOid ?? B, opts.trees), env, out: l => out.push(l) });
   return { code, out, calls, env };
 }
 const downloads = (calls: string[][]) => calls.filter(c => c[0] === 'run' && c[1] === 'download').length;
@@ -292,13 +328,70 @@ describe('run', () => {
     expect(draftFiles(r)).toEqual([]);
   });
 
-  test('a hang whose earlier green run was on a DIFFERENT tree gets no draft', async () => {
+  test('a hang whose earlier green run tested a DIFFERENT tree gets no draft', async () => {
     const other = gitIn(repoDir, 'commit-tree', '4b825dc642cb6eb9a060e54bf8d69288fbee4904', '-p', A, '-m', 'different tree');
-    const greenElsewhere = { id: 649, sha: other, conclusion: 'success', jobs: [{ name: 'windows-free-shard (5)', conclusion: 'success' }] };
-    const r = await triage([{ id: 650, sha: B, shard: 5, fixture: '37347305098' }, greenElsewhere]);
+    const r = await triage([{ id: 650, sha: B, shard: 5, fixture: '37347305098' }, greenRun(649, other, { revision: REV_LATER_BASE })]);
     expect(r.code).toBe(10);
     expect(r.out.some(l => l.startsWith('SHARD\t5\tHANG') && l.endsWith('same-tree-green none'))).toBe(true);
     expect(draftFiles(r)).toEqual([]);
+  });
+
+  test('the same head commit tree is not the same tested tree: a run that merged an older base is no evidence', async () => {
+    // A is B's tree (B is an empty ci: commit on A), but run 150 tested A merged into upstream's newer base,
+    // as #3032's runs did when main moved from 10315cf44 to 5885157a9.
+    expect(gitIn(repoDir, 'rev-parse', `${A}^{tree}`)).toBe(gitIn(repoDir, 'rev-parse', `${B}^{tree}`));
+    const r = await triage([{ id: 200, sha: B, shard: 5, fixture: '37347305098' }, greenRun(150, A, { revision: REV_LATER_BASE })]);
+    expect(r.code).toBe(10);
+    expect(r.out.find(l => l.startsWith('SHARD\t5\t'))).toEndWith('same-tree-green none');
+    expect(r.out.find(l => l.startsWith('NO_DRAFT shard 5'))).toMatch(/no earlier run/);
+    expect(draftFiles(r)).toEqual([]);
+    // the trees were read with a GET of each tested revision, never a write
+    expect(r.calls.filter(c => c[0] === 'api' && /\/commits\//.test(c[1] ?? '')).map(c => c[1].split('/').at(-1))).toEqual([REV_HANG, REV_LATER_BASE]);
+    expect(r.calls.filter(c => isRemoteWrite('gh', c))).toEqual([]);
+  });
+
+  test('the earlier run must have planned the same files for the shard', async () => {
+    const r = await triage([{ id: 200, sha: B, shard: 5, fixture: '37347305098' }, greenRun(150, A, { files: HANG_FILES.slice(1) })]);
+    expect(r.code).toBe(10);
+    expect(r.out.find(l => l.startsWith('SHARD\t5\t'))).toEndWith('same-tree-green none');
+    expect(draftFiles(r)).toEqual([]);
+  });
+
+  test('evidence is a shard job that concluded success: a failed or cancelled shard in an earlier same-tree run is none', async () => {
+    for (const conclusion of ['failure', 'cancelled']) {
+      const r = await triage([{ id: 201, sha: B, shard: 5, fixture: '37347305098' }, greenRun(151, A, { conclusion })]);
+      expect(r.code).toBe(10);
+      expect(r.out.find(l => l.startsWith('SHARD\t5\t'))).toEndWith('same-tree-green none');
+      expect(draftFiles(r)).toEqual([]);
+    }
+    // the job passed only because the runner's retry of the failing file passed: the shard itself did not
+    const retried = await triage([{ id: 205, sha: B, shard: 5, fixture: '37347305098' }, greenRun(152, A, { status: 'failed' })]);
+    expect(retried.code).toBe(10);
+    expect(retried.out.find(l => l.startsWith('SHARD\t5\t'))).toEndWith('same-tree-green none');
+  });
+
+  test('an earlier run of the same commit counts when it tested the same tree; a later run never does', async () => {
+    const same = await triage([{ id: 201, sha: B, shard: 5, fixture: '37347305098' }, greenRun(150, B)]);
+    expect(same.code).toBe(0);
+    expect(same.out.find(l => l.startsWith('SHARD\t5\t'))).toEndWith('same-tree-green 150');
+    // run 250 is later than the hung run 202 (it ran on an older head commit, so it is not "a newer run on the head")
+    const later = await triage([{ id: 202, sha: B, shard: 5, fixture: '37347305098' }, greenRun(250, A)]);
+    expect(later.code).toBe(10);
+    expect(later.out.find(l => l.startsWith('SHARD\t5\t'))).toEndWith('same-tree-green none');
+    expect(draftFiles(later)).toEqual([]);
+  });
+
+  test('a hang whose result records no tested revision, or one GitHub cannot resolve, gets no draft', async () => {
+    const unrecorded = await triage([{ id: 203, sha: B, shards: { 5: { fixture: '37347305098', revision: undefined } } }, greenRun(150, A)]);
+    expect(unrecorded.code).toBe(10);
+    expect(unrecorded.out.find(l => l.startsWith('NO_DRAFT shard 5'))).toMatch(/no tested revision/);
+    const unplanned = await triage([{ id: 206, sha: B, shards: { 5: { fixture: '37347305098', files: undefined } } }, greenRun(150, A)]);
+    expect(unplanned.code).toBe(10);
+    expect(unplanned.out.find(l => l.startsWith('NO_DRAFT shard 5'))).toMatch(/planned files/);
+    const unknown = await triage([{ id: 204, sha: B, shard: 5, fixture: '37347305098' }, greenRun(150, A)], [], { trees: { [REV_SAME_TREE]: TREES[REV_SAME_TREE] } });
+    expect(unknown.code).toBe(10);
+    expect(unknown.out.find(l => l.startsWith('NO_DRAFT shard 5'))).toMatch(/could not be read/);
+    for (const r of [unrecorded, unplanned, unknown]) expect(draftFiles(r)).toEqual([]);
   });
 
   test('exit 1 with no failing test and an IOCP line ending the log is no draft', async () => {
@@ -357,7 +450,7 @@ describe('run', () => {
   test('a hang drafts only when an earlier run of the identical tree passed the shard', async () => {
     const lone = await triage([{ id: 200, sha: B, shard: 5, fixture: '37347305098' }]);
     expect(lone.code).toBe(10);
-    const passedEarlier = { id: 150, sha: A, shard: 5, fixture: '37347305098', conclusion: 'success', jobs: [{ name: 'windows-free-shard (5)', conclusion: 'success' }] };
+    const passedEarlier = greenRun(150, A);
     // the failed run carries #3032's real job list (run 37347305098: shard 5 and the aggregate failed)
     const r = await triage([{ ...realRun('37347305098', B), shards: { 5: { fixture: '37347305098' } } }, passedEarlier]);
     expect(r.code).toBe(0);
@@ -365,7 +458,7 @@ describe('run', () => {
   });
 
   test('a refused hang or crash says which evidence blocked the draft', async () => {
-    const passed = { id: 405, sha: A, conclusion: 'success', jobs: [{ name: 'windows-free-shard (5)', conclusion: 'success' }] };
+    const passed = greenRun(405, A);
     const hangLog = `(fail) suite > a real assertion failed [3.00ms]\n${read('37347305098-shard.log.txt')}`;
     const hang = await triage([{ id: 610, sha: B, shards: { 5: { fixture: '37347305098', log: hangLog } } }, passed]);
     expect(hang.code).toBe(10);
@@ -375,7 +468,7 @@ describe('run', () => {
     const counted = await triage([{ id: 611, sha: B, shards: { 4: { fixture: '37346036310', result: { ...result('37346036310'), unattributedFailures: 2 } } } }]);
     expect(counted.out.find(l => l.startsWith('NO_DRAFT shard 4'))).toMatch(/unattributed/);
     const lone = await triage([{ id: 612, sha: B, shard: 5, fixture: '37347305098' }]);
-    expect(lone.out.find(l => l.startsWith('NO_DRAFT shard 5'))).toMatch(/no earlier run of this tree passed/);
+    expect(lone.out.find(l => l.startsWith('NO_DRAFT shard 5'))).toMatch(/no earlier run/);
   });
 
   test('a head branch gone from the head remote exits 40, and --help documents every exit code', async () => {
@@ -450,7 +543,7 @@ describe('run', () => {
     expect(two.split('\n').find(l => /shard 2\b/.test(l))).toMatch(/GLib/);
     expect(two.split('\n').find(l => /shard 4\b/.test(l))).toMatch(/GetQueuedCompletionStatusEx/);
     // an IOCP crash plus a hang whose tree passed shard 5 in run 400: the hang line names run 400
-    const passed = { id: 400, sha: A, conclusion: 'success', jobs: [{ name: 'windows-free-shard (5)', conclusion: 'success' }] };
+    const passed = greenRun(400, A);
     const mixed = await triage([{ id: 501, sha: B, shards: { 4: { fixture: '37346036310' }, 5: { fixture: '37347305098' } } }, passed]);
     expect(mixed.code).toBe(0);
     const hangLine = draftOf(mixed).split('\n').find(l => /shard 5\b/.test(l)) ?? '';
