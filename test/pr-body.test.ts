@@ -549,6 +549,27 @@ describe('publish', () => {
     expect(f.edits).toHaveLength(0);
     expect(await f.publish(file, ...f.acceptLive(), '--confirm-redaction', keys[0])).toBe(0);
     expect(f.edits).toHaveLength(1);
+    // A re-render puts another address at the same line and column: the old yes does not cover it.
+    const again = await rendered(f, tmpl.replace('8.8.8.8', '9.9.9.9'));
+    expect(again).toBe(file);
+    f.out.length = 0;
+    expect(await f.publish(again, '--confirm-redaction', keys[0])).toBe(22);
+    expect(f.out.filter(l => l.startsWith('REDACTION MEDIUM')).map(l => l.split(' ')[2])).not.toContain(keys[0]);
+    expect(f.edits).toHaveLength(1);
+  });
+
+  test('each MEDIUM finding needs its own confirmation, even two of one kind', async () => {
+    const f = fixture('redact2', TEMPLATE);
+    const file = await rendered(f, TEMPLATE.replace('Because.', 'Because 8.8.8.8 answers.\n\nAnd 8.8.4.4 too.'));
+    f.out.length = 0;
+    expect(await f.publish(file, ...f.acceptLive())).toBe(22);
+    const keys = f.out.filter(l => l.startsWith('REDACTION MEDIUM')).map(l => l.split(' ')[2]);
+    expect(keys).toHaveLength(2);
+    expect(keys.every(k => k.startsWith('pii.ip_public@'))).toBe(true);
+    f.out.length = 0;
+    expect(await f.publish(file, ...f.acceptLive(), '--confirm-redaction', keys[0])).toBe(22);
+    expect(f.out.filter(l => l.startsWith('REDACTION MEDIUM')).map(l => l.split(' ')[2])).toEqual([keys[1]]);
+    expect(await f.publish(file, ...f.acceptLive(), '--confirm-redaction', keys.join(','))).toBe(0);
   });
 
   test('lint, a closed PR and a read-back that lost the image all stop without a second edit', async () => {

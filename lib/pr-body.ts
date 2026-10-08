@@ -73,7 +73,8 @@ Options:
   --accept-live-diff HEX    the live-body sha256 (12+ hex) printed with the diff
                             the owner saw and accepted; a live body that changed
                             since gets a new diff and a new sha256
-  --confirm-redaction K,..  the owner confirmed each MEDIUM finding key (id@line:col)
+  --confirm-redaction K,..  the owner confirmed each MEDIUM finding key
+                            (id@line:col#<line hash>, as REDACTION printed it)
 
 Exit codes: 0 ok, 1 error, 2 usage or approval missing, 20 refused (a live
 attachment or ticked box would be lost, a lint rule, an unaccepted live
@@ -342,7 +343,16 @@ export function scanOutgoing(body: string, published: string[]): ReturnType<type
   return { ...result, findings, counts };
 }
 
-export const findingKey = (f: Finding) => `${f.id}@${f.line}:${f.col}`;
+/**
+ * The key the owner confirms a MEDIUM finding with: id, position, and the
+ * first 8 hex of the flagged line's sha256. The engine shows at most 4
+ * characters of a finding, so two values at one position (8.8.8.8, then
+ * 9.9.9.9 after a re-render) look alike; the line hash makes the key, and
+ * so the owner's yes, name the text they were shown.
+ */
+export function findingKey(f: Finding, body: string): string {
+  return `${f.id}@${f.line}:${f.col}#${sha256(body.split('\n')[f.line - 1] ?? '').slice(0, 8)}`;
+}
 
 // ── deps ────────────────────────────────────────────────────────────────────
 
@@ -733,13 +743,13 @@ function cmdPublish(c: Ctx): number {
   const medium = result.findings.filter(f => f.severity === 'MEDIUM');
   if (high.length || result.oversize) {
     d.out(`RESULT REDACTION blocked (${result.oversize ? 'too large to scan' : 'HIGH'})`);
-    for (const f of high) d.out(`REDACTION HIGH ${findingKey(f)} ${f.description} ${f.preview}`);
+    for (const f of high) d.out(`REDACTION HIGH ${findingKey(f, body)} ${f.description} ${f.preview}`);
     return BODY_EXIT.REDACTION;
   }
-  const unconfirmed = medium.filter(f => !c.f.confirm.includes(findingKey(f)));
+  const unconfirmed = medium.filter(f => !c.f.confirm.includes(findingKey(f, body)));
   if (unconfirmed.length) {
     d.out('RESULT REDACTION each MEDIUM finding needs the owner\'s confirmation: --confirm-redaction <key,...>');
-    for (const f of unconfirmed) d.out(`REDACTION MEDIUM ${findingKey(f)} ${f.description} ${f.preview}`);
+    for (const f of unconfirmed) d.out(`REDACTION MEDIUM ${findingKey(f, body)} ${f.description} ${f.preview}`);
     return BODY_EXIT.REDACTION;
   }
   // The gate polls gstack-pr-watch, which takes the PR lock itself: run it just before taking the lock.
