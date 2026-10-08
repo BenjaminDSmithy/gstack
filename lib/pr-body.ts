@@ -143,7 +143,9 @@ export function renderFactsBlock(f: Facts): string {
     lines.push(`- Merges of \`${f.baseRef}\` (${f.merges.length}): ${f.merges.map(m => `\`${s12(m.upstream)}\` (v${m.version}${m.pr ? `, ${m.pr}` : ''})`).join(', ')}.`);
   }
   // previousPatchId is the 12-hex patch-id the last PUBLISHED facts block printed ('' for an empty diff).
-  const same = f.diff.previousPatchId === null ? '' : f.diff.previousPatchId.slice(0, 12) === f.diff.patchId.slice(0, 12) ? ', unchanged since the last publish' : ', changed since the last publish';
+  // A blank id is an empty diff; over a non-empty one it proves nothing, so no verdict.
+  const unknown = f.diff.previousPatchId === null || (!f.diff.patchId && (f.diff.files > 0 || f.diff.lines > 0));
+  const same = unknown ? '' : f.diff.previousPatchId!.slice(0, 12) === f.diff.patchId.slice(0, 12) ? ', unchanged since the last publish' : ', changed since the last publish';
   lines.push(`- PR diff without release files: ${f.diff.files} file${f.diff.files === 1 ? '' : 's'}, ${f.diff.lines} lines, patch-id \`${f.diff.patchId.slice(0, 12) || '-'}\`${same}.`);
   lines.push(`- Commits: ${f.commits} (excluding merges and the \`${f.baseRef}\` commits they bring in).`);
   const v = f.validation;
@@ -464,6 +466,31 @@ const prNum = (subject: string) => /\((#\d+)\)\s*$/.exec(subject)?.[1] ?? null;
  */
 const CODE_PATHSPEC: readonly string[] = [':(top)', ...RELEASE_FILES.map(f => `:(top,exclude)${f}`)];
 
+/**
+ * git's own patch whatever the owner's config says: diff.external (difftastic
+ * and the like) replaced the patch with the tool's output, which patch-id
+ * reads as no patch at all, a blank id that equalled the blank id of the last
+ * publish ("unchanged" after a real push); textconv rewrites what is
+ * compared, and diff.relative narrows the diff to --cwd again.
+ */
+const PLAIN_DIFF: readonly string[] = ['--no-color', '--no-ext-diff', '--no-textconv', '--no-relative'];
+
+/**
+ * `git patch-id --stable` of a diff ('' for an empty one). A failed run or
+ * a non-empty diff without an id is an error, never a blank fingerprint.
+ * The diff is taken with --binary: without it every change to one binary
+ * file prints the same "Binary files differ" line, and so the same id.
+ */
+function patchIdOf(c: Ctx, diffText: string): string {
+  if (!diffText) return '';
+  const r = c.d.git(['patch-id', '--stable'], { cwd: c.f.cwd, input: diffText });
+  const id = r.stdout.trim().split(/\s+/)[0] ?? '';
+  if (r.status !== 0 || !/^[0-9a-f]{40}$/.test(id)) {
+    throw new PrContextError(`git patch-id failed on the PR diff: ${(r.error ?? r.stderr).trim().split('\n').at(-1) || 'no id printed'}`, 1);
+  }
+  return id;
+}
+
 // ── facts ───────────────────────────────────────────────────────────────────
 
 export function collectFacts(c: Ctx): Facts {
@@ -501,10 +528,9 @@ export function collectFacts(c: Ctx): Facts {
     .map(line => line.split(' ')[2])
     .filter((p): p is string => !!p && inBase(p))
     .map(p => ({ upstream: p, version: show(p, 'VERSION'), pr: prNum(gitOut(c, ['log', '-1', '--format=%s', p]).trim()) }));
-  const stat = gitOut(c, ['diff', '--numstat', mb, head, '--', ...CODE_PATHSPEC]).split('\n').filter(Boolean);
+  const stat = gitOut(c, ['diff', ...PLAIN_DIFF, '--numstat', mb, head, '--', ...CODE_PATHSPEC]).split('\n').filter(Boolean);
   const lines = stat.reduce((n, l) => n + l.split('\t').slice(0, 2).reduce((a, x) => a + (Number(x) || 0), 0), 0);
-  const diffText = gitOut(c, ['diff', '--no-color', mb, head, '--', ...CODE_PATHSPEC]);
-  const pid = diffText ? (d.git(['patch-id', '--stable'], { cwd: c.f.cwd, input: diffText }).stdout.trim().split(/\s+/)[0] ?? '') : '';
+  const pid = patchIdOf(c, gitOut(c, ['diff', ...PLAIN_DIFF, '--binary', mb, head, '--', ...CODE_PATHSPEC]));
   const previous = readPublishedFacts(c.stateDir);
   const state = readStateFor(c.stateDir, pr);
   const ci = readCiAt(c, head);

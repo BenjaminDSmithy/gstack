@@ -298,6 +298,23 @@ describe('facts and render', () => {
     expect(diffLine()).toBe(top);
   });
 
+  test('the patch-id is of git\'s own patch: an external diff tool or a failing patch-id never yields a blank one', async () => {
+    const f = fixture('facts-extdiff', TEMPLATE);
+    const tool = path.join(f.base, 'difftool.sh');
+    fs.writeFileSync(tool, '#!/bin/sh\necho external diff output\n', { mode: 0o755 });
+    git(f.clone, 'config', 'diff.external', tool);
+    expect(await f.call(['facts'])).toBe(0);
+    const facts = JSON.parse(fs.readFileSync(path.join(f.dir, 'facts.json'), 'utf8')) as Facts;
+    expect(facts.diff.patchId).toMatch(/^[0-9a-f]{40}$/);
+    const real = f.deps.git!;
+    f.deps.git = (args, o) => (args[0] === 'patch-id' ? { status: 128, stdout: '', stderr: 'fatal: patch-id broke' } : real(args, o));
+    f.out.length = 0;
+    expect(await f.call(['facts'])).toBe(1);
+    expect(f.out[0]).toMatch(/^RESULT ERROR .*patch-id/);
+    // A blank patch-id over a non-empty diff is never "unchanged".
+    expect(renderFactsBlock({ ...FACTS, diff: { ...FACTS.diff, patchId: '', previousPatchId: '' } })).not.toContain('since the last publish');
+  });
+
   test('a ci: commit that changes the tree is code, not an empty re-run', async () => {
     const f = fixture('facts-ci-tree', TEMPLATE, { ciChangesTree: true });
     expect(await f.call(['facts'])).toBe(0);
