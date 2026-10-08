@@ -450,6 +450,7 @@ function cmdSize(d: WatchDeps, f: Flags): number {
   }
   const owner = repo.split('/')[0].toLowerCase();
   let sample: SizeSample[] = [];
+  let note = '';
   try {
     const merged = ghJson<{ author?: { login?: string; is_bot?: boolean }; additions: number; deletions: number; changedFiles: number }[]>(
       d, ['pr', 'list', '--repo', repo, '--state', 'merged', '--limit', '200', '--json', 'author,additions,deletions,changedFiles'], 'merged PRs');
@@ -457,10 +458,11 @@ function cmdSize(d: WatchDeps, f: Flags): number {
       .filter(m => m.author?.login && m.author.login.toLowerCase() !== owner && !m.author.is_bot && !/^app\//.test(m.author.login))
       .map(m => ({ churn: m.additions + m.deletions, files: m.changedFiles }));
   } catch (error) {
-    d.out(`NOTE baseline not read (${(error as Error).message}); using the 2026-10-07 static thresholds`);
+    note = `NOTE baseline not read (${(error as Error).message}); using the 2026-10-07 static thresholds`;
   }
   const v = sizeVerdict(ours, sample);
   d.out(`RESULT ${v.verdict} churn=${ours.churn} files=${ours.files} commits=${ours.commits} (commits are shown, not scored: upstream squash-merges)`);
+  if (note) d.out(note);
   d.out(`BASELINE ${v.live ? `${sample.length} merged contributor PRs` : 'static 2026-10-07'}: green up to churn ${Math.round(v.green.churn)} and ${Math.round(v.green.files)} files; amber up to churn ${AMBER_CHURN}`);
   if (sample.length) d.out(`RANK churn p${rankOf(sample.map(s => s.churn), ours.churn)}, files p${rankOf(sample.map(s => s.files), ours.files)} among merged contributor PRs`);
   return 0;
