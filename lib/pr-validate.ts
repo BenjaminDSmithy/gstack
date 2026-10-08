@@ -78,9 +78,13 @@ A file passes only with exit 0, no "(fail)" line and bun's own last
 it, agreeing with the counts above it (no such line = a truncated run;
 a block a test printed cannot stand in). A file in which no test passed (every
 test skipped) is UNVERIFIED: named in the summary, never counted green.
-Changed code (anything but release files and *.md) that no passing
-selected test covers is red (NO_TESTS), never "0/0 green": declare the
-tests that cover it.
+Each changed file (anything but release files, *.md and FULL triggers)
+needs a passing selected test that exercises it: the file itself, a test
+importing it, pointing a relative path at it or naming it, or for a
+template, resolver or host the skill-rendering tests. A class
+tripwire's pass (egress wiring, sync-spawn timeouts, ...) is not
+coverage. A file with none is red (NO_TESTS), never "0/0 green": declare
+the tests that cover it (a passing declared test covers the change).
 A change to package.json beyond .version, bun.lock, tsconfig,
 bunfig.toml or its preload files, or the free-suite runner needs the
 full suite: the selection prints FULL and the run stays red unless
@@ -559,8 +563,32 @@ export function untestedCode(changed: string[], sel: Selection, exists: (f: stri
   return changed.filter(f => !RELEASE_FILES.includes(f) && !/\.md$/i.test(f) && !sel.full.includes(f) && exists(f));
 }
 
-function noTestsLine(code: string[]): string {
-  return `NO_TESTS ${code.length} changed code file(s) (${code.slice(0, 5).join(', ')}${code.length > 5 ? ', ...' : ''}) and no selected test passed: declare the tests that cover them (gstack-pr-validate declare)`;
+/**
+ * The changed files in `code` that no passing selected file exercises. A
+ * pick covers the path its rule names (`changed` a test file itself,
+ * `imports:`, `refs:`, `names:`), and `class:skill(<f>)` covers its
+ * template, resolver or host, since those tests render every template for
+ * every host. The other class picks (code, test, release) are tripwires
+ * that scan source for one pattern: they run, but never count as
+ * coverage. A passing declared test covers everything: the owner
+ * declared it for the change.
+ */
+export function uncoveredCode(code: string[], sel: Selection, passed: (file: string) => boolean): string[] {
+  const covered = new Set<string>();
+  for (const s of sel.files) {
+    if (!passed(s.file)) continue;
+    if (s.rules.includes('declared')) return [];
+    for (const r of s.rules) {
+      if (r === 'changed') covered.add(s.file);
+      const m = /^(?:imports|refs|names):(.+)$/.exec(r) ?? /^class:skill\((.+)\)$/.exec(r);
+      if (m) covered.add(m[1]);
+    }
+  }
+  return code.filter(f => !covered.has(f));
+}
+
+function noTestsLine(files: string[]): string {
+  return `NO_TESTS ${files.length} changed file(s) no passing selected test exercises (${files.slice(0, 5).join(', ')}${files.length > 5 ? ', ...' : ''}): a class tripwire is not coverage; declare the tests that cover them (gstack-pr-validate declare)`;
 }
 
 function selection(c: Ctx, state: PrState | null): { sel: Selection; mb: string; changed: string[] } {
@@ -588,8 +616,9 @@ function cmdSelect(c: Ctx): number {
   for (const f of sel.full) c.d.out(`FULL\t${f}`);
   for (const s of sel.files) c.d.out(`SELECT\t${s.file}\t${s.rules.join(',')}`);
   for (const f of sel.missingDeclared) c.d.out(`DECLARED_MISSING\t${f}`);
-  const code = untestedCode(changed, sel, f => fs.existsSync(path.join(c.tree, f)));
-  if (code.length && !sel.files.length) c.d.out(noTestsLine(code));
+  // What run would call NO_TESTS if every selected file passed.
+  const bare = uncoveredCode(untestedCode(changed, sel, f => fs.existsSync(path.join(c.tree, f))), sel, () => true);
+  if (bare.length) c.d.out(noTestsLine(bare));
   return 0;
 }
 
@@ -721,6 +750,7 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   // Each selected file in its own bun process, as the runner shards would see it.
   const macos = new Set(macosNamedFrom(workflow));
   let green = 0;
+  const passed = new Set<string>();
   const unverified: string[] = [];
   const verdict = (v: FileVerdict) => (v.ok ? 'ok' : v.unverified ? `UNVERIFIED: ${v.why}` : `RED: ${v.why}`);
   // One run in its own CI-shard sandbox; a write to its private HOME is red, as CI's home guard makes it.
@@ -732,7 +762,10 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   };
   sel.files.forEach((s, i) => {
     const v = runFile(s.file, path.join(tmp, `file-${i}`));
-    if (v.ok) green++;
+    if (v.ok) {
+      green++;
+      passed.add(s.file);
+    }
     if (v.unverified) unverified.push(s.file);
     line(`${s.file} rc=${v.rc} ${v.pass} pass ${v.fail} fail ${v.skip} skip ran=${v.ran ? 1 : 0} ${verdict(v)} [${s.rules.join(',')}]`, !v.ok && !v.unverified);
     if (macos.has(s.file)) {
@@ -741,9 +774,9 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
     }
   });
 
-  // Changed code with no passing selected test is unverified, never GREEN 0/0.
-  const code = untestedCode(changed, sel, f => fs.existsSync(path.join(c.tree, f)));
-  if (code.length && green === 0) line(noTestsLine(code), true);
+  // Each changed file needs a passing test that exercises it, never GREEN 0/0 or a tripwire's pass.
+  const bare = uncoveredCode(untestedCode(changed, sel, f => fs.existsSync(path.join(c.tree, f))), sel, f => passed.has(f));
+  if (bare.length) line(noTestsLine(bare), true);
 
   // Cheap mirrors of CI's other gates.
   for (const script of ['typecheck', 'typecheck:test']) {
