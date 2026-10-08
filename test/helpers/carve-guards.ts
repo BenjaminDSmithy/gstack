@@ -579,6 +579,24 @@ do not launch the downstream skill or open a browser.`,
     mustContain: ['6 Decision Principles', 'TASTE DECISION', 'USER CHALLENGE', 'consensus', 'Restore Point'],
     maxSizeRatio: 1.1490, // Four validated outside invocations replace raw CLI calls; phases keep independent coverage. + Oct 7 wave B3: the Codex probe runs as a command (select-model capture lines, check-sandbox/probe-model/run-with-timeout subcommands) instead of being sourced; measured 114,297 / 101,979 = 1.1208 (2026-10-07). + Oct 7 wave CEO-28/DX-11: review prompts ask for a severity per finding and design proposals use the proposal gate; measured 114,533 / 101,979 = 1.1231 (2026-10-07). + Oct 7 wave guard (CEO-20): conditional `run_in_background` request plus the background-run recovery at each foreground dispatch site, and phase-close publishing each report with the `true autoplan-published <phase>` no-op before the next phase entry in a later message (CEO-1); measured 114,320 / 101,979 = 1.1210 (2026-10-07). Merged with the guard area: measured 115,149 / 101,979 = 1.1291 (2026-10-07). + Oct 8 wave (permission cards after a background reviewer): Step 1 puts RESTORE_PATH, and so every phase artifact, in the project's git-excluded `.gstack/tmp/autoplan/`, which Claude Code reads without a card after the skill turn ends; measured 115,270 / 101,979 = 1.1303 (2026-10-08). + fix wave PR D: the prerequisite offer is skipped in spawned/headless sessions (#1958); measured 115,267 / 101,979 = 1.1303 (2026-10-07). Both merged: measured 115,126 / 101,979 = 1.1289 (2026-10-08). + Honest Work wave merged (W2/W3 gate integrity in review/ship, W4 kernel + DONE line in every tier-2+ skill, W5/W7 in spec/ship): re-measured on the integrated tree (2026-10-10). + Oct 10 multi-agent wave B9/B10/B12: Phase 0 ESTIMATE and the phase-close timing record, the final gate as a gate list (`gstack-gate render/parse`, stable ids, gate_rev) and the URGENT block above the summary, offset by tightening the Phase 4 prose and the tasks-section; measured 114,980 / 101,979 = 1.1275 (2026-10-10). + Oct 10 multi-agent wave PR D1 (reality rows): the reality-rows check line in the CEO and Eng phase files, the Pre-Gate rule (unattended miss is `incomplete`, never a warning) and the two Pre-Gate cells; measured 117,042 / 101,979 = 1.1477 (2026-10-10).
   },
+  // fork-only: /pr-prep's lifecycle modes (open/sync/body/watch/ci/liveness)
+  // load one section each; the audit and /ship's Step 1.5 never read one.
+  'pr-prep': {
+    skill: 'pr-prep',
+    expectedSections: ['open.md', 'sync.md', 'body.md', 'watch.md', 'ci.md', 'liveness.md'],
+    requiredReads: ['sync.md'],
+    scenario:
+      "Run /pr-prep sync for upstream PR 3066 of garrytan/gstack. Simulate every helper (gstack-pr-watch, gstack-pr-sync, gstack-pr-validate): state what you would run and the result you expect instead of executing it, and do NOT push or publish anything. Do NOT use AskUserQuestion.",
+    staticInvariants: {
+      mustStayInSkeleton: ['## Detect command', '## Write safety (every mode)', 'FETCH_STATUS:', 'gstack-pr-prep-commits stamp', 'PR_PREP_BASE'],
+      mustPrecedeStop: ['## Detect command', '## Write safety (every mode)'],
+      mustMoveToSection: ['gstack-pr-sync merge', 'gstack-pr-body publish --pr', 'gstack-pr-ci-triage run', 'gstack-pr-watch ack', 'gstack-pr-body check'],
+    },
+    behavioral: 'none',
+    maxSkeletonBytes: 68_500, // measured 67,195 (2026-10-08, v1.91.33.0 + fork)
+    minUnionBytes: 78_000, // measured union 79,353
+    mustContain: ['EXACT_DUP', 'UNVERIFIED', 'gstack-pr-sync push', 'gstack-pr-sync retrigger', '--accept-live-diff', 'Screenshot to follow'],
+  },
   spec: {
     skill: 'spec',
     expectedSections: ['gate-and-file.md'],
