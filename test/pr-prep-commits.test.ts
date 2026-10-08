@@ -283,6 +283,25 @@ describe('dropSelf', () => {
 });
 
 describe('CLI', () => {
+  test('self and paths print a failure on stderr, never into the data their stdout carries', async () => {
+    let out: string[] = [];
+    let err: string[] = [];
+    const run = (argv: string[], stdin = '[{"number": 1, "headRefName": "pr/x"}]', git?: () => { status: number; stdout: string; stderr: string }) => {
+      out = [];
+      err = [];
+      return commitsMain(argv, { out: l => out.push(l), err: l => err.push(l), stdin: () => stdin, ...(git ? { git } : {}) });
+    };
+    // `gh api user` failed, so the template passed an empty --head-owner; stdout is redirected into prs-open.self.json.
+    expect(await run(['self', '--head-ref', 'pr/x', '--head-owner', ''])).toBe(2);
+    expect([out, err.map(l => l.split(' ').slice(0, 2).join(' '))]).toEqual([[], ['RESULT USAGE']]);
+    expect(await run(['self', '--head-ref', 'pr/x', '--head-owner', 'me'], 'not json')).toBe(2);
+    expect([out.length, err.length]).toEqual([0, 1]);
+    expect(await run(['paths', '--cwd', repo], '', () => ({ status: 128, stdout: '', stderr: 'fatal: not a git repository' }))).toBe(1);
+    expect([out, err.map(l => l.split(' ').slice(0, 2).join(' '))]).toEqual([[], ['RESULT ERROR']]);
+    expect(await run(['self', '--head-ref', 'pr/x', '--head-owner', 'me'])).toBe(0);
+    expect([JSON.parse(out.join('')), err]).toEqual([[{ number: 1, headRefName: 'pr/x' }], []]);
+  });
+
   test('list prints no carried upstream text: an earlier hit title never reaches the model', async () => {
     const env = { ...process.env, GSTACK_STATE_ROOT: path.join(ROOT, 'home-list') };
     const first = listAuditCommits(defaultGit, repo, base, null);
