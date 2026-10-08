@@ -16,13 +16,15 @@ report's `head` is not `git rev-parse HEAD`. Do not open over EXACT_DUP.
 ~/.claude/skills/gstack/bin/gstack-pr-watch size --repo <upstream owner/name>
 ```
 
-`RESULT GREEN|AMBER|RED` compares churn and files (release files excluded)
-with merged contributor PRs. Commits are shown, not scored: upstream
-squash-merges. On RED, ask the owner with AskUserQuestion
+`RESULT GREEN|AMBER|RED` compares churn and files, release files
+included, with contributor PRs among the last 200 merged (the static
+2026-10-07 thresholds when fewer than 20). Commits are shown, not scored:
+upstream squash-merges. Exit 30 (no remote for the repo) or 40 (its base
+branch is gone): report it. On RED, ask the owner with AskUserQuestion
 (`<gstack-qid:pr-prep-size-split>`) whether to split the branch first or
-open as is: a 74-commit, +4632-line contributor PR read
-RED and was rewritten upstream inside a 220-file maintainer wave. Never
-decide this yourself.
+open as is: a 74-commit, +4632-line contributor PR read RED and was
+rewritten upstream inside a 220-file maintainer wave. Never decide this
+yourself.
 
 ### 3. The body template
 
@@ -105,5 +107,6 @@ uploads a screenshot and never runs `gh pr ready`.
 
 ### 6. Keep watching
 
-Offer the owner `gstack-pr-watch enable` for this PR and the opt-in
-LaunchAgent in `contrib/pr-watch/README.md` (the owner installs it).
+Offer the owner `gstack-pr-watch enable --pr <number> --repo <upstream
+owner/name>` for this PR and the opt-in LaunchAgent in
+`contrib/pr-watch/README.md` (the owner installs it).
