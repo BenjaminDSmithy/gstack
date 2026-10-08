@@ -47,7 +47,8 @@ order (bun install --frozen-lockfile, gen:skill-docs --host all + the
 freshness check, vendor:xterm, the browse node-server build, build:gates,
 build:cso; GSTACK_EXPECT_BINARIES=1 for the tests when build:gates ran),
 one bun process per file,
-with Claude Code's env stripped, provider tokens unset and a real-path
+with agent markers (CLAUDECODE, AI_AGENT, AGENT, REPL_ID, CLAUDE*)
+stripped, every credential-shaped variable unset and a real-path
 TMPDIR. Records the verdict for the exact commit in the PR state.
 
   run       preconditions + selection + per-file runs + mirrors
@@ -81,12 +82,25 @@ First line of output: RESULT <WORD> ...`;
 
 // ── environment ─────────────────────────────────────────────────────────────
 
-const STRIP_RE = /^(CLAUDECODE|AI_AGENT|CLAUDE[A-Z0-9_]*|GSTACK_SKIP_RENDER_HOOK|EVALS[A-Z0-9_]*|GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN)$|_API_KEY$/;
+// Agent markers (bun 1.4 switches to agent-mode output on CLAUDECODE, AGENT
+// and REPL_ID, which breaks nested-runner tests), the render hook and eval
+// knobs.
+const STRIP_RE = /^(CLAUDECODE|AI_AGENT|AGENT|REPL_ID|CLAUDE[A-Z0-9_]*|GSTACK_SKIP_RENDER_HOOK|EVALS[A-Z0-9_]*)$/;
+// CI's free lane is secretless: any name with a credential-shaped segment
+// goes, the same segment rule as test/helpers/hermetic-env.ts
+// (GITHUB_TOKEN_1, GH_PAT, AWS_SESSION_TOKEN, SSH_AUTH_SOCK), never a
+// substring match (GITHUB_PATH, GITHUB_TOKENIZER are metadata).
+const CREDENTIAL_SEGMENTS = new Set([
+  'KEY', 'KEYS', 'TOKEN', 'TOKENS', 'SECRET', 'SECRETS', 'PASSWORD', 'PASSWD',
+  'PASS', 'CREDENTIAL', 'CREDENTIALS', 'AUTH', 'PAT', 'DSN', 'COOKIE',
+  'SESSION', 'PRIVATE',
+]);
+const credentialShaped = (name: string) => !/^GIT_CONFIG_KEY_\d+$/.test(name) && name.toUpperCase().split('_').some(seg => CREDENTIAL_SEGMENTS.has(seg));
 
 /** The env a validation run gets: agent markers and provider credentials gone, CI's git default branch, real-path TMPDIR. */
 export function validationEnv(base: NodeJS.ProcessEnv, tmpdir: string, seedBase: string | null): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(base)) if (!STRIP_RE.test(k) && v !== undefined) env[k] = v;
+  for (const [k, v] of Object.entries(base)) if (!STRIP_RE.test(k) && !credentialShaped(k) && v !== undefined) env[k] = v;
   const n = Number.parseInt(env.GIT_CONFIG_COUNT ?? '0', 10) || 0;
   env.GIT_CONFIG_COUNT = String(n + 1);
   env[`GIT_CONFIG_KEY_${n}`] = 'init.defaultBranch';

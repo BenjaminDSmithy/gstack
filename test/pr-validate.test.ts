@@ -45,6 +45,15 @@ describe('validationEnv', () => {
     }
     expect(env).toMatchObject({ PATH: '/usr/bin', HOME: '/h', TMPDIR: '/real/tmp/', GSTACK_FREE_SEED_BASE: 'abc', GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'a.b', GIT_CONFIG_KEY_1: 'init.defaultBranch', GIT_CONFIG_VALUE_1: 'main' });
   });
+
+  test('drops every bun agent-mode trigger and every credential-shaped name; keeps look-alike metadata', () => {
+    const gone = ['AGENT', 'REPL_ID', 'ANTHROPIC_AUTH_TOKEN', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'GITHUB_TOKEN_1', 'GH_PAT',
+      'GOOGLE_APPLICATION_CREDENTIALS', 'NPM_TOKEN', 'HF_TOKEN', 'SSH_AUTH_SOCK', 'HOMEBREW_GITHUB_API_TOKEN', 'DB_PASSWORD'];
+    const kept = ['GITHUB_PATH', 'GITHUB_TOKENIZER', 'BUN_INSTALL', 'KEYCHAIN_HOME', 'LANG'];
+    const env = validationEnv(Object.fromEntries([...gone, ...kept].map(k => [k, 'v'])), '/t', null);
+    for (const k of gone) expect(env[k], k).toBeUndefined();
+    for (const k of kept) expect(env[k], k).toBe('v');
+  });
 });
 
 describe('selectTests', () => {
@@ -131,6 +140,13 @@ describe('judgeBunRun on real bun runs', () => {
     expect(v.rc).toBe(0);
     expect(v.ok).toBe(false);
     expect(v.why).toContain('cut short');
+  });
+  test('bun under the validation env prints per-test lines even when the caller sets AGENT and REPL_ID', () => {
+    const dir = path.join(ROOT, 'judge');
+    write(dir, 'agent.test.ts', "import { test, expect } from 'bun:test';\ntest('agent-a', () => expect(1).toBe(1));\n");
+    const env = validationEnv({ ...process.env, AGENT: '1', REPL_ID: 'r' }, ROOT, null);
+    const r = defaultTool('bun', ['test', path.join(dir, 'agent.test.ts')], { cwd: dir, env, timeoutMs: 120_000 });
+    expect(`${r.stdout}${r.stderr}`).toContain('(pass) agent-a');
   });
   test('a summary-shaped line printed by the test itself does not stand in for bun\'s own', () => {
     const v = run('fake-summary', "test('e', () => { console.log('Ran 3 tests across 1 file. [4.00ms]'); process.exit(0); });\ntest('f', () => expect(1).toBe(2));");
