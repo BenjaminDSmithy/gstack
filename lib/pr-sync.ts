@@ -98,6 +98,8 @@ const GENERATED_EXTRA = ['review/design-checklist.md', 'lib/dom-dump.js', 'gstac
 const RELEASE_TOOLING = ['bin/gstack-next-version', 'bin/gstack-version-bump', 'lib/version-source.ts', 'scripts/gen-agents-digest.ts', 'scripts/detect-bump.ts'];
 const PLATFORM_FILES = ['bin/gstack-next-version', 'bin/gstack-version-bump', 'scripts/detect-bump.ts', 'scripts/gen-agents-digest.ts'];
 const DIGEST = 'agents-digest/gstack-AGENTS.md';
+/** A write follows its pre-write gate within this many seconds, or it is not sent. */
+const GATE_MAX_AGE_S = 60;
 
 export function cmpVersion(a: string, b: string): number {
   const pa = a.split('.').map(Number);
@@ -982,11 +984,16 @@ function assertPushTarget(c: Ctx): void {
 
 /**
  * The one push both writes make: `<sha>` to the PR head ref, fast-forward
- * only, receipted, classified by classifyPush. On a refusal it throws with
+ * only, to a push URL that is the head repo, within 60 s of the pre-write
+ * gate, receipted, classified by classifyPush. On a refusal it throws with
  * git's whole output (the hook's or the server's reason) as untrusted data.
  */
-function pushOrThrow(c: Ctx, cwd: string, sha: string, payloadClass: string): void {
+function pushOrThrow(c: Ctx, cwd: string, sha: string, payloadClass: string, gateAt: number): void {
   assertPushTarget(c);
+  // The plan's pre-write gate runs within 60 s of the write. Counted from when
+  // the gate started, so a lock wait or a slow fetch after it cannot stretch it.
+  const age = Math.round((c.d.now().getTime() - gateAt) / 1000);
+  if (age > GATE_MAX_AGE_S) throw new PrContextError(`the pre-write gate ran ${age} s ago (limit ${GATE_MAX_AGE_S} s): nothing was sent; re-run with the owner's yes`, SYNC_EXIT.PRECONDITION);
   const ref = `refs/heads/${c.pr.headRef}`;
   const r = receiptedSend({ host: 'github.com', payloadClass, consent: 'user ran /pr-prep', env: c.d.env }, () =>
     c.d.git(['push', '--porcelain', c.headRemote, `${sha}:${ref}`], { cwd, timeoutMs: 300_000 }));
@@ -1002,6 +1009,7 @@ function cmdPush(c: Ctx): number {
   const pending = readStagedSync(c.stateDir, c.pr);
   if (!pending) throw new PrContextError('no sync is staged: run `gstack-pr-sync merge` first', SYNC_EXIT.PRECONDITION);
   // The gate polls gstack-pr-watch, which takes the PR lock itself: run it just before taking the lock.
+  const gateAt = d.now().getTime();
   const gate = d.preWriteGate({ gh: d.gh, git: d.git, env: d.env, cwd: c.cwd, repo: c.repo, number: c.pr.number, expectHead: pending.h0, state: readStateFor(c.stateDir, c.pr) });
   if (!gate.ok) throw new PrContextError(`pre-write gate: ${gate.reason}`, SYNC_EXIT.PRECONDITION);
   return withPrLock(c.stateDir, () => {
@@ -1021,7 +1029,7 @@ function cmdPush(c: Ctx): number {
     if (parent !== staged.h0) throw new PrContextError('the staged commit is not one commit on top of the PR head', SYNC_EXIT.PRECONDITION);
     const now = pinBranch(d.git, c.cwd, c.headRemote, c.pr.headRef).sha;
     if (now !== staged.h0) throw new PrContextError(`${c.headRemote}/${c.pr.headRef} moved to ${now.slice(0, 12)}; abort and re-sync`, SYNC_EXIT.REMOTE_MOVED);
-    pushOrThrow(c, staged.scratch, staged.sha, 'pr-sync-push');
+    pushOrThrow(c, staged.scratch, staged.sha, 'pr-sync-push', gateAt);
     // It landed (git exit 0): record that before any network read can fail.
     const after = readStateFor(c.stateDir, c.pr) ?? state;
     writeState(c.stateDir, { ...after, bodyStaleSince: staged.sha });
@@ -1077,13 +1085,14 @@ function cmdRetrigger(c: Ctx): number {
   if (st0?.bodyStaleSince) throw new PrContextError(`the PR body is still stale since the push of ${st0.bodyStaleSince.slice(0, 12)}: publish the body first`, SYNC_EXIT.BODY_STALE);
   const h0 = pinBranch(d.git, c.cwd, c.headRemote, c.pr.headRef).sha;
   if (h0 !== c.pr.headOid) throw new PrContextError(`${c.headRemote}/${c.pr.headRef} is ${h0.slice(0, 12)} but the PR reports ${c.pr.headOid.slice(0, 12)}`, SYNC_EXIT.REMOTE_MOVED);
+  const gateAt = d.now().getTime();
   const gate = d.preWriteGate({ gh: d.gh, git: d.git, env: d.env, cwd: c.cwd, repo: c.repo, number: c.pr.number, expectHead: h0, state: st0 });
   if (!gate.ok) throw new PrContextError(`pre-write gate: ${gate.reason}`, SYNC_EXIT.PRECONDITION);
   return withPrLock(c.stateDir, () => {
     const tree = gitOk(d, c.cwd, ['rev-parse', `${h0}^{tree}`], 'git rev-parse').trim();
     const sha = gitOk(d, c.cwd, ['commit-tree', tree, '-p', h0, '-F', '-'], 'git commit-tree', { input: msg }).trim();
     if (pinBranch(d.git, c.cwd, c.headRemote, c.pr.headRef).sha !== h0) throw new PrContextError('the remote head moved', SYNC_EXIT.REMOTE_MOVED);
-    pushOrThrow(c, c.cwd, sha, 'pr-ci-retrigger-push');
+    pushOrThrow(c, c.cwd, sha, 'pr-ci-retrigger-push', gateAt);
     const st = readStateFor(c.stateDir, c.pr) ?? freshState(c.pr, { headRemote: c.headRemote, upstreamRemote: c.upRemote });
     writeState(c.stateDir, { ...st, bodyStaleSince: sha });
     const clean = d.git(['status', '--porcelain', '--untracked-files=no'], { cwd: c.cwd });
