@@ -53,6 +53,9 @@ TMPDIR. Records the verdict for the exact commit in the PR state.
 
 A file passes only with exit 0, no "(fail)" line and a
 "Ran N tests across 1 file" line (no line = a truncated run).
+Changed code (anything but release files and *.md) that no passing
+selected test covers is red (NO_TESTS), never "0/0 green": declare the
+tests that cover it.
 A change to package.json beyond .version, bun.lock, tsconfig or the
 free-suite runner needs the full suite: the selection prints FULL and
 the run stays red unless --accept-full-risk (CI runs the full suite).
@@ -329,7 +332,20 @@ function pkgVersionOnly(c: Ctx, mb: string): boolean {
   }
 }
 
-function selection(c: Ctx, state: PrState | null): { sel: Selection; mb: string } {
+/**
+ * Changed files a test could verify: not release metadata, not prose, still
+ * present (a deleted module has nothing left to run), and not a FULL
+ * trigger (those are the full suite's, waived or red on their own).
+ */
+export function untestedCode(changed: string[], sel: Selection, exists: (f: string) => boolean): string[] {
+  return changed.filter(f => !RELEASE_FILES.includes(f) && !/\.md$/i.test(f) && !sel.full.includes(f) && exists(f));
+}
+
+function noTestsLine(code: string[]): string {
+  return `NO_TESTS ${code.length} changed code file(s) (${code.slice(0, 5).join(', ')}${code.length > 5 ? ', ...' : ''}) and no selected test passed: declare the tests that cover them (gstack-pr-validate declare)`;
+}
+
+function selection(c: Ctx, state: PrState | null): { sel: Selection; mb: string; changed: string[] } {
   const mb = gitOk(c.d, c.tree, ['merge-base', 'HEAD', c.base], 'git merge-base').trim();
   const changed = changedFiles(c, mb);
   const universe = c.d.universe(c.tree);
@@ -341,17 +357,19 @@ function selection(c: Ctx, state: PrState | null): { sel: Selection; mb: string 
       return '';
     }
   };
-  return { sel: selectTests({ changed, universe, declared, pkgVersionOnly: pkgVersionOnly(c, mb), source }), mb };
+  return { sel: selectTests({ changed, universe, declared, pkgVersionOnly: pkgVersionOnly(c, mb), source }), mb, changed };
 }
 
 // ── subcommands ─────────────────────────────────────────────────────────────
 
 function cmdSelect(c: Ctx): number {
   const state = readStateFor(c.stateDir, c.pr);
-  const { sel, mb } = selection(c, state);
+  const { sel, mb, changed } = selection(c, state);
   c.d.out(`RESULT SELECTED files=${sel.files.length} full=${sel.full.length ? 'yes' : 'no'} base=${c.base.slice(0, 12)} merge-base=${mb.slice(0, 12)}`);
   for (const f of sel.full) c.d.out(`FULL\t${f}`);
   for (const s of sel.files) c.d.out(`SELECT\t${s.file}\t${s.rules.join(',')}`);
+  const code = untestedCode(changed, sel, f => fs.existsSync(path.join(c.tree, f)));
+  if (code.length && !sel.files.length) c.d.out(noTestsLine(code));
   return 0;
 }
 
@@ -396,7 +414,7 @@ function cmdRun(c: Ctx): number {
 function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string): number {
   const { d } = c;
   const state = readStateFor(c.stateDir, c.pr);
-  const { sel, mb } = selection(c, state);
+  const { sel, mb, changed } = selection(c, state);
   const env = validationEnv(d.env, tmp, mb);
   const lines: string[] = [];
   let worst = 0;
@@ -460,6 +478,10 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
     }
   }
 
+  // Changed code with no passing selected test is unverified, never GREEN 0/0.
+  const code = untestedCode(changed, sel, f => fs.existsSync(path.join(c.tree, f)));
+  if (code.length && green === 0) line(noTestsLine(code), true);
+
   // Cheap mirrors of CI's other gates.
   for (const script of ['typecheck', 'typecheck:test']) {
     if (!pkg.scripts?.[script]) continue;
@@ -473,7 +495,7 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
     const r = tool(runner, [scanner], 120_000, diff.stdout);
     line(`mirror secret-scan rc=${r.status}`, r.status !== 0);
   }
-  const shellChanged = changedFiles(c, mb).filter(f => /\.sh$/.test(f) && fs.existsSync(path.join(c.tree, f)));
+  const shellChanged = changed.filter(f => /\.sh$/.test(f) && fs.existsSync(path.join(c.tree, f)));
   if (shellChanged.length && d.which('shellcheck')) {
     const r = tool('shellcheck', ['--severity=error', ...shellChanged], 300_000);
     line(`mirror shellcheck rc=${r.status} (${shellChanged.length} file(s))`, r.status !== 0);

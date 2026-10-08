@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { validationEnv, selectTests, judgeBunRun, bunPinFrom, macosNamedFrom, validateMain, defaultTool } from '../lib/pr-validate';
+import { validationEnv, selectTests, judgeBunRun, bunPinFrom, macosNamedFrom, validateMain, defaultTool, type ValidateDeps } from '../lib/pr-validate';
 import { prStateDir, topicFor, readStateFor, type GhRunner } from '../lib/pr-context';
 
 setDefaultTimeout(180_000);
@@ -135,7 +135,17 @@ describe('workflow parsing', () => {
 describe('run, select and declare against a fixture PR tree', () => {
   // test/x.test.ts imports lib/y.ts the way real tests do: no extension, no path comment.
   const X_HEAD = "import { test, expect } from 'bun:test';\nimport { y } from '../lib/y';\n";
-  function fixture(name: string, testBody: string | null, baseBody = "test('x', () => expect(y).toBe(1));") {
+  interface FxOpts {
+    baseBody?: string;
+    /** Extra files in the base commit (upstream main). */
+    base?: Record<string, string>;
+    /** The PR commit's changes (null deletes); default: lib/y.ts 1 -> 2. */
+    pr?: Record<string, string | null>;
+    universe?: string[];
+    deps?: Partial<ValidateDeps>;
+  }
+  function fixture(name: string, testBody: string | null, opts: FxOpts = {}) {
+    const baseBody = opts.baseBody ?? "test('x', () => expect(y).toBe(1));";
     const base = path.join(ROOT, name);
     const up = path.join(base, 'acme', 'fx.git');
     const tree = path.join(base, 'tree');
@@ -146,12 +156,16 @@ describe('run, select and declare against a fixture PR tree', () => {
     write(tree, 'lib/y.ts', 'export const y = 1;\n');
     write(tree, 'test/x.test.ts', `${X_HEAD}${baseBody}\n`);
     write(tree, 'test/z.test.ts', "import { test, expect } from 'bun:test';\ntest('z', () => expect(1).toBe(1));\n");
+    for (const [rel, text] of Object.entries(opts.base ?? {})) write(tree, rel, text);
     git(tree, 'add', '-A');
     git(tree, 'commit', '-q', '-m', 'base');
     git(tree, 'remote', 'add', 'upstream', up);
     git(tree, 'push', '-q', 'upstream', 'main');
     git(tree, 'checkout', '-q', '-b', 'pr/v');
-    write(tree, 'lib/y.ts', 'export const y = 2;\n');
+    for (const [rel, text] of Object.entries(opts.pr ?? { 'lib/y.ts': 'export const y = 2;\n' })) {
+      if (text === null) fs.rmSync(path.join(tree, rel));
+      else write(tree, rel, text);
+    }
     if (testBody !== null) write(tree, 'test/x.test.ts', `${X_HEAD}${testBody}\n`);
     git(tree, 'add', '-A');
     git(tree, 'commit', '-q', '-m', 'change y');
@@ -163,7 +177,8 @@ describe('run, select and declare against a fixture PR tree', () => {
     }) as GhRunner;
     const env = { ...process.env, GSTACK_STATE_ROOT: path.join(base, 'home') };
     const out: string[] = [];
-    const deps = { gh, env, out: (l: string) => out.push(l), universe: () => ['test/x.test.ts', 'test/z.test.ts'], tempRoot: () => ROOT, which: () => false };
+    const universe = opts.universe ?? ['test/x.test.ts', 'test/z.test.ts'];
+    const deps: Partial<ValidateDeps> = { gh, env, out: (l: string) => out.push(l), universe: () => universe, tempRoot: () => ROOT, which: () => false, ...opts.deps };
     const call = (argv: string[]) => validateMain([...argv, '--pr', '5', '--repo', 'acme/fx', '--cwd', tree], deps);
     const dir = prStateDir({ cwd: tree, topic: topicFor('pr/v'), env });
     return { tree, out, call, dir };
@@ -196,6 +211,21 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(await f.call(['run'])).toBe(1);
     expect(f.out.find(l => l.startsWith('test/x.test.ts'))).toMatch(/RED: .*\[imports:lib\/y\.ts\]$/);
     expect(readStateFor(f.dir, pr)!.validation).toMatchObject({ worst: 1 });
+  });
+
+  test('changed code that no selected test verified is red, never GREEN 0/0; a docs-only change stays green', async () => {
+    const f = fixture('no-tests', null, { pr: { 'lib/orphan.ts': 'export const o = 1;\n' } });
+    expect(await f.call(['select'])).toBe(0);
+    expect(f.out.filter(l => l.startsWith('NO_TESTS'))).toHaveLength(1);
+    f.out.length = 0;
+    expect(await f.call(['run'])).toBe(1);
+    expect(f.out[0]).toMatch(/^RESULT RED .*0\/0 selected files green/);
+    expect(f.out.find(l => l.startsWith('NO_TESTS'))).toContain('lib/orphan.ts');
+    expect(readStateFor(f.dir, pr)!.validation).toMatchObject({ worst: 1 });
+
+    const d = fixture('docs-only', null, { pr: { 'docs/notes.md': '# notes\n' } });
+    expect(await d.call(['run'])).toBe(0);
+    expect(d.out.some(l => l.startsWith('NO_TESTS'))).toBe(false);
   });
 
   test('a runner/dependency change keeps the run red unless the owner accepts the full-suite risk', async () => {
