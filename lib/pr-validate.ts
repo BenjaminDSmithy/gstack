@@ -34,6 +34,7 @@ import {
   type GhResult, type GhRunner, type GitRunner, type PrInfo, type PrState,
 } from './pr-context';
 import { collectFreeTestFiles } from '../scripts/test-free-shards';
+import { parseBunTerminalSummary, stripAnsiLine } from '../scripts/lib/shard-engine';
 
 export const VALIDATE_EXIT = { GREEN: 0, RED: 1, USAGE: 2, PRECONDITION: 30 } as const;
 
@@ -53,8 +54,10 @@ TMPDIR. Records the verdict for the exact commit in the PR state.
             test files of the tree only; voids a recorded verdict that
             did not run them)
 
-A file passes only with exit 0, no "(fail)" line and a
-"Ran N tests across 1 file" line (no line = a truncated run).
+A file passes only with exit 0, no "(fail)" line and bun's own last
+"Ran N tests across 1 file" line agreeing with the counts above it (no
+such line = a truncated run). A file in which no test passed (every
+test skipped) is UNVERIFIED: named in the summary, never counted green.
 Changed code (anything but release files and *.md) that no passing
 selected test covers is red (NO_TESTS), never "0/0 green": declare the
 tests that cover it.
@@ -204,21 +207,53 @@ export function selectTests(x: { changed: string[]; universe: string[]; declared
 
 // ── parsing ─────────────────────────────────────────────────────────────────
 
-export interface FileVerdict { file: string; rc: number | null; pass: number; fail: number; skip: number; ran: boolean; ok: boolean; why: string }
+export interface FileVerdict {
+  file: string; rc: number | null; pass: number; fail: number; skip: number;
+  /** bun's own last summary names exactly one file and agrees with the counts above it. */
+  ran: boolean;
+  ok: boolean;
+  /** The run was clean but no test passed (every test skipped or todo): it verified nothing. */
+  unverified: boolean;
+  why: string;
+}
 
-/** One `bun test <file>` run: green only with exit 0, no (fail), and a `Ran N tests across 1 file` line. */
+/**
+ * One `bun test <file>` run. Green only with exit 0, no `(fail)` line or
+ * unhandled error between tests, and bun's own summary: the LAST
+ * `Ran N tests across 1 file. [t]` line, whose N equals the pass, fail,
+ * skip and todo counts printed directly above it. A summary-shaped line a
+ * test printed before a stray process.exit has no counts block, so it
+ * cannot stand in. A clean run in which no test passed is unverified,
+ * never green.
+ */
 export function judgeBunRun(file: string, r: GhResult): FileVerdict {
-  const text = `${r.stdout}\n${r.stderr}`;
-  const num = (word: string) => Number(new RegExp(`^\\s*(\\d+) ${word}\\b`, 'm').exec(text)?.[1] ?? 0);
-  const ran = /^Ran \d+ tests? across \d+ files?/m.test(text);
-  const failLine = /^\(fail\)/m.test(text);
-  const v = { file, rc: r.status, pass: num('pass'), fail: num('fail'), skip: num('skip'), ran };
+  const lines = `${r.stdout}\n${r.stderr}`.split('\n').map(stripAnsiLine);
+  let at = -1;
+  let sum: { tests: number; files: number } | null = null;
+  for (let i = lines.length - 1; i >= 0 && !sum; i--) {
+    sum = parseBunTerminalSummary(lines[i]);
+    if (sum) at = i;
+  }
+  const counts: Record<string, number> = { pass: 0, fail: 0, skip: 0, todo: 0 };
+  for (let i = at - 1; i >= 0; i--) {
+    const m = /^\s*(\d+) (\S.*)$/.exec(lines[i]);
+    if (!m) break;
+    if (m[2] in counts) counts[m[2]] = Number(m[1]);
+  }
+  const total = counts.pass + counts.fail + counts.skip + counts.todo;
+  const ran = sum !== null && sum.files === 1 && sum.tests === total;
+  const failLine = lines.some(l => /^\(fail\) /.test(l) || l === '# Unhandled error between tests');
+  const v = { file, rc: r.status, pass: counts.pass, fail: counts.fail, skip: counts.skip, ran };
   let why = 'ok';
   if (r.error) why = `did not finish: ${r.error}`;
   else if (r.status !== 0) why = `exit ${r.status}`;
   else if (failLine || v.fail > 0) why = 'a (fail) line';
-  else if (!ran) why = 'no "Ran N tests" line: the run was cut short';
-  return { ...v, ok: why === 'ok', why };
+  else if (!sum) why = 'no "Ran N tests" line: the run was cut short';
+  else if (sum.files !== 1) why = `bun's summary names ${sum.files} files, not 1`;
+  else if (sum.tests !== total) why = `bun's summary says ${sum.tests} tests but the counts say ${total}: the run was cut short`;
+  const unverified = why === 'ok' && counts.pass === 0;
+  if (unverified) why = total ? 'no test passed: every test skipped' : 'the file has no tests';
+  return { ...v, ok: why === 'ok', unverified, why };
 }
 
 /** The `[test] preload` files of a bunfig.toml, repo-relative (string or array form). */
@@ -512,14 +547,17 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   // Each selected file in its own bun process, as the runner shards would see it.
   const macos = new Set(macosNamedFrom(workflow));
   let green = 0;
+  const unverified: string[] = [];
+  const verdict = (v: FileVerdict) => (v.ok ? 'ok' : v.unverified ? `UNVERIFIED: ${v.why}` : `RED: ${v.why}`);
   for (const s of sel.files) {
     const abs = path.join(c.tree, s.file);
     const v = judgeBunRun(s.file, tool('bun', ['test', abs, '--timeout=30000', '--max-concurrency=1'], 900_000));
     if (v.ok) green++;
-    line(`${s.file} rc=${v.rc} ${v.pass} pass ${v.fail} fail ${v.skip} skip ran=${v.ran ? 1 : 0} ${v.ok ? 'ok' : `RED: ${v.why}`} [${s.rules.join(',')}]`, !v.ok);
+    if (v.unverified) unverified.push(s.file);
+    line(`${s.file} rc=${v.rc} ${v.pass} pass ${v.fail} fail ${v.skip} skip ran=${v.ran ? 1 : 0} ${verdict(v)} [${s.rules.join(',')}]`, !v.ok && !v.unverified);
     if (macos.has(s.file)) {
       const sys = judgeBunRun(s.file, d.tool('bun', ['test', abs, '--timeout=30000', '--max-concurrency=1'], { cwd: c.tree, env: { ...env, TMPDIR: sysTmp.endsWith('/') ? sysTmp : `${sysTmp}/` }, timeoutMs: 900_000 }));
-      line(`${s.file} (default temp root) rc=${sys.rc} ran=${sys.ran ? 1 : 0} ${sys.ok ? 'ok' : `RED: ${sys.why}`}`, !sys.ok);
+      line(`${s.file} (default temp root) rc=${sys.rc} ran=${sys.ran ? 1 : 0} ${verdict(sys)}`, !sys.ok && !sys.unverified);
     }
   }
 
@@ -546,7 +584,8 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
     line(`mirror shellcheck rc=${r.status} (${shellChanged.length} file(s))`, r.status !== 0);
   }
 
-  const summary = `${green}/${sel.files.length} selected files green${worst ? '; RED' : ''}`;
+  const skipped = unverified.length ? `; ${unverified.length} unverified (every test skipped: ${unverified.slice(0, 3).join(', ')}${unverified.length > 3 ? ', ...' : ''})` : '';
+  const summary = `${green}/${sel.files.length} selected files green${skipped}${worst ? '; RED' : ''}`;
   lines.push(`VALIDATE-END worst=${worst}`);
   fs.writeFileSync(path.join(outDir, 'summary.txt'), lines.join('\n') + '\n');
   withPrLock(c.stateDir, () => {

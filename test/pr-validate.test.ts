@@ -132,6 +132,23 @@ describe('judgeBunRun on real bun runs', () => {
     expect(v.ok).toBe(false);
     expect(v.why).toContain('cut short');
   });
+  test('a summary-shaped line printed by the test itself does not stand in for bun\'s own', () => {
+    const v = run('fake-summary', "test('e', () => { console.log('Ran 3 tests across 1 file. [4.00ms]'); process.exit(0); });\ntest('f', () => expect(1).toBe(2));");
+    expect(v).toMatchObject({ rc: 0, ok: false, ran: false });
+    expect(v.why).toContain('cut short');
+  });
+  test('a file whose every test skipped verified nothing: unverified, not ok', () => {
+    const v = run('all-skip', "test.skipIf(true)('g', () => expect(1).toBe(2));\ntest.skip('h', () => {});\ntest.todo('i');");
+    expect(v).toMatchObject({ rc: 0, ok: false, unverified: true, ran: true, pass: 0, skip: 2 });
+    expect(v.why).toContain('every test skipped');
+  });
+  test('the last summary must name one file and agree with the counts above it', () => {
+    const judge = (stderr: string) => judgeBunRun('f', { status: 0, stdout: '', stderr });
+    expect(judge(' 1 pass\n 0 fail\nRan 1 test across 1 file. [5.00ms]\n')).toMatchObject({ ok: true, pass: 1 });
+    expect(judge('\u001b[32m 1 pass\u001b[0m\n 0 fail\nRan 1 test across 1 file. [5.00ms]\r\n').ok).toBe(true);
+    expect(judge(' 2 pass\n 0 fail\nRan 2 tests across 2 files. [5.00ms]\n').why).toContain('2 files');
+    expect(judge(' 1 pass\n 0 fail\nRan 1 test across 1 file. [5.00ms]\n# Unhandled error between tests\n').ok).toBe(false);
+  });
 });
 
 describe('workflow parsing', () => {
@@ -247,6 +264,22 @@ describe('run, select and declare against a fixture PR tree', () => {
     f.out.length = 0;
     expect(await f.call(['run'])).toBe(1);
     expect(f.out.find(l => l.startsWith('test/x.test.ts'))).toContain('RED');
+  });
+
+  test('a selected file whose tests all skipped is unverified: not counted green, and alone it is NO_TESTS', async () => {
+    const skipBody = "test.skip('s', () => expect(y).toBe(2));";
+    const alone = fixture('skip-alone', skipBody);
+    expect(await alone.call(['run'])).toBe(1);
+    expect(alone.out[0]).toMatch(/^RESULT RED .*0\/1 selected files green; 1 unverified \(every test skipped: test\/x\.test\.ts\)/);
+    expect(alone.out.find(l => l.startsWith('test/x.test.ts'))).toContain('UNVERIFIED');
+    expect(alone.out.some(l => l.startsWith('NO_TESTS'))).toBe(true);
+
+    const mixed = fixture('skip-mixed', "test('x', () => expect(y).toBe(2));", {
+      universe: ['test/x.test.ts', 'test/s.test.ts', 'test/z.test.ts'],
+      base: { 'test/s.test.ts': `${X_HEAD}${skipBody}\n` },
+    });
+    expect(await mixed.call(['run'])).toBe(0);
+    expect(readStateFor(mixed.dir, pr)!.validation!.summary).toBe('1/2 selected files green; 1 unverified (every test skipped: test/s.test.ts)');
   });
 
   test('a runner/dependency change keeps the run red unless the owner accepts the full-suite risk', async () => {
