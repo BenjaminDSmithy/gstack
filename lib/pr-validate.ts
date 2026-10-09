@@ -939,9 +939,14 @@ function shownPaths(paths: string[]): string {
   return paths.slice(0, 5).map(shownPath).join(', ');
 }
 
-/** What `git status` lists against HEAD, one entry per path: tracked changes and untracked files (ignored files never appear). */
-function statusEntries(c: Ctx): { path: string; untracked: boolean }[] {
-  const parts = gitOk(c.d, c.tree, ['status', '--porcelain', '-z', '--untracked-files=all'], 'git status').split('\0');
+/**
+ * What `git status` lists against HEAD, one entry per path: tracked changes
+ * and untracked files (ignored files never appear; `normal` lists an
+ * untracked directory once). -z hands every name over raw, never C-quoted
+ * as the caller's core.quotePath would leave it: print one with shownPath.
+ */
+function statusEntries(c: Ctx, untrackedFiles: 'all' | 'normal' = 'all'): { path: string; untracked: boolean }[] {
+  const parts = gitOk(c.d, c.tree, ['status', '--porcelain', '-z', `--untracked-files=${untrackedFiles}`], 'git status').split('\0');
   const entries: { path: string; untracked: boolean }[] = [];
   for (let i = 0; i < parts.length; i++) {
     const e = parts[i];
@@ -965,11 +970,10 @@ function cmdRun(c: Ctx): number {
   const { d } = c;
   const sha = gitOk(d, c.tree, ['rev-parse', 'HEAD'], 'git rev-parse').trim();
   // Untracked files count: a test can import one the commit lacks, and the verdict would name that commit.
-  const dirty = gitOk(d, c.tree, ['status', '--porcelain', '--untracked-files=normal'], 'git status').split('\n').filter(Boolean);
+  const dirty = statusEntries(c, 'normal');
   if (dirty.length) {
-    const untracked = dirty.filter(l => l.startsWith('??')).map(l => l.slice(3));
-    const what = untracked.length === dirty.length ? `untracked files (${untracked.slice(0, 5).join(', ')})` : `uncommitted changes (${dirty.slice(0, 5).map(l => l.slice(3)).join(', ')})`;
-    throw new PrContextError(`${c.tree} has ${what}; a verdict must name a commit that holds everything the tests use`, VALIDATE_EXIT.PRECONDITION);
+    const what = dirty.every(e => e.untracked) ? 'untracked files' : 'uncommitted changes';
+    throw new PrContextError(`${c.tree} has ${what} (${shownPaths(dirty.map(e => e.path))}); a verdict must name a commit that holds everything the tests use`, VALIDATE_EXIT.PRECONDITION);
   }
   const outDir = path.join(c.stateDir, 'validate', sha.slice(0, 12));
   fs.rmSync(outDir, { recursive: true, force: true });

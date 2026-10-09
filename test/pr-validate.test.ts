@@ -996,6 +996,30 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(readStateFor(f.dir, pr)).toBeNull();
   });
 
+  test('the dirty-tree refusal prints the names it refuses escaped, whatever the caller\'s core.quotePath', async () => {
+    // An earlier run executed upstream code, which can leave a file named anything; under core.quotePath=false git status leaves a C1 byte raw.
+    const UNTRACKED = 'lib/u\u009b2Jcleared.ts';
+    const TRACKED = 'lib/t\u009b2Jcleared.ts';
+    const quotePathOff: GitRunner = (args, o) => defaultGit(args, { ...o, env: { ...process.env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.quotePath', GIT_CONFIG_VALUE_0: 'false' } });
+    const shown = (p: string) => JSON.stringify(p).replace(/[\x7f-\x9f]/g, ch => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
+    const CONTROL = /[\x00-\x1f\x7f-\x9f]/;
+    const f = fixture('dirty-c1', null, { base: { [TRACKED]: '1\n' }, deps: { git: quotePathOff } });
+    write(f.tree, UNTRACKED, '1\n');
+    expect(await f.call(['run'])).toBe(30);
+    expect(f.out).toHaveLength(1);
+    expect(f.out[0]).toStartWith('RESULT PRECONDITION ');
+    expect(f.out[0]).toContain(`has untracked files (${shown(UNTRACKED)})`);
+    expect(CONTROL.test(f.out[0]), JSON.stringify(f.out[0])).toBe(false);
+    // A tracked edit beside it: both names, escaped.
+    write(f.tree, TRACKED, '2\n');
+    f.out.length = 0;
+    expect(await f.call(['run'])).toBe(30);
+    expect(f.out).toHaveLength(1);
+    expect(f.out[0]).toContain(`has uncommitted changes (${shown(TRACKED)}, ${shown(UNTRACKED)})`);
+    expect(CONTROL.test(f.out[0]), JSON.stringify(f.out[0])).toBe(false);
+    expect(readStateFor(f.dir, pr)).toBeNull();
+  });
+
   const freeTests = (pin: string) =>
     `jobs:\n  free:\n    steps:\n      - uses: oven-sh/setup-bun@v2\n        with:\n          bun-version: ${pin}\n  macos-named-regressions:\n    steps:\n      - run: |\n          files=(test/x.test.ts)\n`;
 
