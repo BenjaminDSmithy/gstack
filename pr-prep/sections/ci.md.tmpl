@@ -19,7 +19,10 @@
   or for GitHub to start one, and triage again, or report what is
   missing. A `STALE` line that names a merge conflict means no run will
   start: GitHub runs no pull_request workflow while the PR conflicts with
-  its base, so run the sync mode first, then triage again.
+  its base, so run the sync mode first, then triage again. A `STALE`
+  line that names a maintainer's approval means no test has run on the
+  head, so it is not a pass: tell the owner the run waits on that
+  approval, post nothing, and triage again once it has run.
 - `RESULT AGGREGATE` (exit 10): the aggregate job failed with no failed
   shard; report the enveloped job log tail. `RESULT NOTHING` (exit 11):
   nothing to triage, because the head's newest run passed or every run on
