@@ -314,16 +314,23 @@ function printOwnerContent(d: BodyDeps, word: 'LOST' | 'VANISHED', items: string
 /**
  * What lint knows about the PR: `shas` are this PR's commits (base..head,
  * so the head, the code commit and earlier heads), `prNumber` its own
- * number, `released` the versions the base branch has published, `version`
- * this PR's own VERSION (naming it beside an issue number is no claim).
+ * number, `released` the versions the base branch has published.
  */
-export interface LintCtx { shas?: string[]; prNumber?: number; released?: string[]; version?: string }
+export interface LintCtx { shas?: string[]; prNumber?: number; released?: string[] }
 
 const VERSION4_RE = /\b\d+\.\d+\.\d+\.\d+\b/g;
 // Ways prose names a PR: `#3033` (not an HTML entity such as `&#8594;`),
 // `PR 3033`/`PR #3033`/`PR#3033`, `pull request 3033`, `pull/3033` (a URL's too)
 // and `owner/repo#3033`.
 const PR_REF_RES: readonly RegExp[] = [/(?<![&\w])#(\d+)\b/g, /\bPR\s*#?(\d+)\b/gi, /\bpull request\s+#?(\d+)\b/gi, /\bpull\/(\d+)\b/g, /\b[\w.-]+\/[\w.-]+#(\d+)\b/g];
+
+/**
+ * A GitHub closing keyword and the one reference after it (`Fixes #3032`,
+ * `closes: owner/repo#12`): an issue this PR closes, never another PR's
+ * claim, so lint drops it before reading PR numbers. Each keyword covers
+ * only its own reference, as on GitHub.
+ */
+const CLOSING_REF_RE = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(?:[\w.-]+\/[\w.-]+)?#\d+\b/gi;
 
 /** Every PR number a line names, in order of first appearance. */
 export function prRefs(line: string): number[] {
@@ -356,9 +363,9 @@ export function lintBody(body: string, ctx: LintCtx = {}): string[] {
       return;
     }
     const versions = l.match(VERSION4_RE) ?? [];
-    const others = prRefs(l).filter(n => n !== ctx.prNumber);
+    const others = prRefs(l.replace(CLOSING_REF_RE, ' ')).filter(n => n !== ctx.prNumber);
     if (/\bclaim(s|ed|ing)?\b/i.test(l) && versions.length) problems.push(`${at}: states a version claim (claims go stale when other PRs merge)`);
-    else if (others.length && versions.some(v => !released.has(v) && v !== ctx.version)) problems.push(`${at}: names #${others[0]} beside an unreleased version (another PR's version goes stale when it merges)`);
+    else if (others.length && versions.some(v => !released.has(v))) problems.push(`${at}: names #${others[0]} beside an unreleased version (another PR's version goes stale when it merges)`);
     if (HEAD_PHRASE_RE.test(l)) problems.push(`${at}: says "head" in prose (the facts block owns the head)`);
     if (fenced || !shas.length) return;
     for (const m of l.matchAll(/\b[0-9a-fA-F]{7,40}\b/g)) {
@@ -1097,15 +1104,14 @@ function pinnedRevs(c: Ctx): string[] {
   return [c.pr.headOid, ...(up ? [pinBranch(c.d.git, c.f.cwd, up, c.pr.baseRef).sha] : [])];
 }
 
-/** This PR's commits (base..head, plus the head itself), its VERSION and the versions the base has released. */
+/** This PR's commits (base..head, plus the head itself) and the versions the base has released. */
 function lintContext(c: Ctx, head: string, base: string | null): LintCtx {
   const shas = new Set([head]);
   if (base) {
     const r = c.d.git(['rev-list', `${base}..${head}`], { cwd: c.f.cwd });
     if (r.status === 0) for (const s of r.stdout.split('\n').filter(Boolean)) shas.add(s);
   }
-  const v = c.d.git(['show', `${head}:VERSION`], { cwd: c.f.cwd });
-  return { shas: [...shas], prNumber: c.pr.number, released: base ? publishedVersions(gitTexts(c, [base])) : [], version: v.status === 0 ? v.stdout.trim() : undefined };
+  return { shas: [...shas], prNumber: c.pr.number, released: base ? publishedVersions(gitTexts(c, [base])) : [] };
 }
 
 // ── check ───────────────────────────────────────────────────────────────────

@@ -152,8 +152,8 @@ describe('pure helpers', () => {
     expect(lintBody('Validated at `06c53bff1`.\n')).toEqual([]);
   });
 
-  test('lint: another PR named as `PR 3033`, a pull URL or owner/repo#N is a claim too; an entity or our own version is not', () => {
-    const ctx = { shas: [], prNumber: 3066, released: ['1.91.33.0'], version: '1.91.35.0' };
+  test('lint: another PR named as `PR 3033`, a pull URL or owner/repo#N is a claim too; an entity, a closed issue or our own PR is not', () => {
+    const ctx = { shas: [], prNumber: 3066, released: ['1.91.33.0'] };
     for (const l of ['PR 3033 holds 1.91.30.0.', 'Upstream queue: pull/3033 has 1.91.30.0, so this PR takes 1.91.35.0.',
       'https://github.com/garrytan/gstack/pull/3033 reserved 1.91.30.0.', 'garrytan/gstack#3033 sits on 1.91.30.0.', 'PR#3033 is at 1.91.30.0.']) {
       expect(lintBody(`${l}\n`, ctx), l).toEqual(['line 1: names #3033 beside an unreleased version (another PR\'s version goes stale when it merges)']);
@@ -161,6 +161,21 @@ describe('pure helpers', () => {
     for (const l of ['Fixes #3032; this PR ships 1.91.35.0.', 'VERSION &#8594; 1.91.35.0', 'Arrow &#8594; 1.91.36.0 is a typo test.', 'See pull/3066 for 1.91.35.0.']) {
       expect(lintBody(`${l}\n`, ctx), l).toEqual([]);
     }
+  });
+
+  test('lint: another PR beside THIS PR\'s own version is a collision claim; only a closing keyword makes a number an issue', () => {
+    const ctx = { shas: [], prNumber: 3066, released: ['1.91.33.0'] };
+    const refused = (n: number) => [`line 1: names #${n} beside an unreleased version (another PR's version goes stale when it merges)`];
+    // Our VERSION is 1.91.35.0: another PR's claim on it goes stale when either PR merges (#3032's stale-claim class).
+    for (const l of ['PR #3033 also holds 1.91.35.0; whichever merges second re-versions.', '#3033 and this PR both target 1.91.35.0.',
+      'Fixes #3032; #3033 holds 1.91.35.0 too.']) {
+      expect(lintBody(`${l}\n`, ctx), l).toEqual(refused(3033));
+    }
+    // GitHub's closing keywords (close, fix, resolve and their forms) name an issue this PR closes, each the one reference after it.
+    for (const l of ['Closes: #3032 in 1.91.35.0.', 'resolves garrytan/gstack#3032 (1.91.35.0)', 'Fixed #3032 and fixes #3040, shipping 1.91.35.0.']) {
+      expect(lintBody(`${l}\n`, ctx), l).toEqual([]);
+    }
+    expect(lintBody('Fixes #3032 and #3040, shipping 1.91.35.0.\n', ctx)).toEqual(refused(3040));
   });
 
   test('lint reports the body\'s own line numbers below the facts block', () => {
