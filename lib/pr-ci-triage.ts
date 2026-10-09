@@ -574,8 +574,11 @@ async function cmdRun(d: TriageDeps, f: Flags): Promise<number> {
       stale.push(newest
         ? `run ${newest.databaseId} is still ${word(newest.status) || 'queued'}: wait for every shard to finish, then triage again`
         : `no Windows Free Tests run on ${pr.headOid.slice(0, 12)} yet: wait for GitHub to start one, then triage again`);
-      return staleNoDraft(d, newest?.databaseId ?? null, stale);
     }
+    // A head remote holding another commit (the STALE above) leaves no
+    // verdict either: as with a green run, runs of the head gh reports that
+    // finished without a failed shard say nothing about the head that moved.
+    if (stale.length) return staleNoDraft(d, newest?.databaseId ?? null, stale);
     d.out(`RESULT NOTHING no failed Windows Free Tests run on ${pr.headOid.slice(0, 12)}`);
     return TRIAGE_EXIT.NOTHING;
   }
