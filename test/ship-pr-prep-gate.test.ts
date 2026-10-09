@@ -47,13 +47,18 @@ const SHELLS = ['bash', 'zsh', '/bin/bash']
   .filter((x, i, all) => all.findIndex((y) => y.real === x.real) === i)
   .map((x) => x.s);
 const HAVE_JQ = Bun.which('jq') !== null;
+// Root searches any directory, so a mode-000 one hides nothing from it.
+const IS_ROOT = process.getuid?.() === 0;
 const TOOL_DIRS = [...new Set(['git', 'jq'].map((t) => Bun.which(t)).filter((p): p is string => !!p).map((p) => path.dirname(p)))];
 
 let tmp: string;
+/** Dirs a case set to mode 000; searchable again before the cleanup walks them. */
+const locked: string[] = [];
 beforeAll(() => {
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ship-pr-prep-gate-')));
 });
 afterAll(() => {
+  for (const d of locked) fs.chmodSync(d, 0o755);
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -193,6 +198,8 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     crashes?: true;
     /** The hosts gh's hosts.yml (in GH_CONFIG_DIR) names; 'unreadable': there, mode 000. Left out: no file. */
     hostsYml?: string[] | 'unreadable';
+    /** A dir set to mode 000 once hosts.yml is written: gh's config dir, or ~/.config above it. */
+    lock?: 'cfg' | 'home/.config';
     /** Open PR numbers whose head branch is feat/x, per lowercase repo; a repo left out is one gh cannot find. */
     prs?: Record<string, number[]>;
     /** Lowercase repos whose PR lookup fails with a server error (gh can see them, but not now). */
@@ -278,13 +285,20 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     // mise 2026's words for a shim with no version selected.
     if (g.crashes) fs.writeFileSync(path.join(dir, 'gh'), '#!/bin/sh\necho "mise ERROR No version is set for shim: gh" >&2\nexit 1\n', { mode: 0o755 });
     // GH_CONFIG_DIR (run() points it here); the layout gh 2.102 writes: one top-level key per host.
+    // The same dir is XDG_CONFIG_HOME/gh under xdg and ~/.config/gh under home.
     fs.mkdirSync(path.join(dir, 'cfg'));
     fs.mkdirSync(path.join(dir, 'xdg'));
     fs.symlinkSync('../cfg', path.join(dir, 'xdg', 'gh'));
+    fs.mkdirSync(path.join(dir, 'home', '.config'), { recursive: true });
+    fs.symlinkSync('../../cfg', path.join(dir, 'home', '.config', 'gh'));
     if (g.hostsYml) {
       const yml = path.join(dir, 'cfg', 'hosts.yml');
       fs.writeFileSync(yml, (g.hostsYml === 'unreadable' ? ['github.com'] : g.hostsYml).map((h) => `${h}:\n    git_protocol: https\n    users:\n        me:\n    user: me\n`).join(''));
       if (g.hostsYml === 'unreadable') fs.chmodSync(yml, 0o000);
+    }
+    if (g.lock) {
+      locked.push(path.join(dir, g.lock));
+      fs.chmodSync(path.join(dir, g.lock), 0o000);
     }
     return dir;
   }
@@ -356,6 +370,13 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     { name: 'a gh that does not run reads hosts.yml under XDG_CONFIG_HOME when GH_CONFIG_DIR is empty', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, env: { GH_CONFIG_DIR: '', XDG_CONFIG_HOME: '{stub}/xdg' }, gh: { crashes: true, hostsYml: ['github.com', 'ghe.acme.test'] }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', note: [noteFor('ghe.acme.test')], code: 1 },
     { name: 'a gh that does not run still stops an Enterprise origin GH_HOST names', remotes: { origin: 'git@work-ghe:me/proj.git' }, env: { GH_HOST: 'GHE.Acme.test' }, gh: { crashes: true, hostsYml: ['github.com'] }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', note: [noteFor('ghe.acme.test')], code: 1 },
     { name: 'a gh whose hosts.yml cannot be read stops even a GitLab origin', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, gh: { crashes: true, hostsYml: 'unreadable' }, want: 'UPSTREAM_PR: lookup failed origin (gitlab.example.com/me/proj) - STOP', note: [noteFor('gitlab.example.com')], code: 1 },
+    // A hosts.yml behind a dir this user cannot search is one gh cannot read
+    // either (gh 2.102 fails `--version` there), not a missing one: it stops.
+    // Only a missing one under a dir that can be searched means no login.
+    { name: 'a gh whose config dir cannot be searched still stops an Enterprise origin', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, gh: { crashes: true, hostsYml: ['github.com', 'ghe.acme.test'], lock: 'cfg' }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', note: [noteFor('ghe.acme.test')], code: 1 },
+    { name: 'a gh whose ~/.config cannot be searched still stops an Enterprise origin', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, env: { GH_CONFIG_DIR: '', XDG_CONFIG_HOME: '', HOME: '{stub}/home' }, gh: { crashes: true, hostsYml: ['github.com', 'ghe.acme.test'], lock: 'home/.config' }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', note: [noteFor('ghe.acme.test')], code: 1 },
+    { name: 'a gh whose config dir does not exist leaves a GitLab origin none', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, env: { GH_CONFIG_DIR: '{stub}/gone/gh' }, gh: { crashes: true }, want: 'UPSTREAM_PR: none', note: [noteFor('gitlab.example.com')], code: 0 },
+    { name: 'a relative config dir that does not exist is looked for from the working dir, and the search ends', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, env: { GH_CONFIG_DIR: 'gone/gh' }, gh: { crashes: true }, want: 'UPSTREAM_PR: none', note: [noteFor('gitlab.example.com')], code: 0 },
     { name: 'a host gh has no login for is not GitHub', remotes: { origin: 'https://ghe.other.test/me/proj.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.other.test/me/proj': 'acme/proj' } }, want: 'UPSTREAM_PR: none', code: 0 },
     // A PR's head lives on its base's host, so origin's branch can head a PR only on origin's host: a remote on another host is not asked.
     { name: 'an Enterprise remote that cannot answer does not stop a github.com fork', remotes: { origin: 'https://github.com/me/gstack.git', work: 'https://ghe.acme.test/x/y.git' }, gh: { hosts: ['ghe.acme.test'], repos: FORK, prs: { 'garrytan/gstack': [] }, broken: ['ghe.acme.test/x/y'] }, want: 'UPSTREAM_PR: new garrytan/gstack', code: 0 },
@@ -386,7 +407,7 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
 
   for (const [si, shell] of SHELLS.entries()) {
     for (const [i, c] of cases.entries()) {
-      test(`under ${shell}: ${c.name}`, () => {
+      test.skipIf(IS_ROOT && !!c.gh.lock)(`under ${shell}: ${c.name}`, () => {
         const cwd = clone(`up-${si}-${i}`, c.remotes, c.config);
         const stub = gh(c.gh);
         const env: Record<string, string> = { GH_CONFIG_DIR: path.join(stub, 'cfg'), ...(c.gh.absent ? { PATH: [stub, '/usr/bin', '/bin'].join(':') } : {}) };
