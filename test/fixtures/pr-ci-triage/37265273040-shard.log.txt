@@ -37,4 +37,4 @@
 (pass) failure tracking > getIsHeaded returns false by default [0.04ms]
 (pass) saveState > captures cookies and page URLs [90.23ms]
 (pass) saveState > captures localStorage and sessionStorage [32.44ms]
-GetQueuedCompletionStatusEx: (6) The handle is invalid.
+GetQueuedCompletionStatusEx: (6) The handle is invalid.

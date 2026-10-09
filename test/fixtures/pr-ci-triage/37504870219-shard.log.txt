@@ -37,4 +37,4 @@
 (pass) Autoplan hook transport > missing TypeScript helper cannot silently allow a phase Read [77.17ms]
 (pass) Autoplan hook transport > unknown child input does not publish or answer anything [127.10ms]
 (pass) Autoplan hook journal-root verdicts > an unrecognized root shape degrades to an advisory: no permission decision, user and model notices, a content-free log [63.86ms]
-GetQueuedCompletionStatusEx: (735) ERROR_ABANDONED_WAIT_0
+GetQueuedCompletionStatusEx: (735) ERROR_ABANDONED_WAIT_0
