@@ -1512,7 +1512,7 @@ describe('run, select and declare against a fixture PR tree', () => {
     }
   });
 
-  test('a caller\'s replace ref never changes what validate reads: CI\'s checkout has none', async () => {
+  test('a caller\'s replace ref or graft file never changes what validate reads: CI\'s checkout has neither', async () => {
     // On the merge base, a stand-in carrying the PR's tree hides every change from git's default view.
     const onBase = fixture('replace-merge-base', null);
     const b1 = git(onBase.tree, 'rev-parse', 'main');
@@ -1560,8 +1560,9 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(onPkg.out.some(l => l.startsWith('selection FULL (package.json)'))).toBe(true);
 
     // Main moves on after the PR branched, and a graft makes the new main's parent the PR's head: read
-    // through it, the merge base is the head itself and nothing changed. CI's clone has no graft.
-    for (const how of ['replace --graft']) {
+    // through it, the merge base is the head itself and nothing changed. CI's clone has no graft, as a
+    // replace ref or in the graft file GIT_NO_REPLACE_OBJECTS does not turn off.
+    for (const how of ['replace --graft', 'graft file']) {
       const g = fixture(`graft-${how.replace(/\W/g, '-')}`, null);
       const b1 = git(g.tree, 'rev-parse', 'main');
       const p = git(g.tree, 'rev-parse', 'HEAD');
@@ -1571,7 +1572,8 @@ describe('run, select and declare against a fixture PR tree', () => {
       git(g.tree, 'commit', '-q', '-m', 'main moves on');
       const b2 = git(g.tree, 'rev-parse', 'HEAD');
       git(g.tree, 'checkout', '-q', 'pr/v');
-      git(g.tree, 'replace', '--graft', b2, p);
+      if (how === 'replace --graft') git(g.tree, 'replace', '--graft', b2, p);
+      else write(g.tree, git(g.tree, 'rev-parse', '--git-path', 'info/grafts'), `${b2} ${p}\n`);
       expect(git(g.tree, 'merge-base', 'HEAD', b2), how).toBe(p);
       // Staged as pr-sync stages it: the new main is the base.
       fs.mkdirSync(g.dir, { recursive: true });
