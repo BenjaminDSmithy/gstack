@@ -170,8 +170,10 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
   interface Gh {
     /** Repos gh can see, as GitHub spells them, each with its fork parent (null: not a fork). */
     repos?: Record<string, string | null>;
-    /** Open PR numbers whose head branch is feat/x, per lowercase repo; a repo left out fails its lookup. */
+    /** Open PR numbers whose head branch is feat/x, per lowercase repo; a repo left out is one gh cannot find. */
     prs?: Record<string, number[]>;
+    /** Lowercase repos whose PR lookup fails with a server error (gh can see them, but not now). */
+    broken?: string[];
     /** gh cannot reach GitHub: every call fails (expired auth, locked keychain, network). */
     down?: true;
     /** What `gh repo set-default` left as the default repo, for a check that asks it. */
@@ -194,6 +196,7 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
       fs.writeFileSync(file('repo', repo.toLowerCase()), JSON.stringify({ nameWithOwner: repo, parent: parent === null ? null : { id: 'R_1', name, owner: { id: 'U_1', login } } }));
     }
     for (const [repo, nums] of Object.entries(g.prs ?? {})) fs.writeFileSync(file('prs', repo), JSON.stringify(nums.map((number) => ({ number }))));
+    for (const repo of g.broken ?? []) fs.writeFileSync(file('broken', repo), '');
     fs.writeFileSync(path.join(dir, 'gh'), [
       '#!/bin/sh',
       'd=$(dirname "$0")',
@@ -201,10 +204,12 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
       'case "$*" in',
       `  "repo view --json nameWithOwner -q .nameWithOwner") ${g.ghDefault ? `echo '${g.ghDefault}'; exit 0` : 'exit 1'} ;;`,
       '  "repo view "*" --json nameWithOwner,parent -q "*) f="$d/repo-$(printf %s "$3" | tr / _).json"; q=$7 ;;',
-      '  "pr list --repo "*" --head feat/x --state open --json number -q "*) f="$d/prs-$(printf %s "$4" | tr / _).json"; q=${12} ;;',
+      '  "pr list --repo "*" --head feat/x --state open --json number -q "*) r=$(printf %s "$4" | tr / _); f="$d/prs-$r.json"; q=${12}',
+      '    [ -f "$d/broken-$r.json" ] && { echo "HTTP 502: Bad Gateway (https://api.github.com/graphql)" >&2; exit 1; } ;;',
       '  *) echo "unexpected gh $*" >&2; exit 3 ;;',
       'esac',
-      '[ -f "$f" ] || { echo "GraphQL: Could not resolve to a Repository" >&2; exit 1; }',
+      // gh 2.102's words for a repo that does not exist or this login cannot see.
+      `[ -f "$f" ] || { echo "GraphQL: Could not resolve to a Repository with the name 'owner/name'. (repository)" >&2; exit 1; }`,
       'exec jq -r "$q" "$f"',
       '',
     ].join('\n'), { mode: 0o755 });
@@ -231,7 +236,10 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
   }
 
   const FORK = { 'me/gstack': 'garrytan/gstack' };
-  const cases: { name: string; remotes: Record<string, string>; config?: [string, string][]; gh: Gh; want: string; code: number }[] = [
+  // A remote gh cannot find: a contributor's deleted fork, or a private repo this login lost.
+  const DEAD = 'https://github.com/someone/deleted-fork.git';
+  const DEAD_SKIP = 'UPSTREAM_PR_SKIP: remote contributor (someone/deleted-fork) not found on GitHub; not checked';
+  const cases: { name: string; remotes: Record<string, string>; config?: [string, string][]; gh: Gh; want: string; skip?: string[]; code: number }[] = [
     { name: 'a fork branch with no PR yet is new (a GitLab mirror is not asked)', remotes: { origin: 'https://github.com/me/gstack.git', mirror: 'git@gitlab.example.com:me/gstack.git' }, gh: { repos: { 'Me/gstack': 'Garrytan/gstack' }, prs: { 'garrytan/gstack': [] } }, want: 'UPSTREAM_PR: new garrytan/gstack', code: 0 },
     { name: 'a fork branch with an open PR is open', remotes: { origin: 'git@github.com:me/gstack.git' }, gh: { repos: FORK, prs: { 'garrytan/gstack': [3066] } }, want: 'UPSTREAM_PR: open 3066 garrytan/gstack', code: 0 },
     { name: 'two open PRs on the branch are both named', remotes: { origin: 'ssh://git@ssh.github.com:443/me/gstack' }, gh: { repos: FORK, prs: { 'garrytan/gstack': [3066, 3067] } }, want: 'UPSTREAM_PR: open 3066 3067 garrytan/gstack', code: 0 },
@@ -239,19 +247,25 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     // No PR list here: a lookup on origin's own repo would fail the case.
     { name: 'origin is the repo itself (any case, ssh)', remotes: { origin: 'git@github.com:GarryTan/GStack.git' }, gh: { repos: { 'garrytan/gstack': null } }, want: 'UPSTREAM_PR: none', code: 0 },
     { name: 'no GitHub repo (GitLab, gh down) is none', remotes: { origin: 'git@gitlab.example.com:me/gstack.git' }, gh: { down: true }, want: 'UPSTREAM_PR: none', code: 0 },
-    { name: 'a failed PR lookup stops', remotes: { origin: 'https://github.com/me/gstack.git' }, gh: { repos: FORK }, want: 'UPSTREAM_PR: lookup failed', code: 1 },
-    { name: 'a GitHub fork with gh down stops', remotes: { origin: 'https://github.com/me/gstack.git', upstream: 'https://github.com/garrytan/gstack.git' }, gh: { down: true }, want: 'UPSTREAM_PR: lookup failed', code: 1 },
+    { name: 'a failed PR lookup stops', remotes: { origin: 'https://github.com/me/gstack.git' }, gh: { repos: FORK }, want: 'UPSTREAM_PR: lookup failed fork parent (garrytan/gstack) - STOP', code: 1 },
+    { name: 'a GitHub fork with gh down stops', remotes: { origin: 'https://github.com/me/gstack.git', upstream: 'https://github.com/garrytan/gstack.git' }, gh: { down: true }, want: 'UPSTREAM_PR: lookup failed origin (me/gstack) - STOP', code: 1 },
     { name: "gh's default repo set to the fork still finds the upstream PR", remotes: { origin: 'https://github.com/me/gstack.git', upstream: 'https://github.com/garrytan/gstack.git' }, config: [['remote.origin.gh-resolved', 'base']], gh: { ghDefault: 'me/gstack', repos: FORK, prs: { 'garrytan/gstack': [3090] } }, want: 'UPSTREAM_PR: open 3090 garrytan/gstack', code: 0 },
     { name: 'a fork of a fork: an upstream remote past the parent is asked too', remotes: { origin: 'git@github.com:me/gstack.git', upstream: 'git@github.com:garrytan/gstack.git' }, gh: { repos: { 'me/gstack': 'garrytan-agents/gstack' }, prs: { 'garrytan-agents/gstack': [], 'garrytan/gstack': [3090] } }, want: 'UPSTREAM_PR: open 3090 garrytan/gstack', code: 0 },
     { name: 'an ssh host alias for github.com is GitHub', remotes: { origin: 'git@github-me:me/gstack.git' }, gh: { repos: FORK, prs: { 'garrytan/gstack': [3066] } }, want: 'UPSTREAM_PR: open 3066 garrytan/gstack', code: 0 },
     { name: 'your own repo with another GitHub remote and no PR there is none', remotes: { origin: 'https://github.com/me/gstack.git', fork: 'git@github.com:someone/gstack.git' }, gh: { repos: { 'me/gstack': null }, prs: { 'someone/gstack': [] } }, want: 'UPSTREAM_PR: none', code: 0 },
     // A failed `gh repo view` is caught by its empty answer alone: the pipe's
     // status is tr's, and no other remote's lookup fails first.
-    { name: 'a GitHub fork with no other remote and gh down stops', remotes: { origin: 'https://github.com/me/gstack.git' }, gh: { down: true }, want: 'UPSTREAM_PR: lookup failed', code: 1 },
+    { name: 'a GitHub fork with no other remote and gh down stops', remotes: { origin: 'https://github.com/me/gstack.git' }, gh: { down: true }, want: 'UPSTREAM_PR: lookup failed origin (me/gstack) - STOP', code: 1 },
     // GitHub logins are case-insensitive; an unlowered URL fails the name check and reads as none.
     { name: 'an uppercase owner in the URL is the same fork', remotes: { origin: 'https://github.com/Me/GStack.git' }, gh: { repos: { 'Me/GStack': 'garrytan/gstack' }, prs: { 'garrytan/gstack': [3066] } }, want: 'UPSTREAM_PR: open 3066 garrytan/gstack', code: 0 },
     // A PR on origin's own repo is /ship's to update, whichever remote names that repo.
     { name: "another remote for origin's own repo is not asked", remotes: { origin: 'https://github.com/me/gstack', 'gh-ssh': 'git@github.com:me/gstack.git' }, gh: { repos: { 'me/gstack': null }, prs: { 'me/gstack': [12] } }, want: 'UPSTREAM_PR: none', code: 0 },
+    // gh cannot see a stale remote's repo, so this login cannot write a PR there: it is named and skipped, never a STOP on every run.
+    { name: 'your own repo with a dead extra remote is none, and the remote is named', remotes: { origin: 'https://github.com/garrytan/gstack.git', contributor: DEAD }, gh: { repos: { 'garrytan/gstack': null } }, want: 'UPSTREAM_PR: none', skip: [DEAD_SKIP], code: 0 },
+    { name: 'a fork with a dead extra remote is still new on its parent', remotes: { origin: 'https://github.com/me/gstack.git', upstream: 'https://github.com/garrytan/gstack.git', contributor: DEAD }, gh: { repos: FORK, prs: { 'garrytan/gstack': [] } }, want: 'UPSTREAM_PR: new garrytan/gstack', skip: [DEAD_SKIP], code: 0 },
+    { name: 'a fork with a dead extra remote still finds the open PR', remotes: { origin: 'git@github.com:me/gstack.git', contributor: DEAD }, gh: { repos: FORK, prs: { 'garrytan/gstack': [3066] } }, want: 'UPSTREAM_PR: open 3066 garrytan/gstack', skip: [DEAD_SKIP], code: 0 },
+    // Any other failure on an extra remote still stops, and names the remote to fix or remove.
+    { name: 'an extra remote whose lookup errors stops and is named', remotes: { origin: 'https://github.com/me/gstack.git', contributor: 'https://github.com/someone/gstack.git' }, gh: { repos: FORK, prs: { 'garrytan/gstack': [] }, broken: ['someone/gstack'] }, want: 'UPSTREAM_PR: lookup failed remote contributor (someone/gstack) - STOP', code: 1 },
   ];
 
   for (const [si, shell] of SHELLS.entries()) {
@@ -260,7 +274,9 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
         const cwd = clone(`up-${si}-${i}`, c.remotes, c.config);
         const r = run(shell, CHECK, cwd, {}, gh(c.gh));
         expect(r.out).not.toContain('unexpected');
-        expect(r.out.split('\n').filter((l) => l.startsWith('UPSTREAM_PR:')), r.out).toEqual([c.want + (c.code ? ' - STOP' : '')]);
+        const lines = r.out.split('\n');
+        expect(lines.filter((l) => l.startsWith('UPSTREAM_PR:')), r.out).toEqual([c.want]);
+        expect(lines.filter((l) => l.startsWith('UPSTREAM_PR_SKIP:')), r.out).toEqual(c.skip ?? []);
         expect(r.code).toBe(c.code);
       });
     }
@@ -280,6 +296,8 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
       // A new one: never opened by ship.
       ['new', 'skip steps 18-19', '/pr-prep open'],
       ['lookup failed', 'stop'],
+      // A remote gh cannot find is skipped, never silently: the owner hears of it.
+      ['unchecked', 'report', 'remove the remote'],
     ], 'ship Step 17');
     // Step 19, if reached anyway, says the same.
     expectMentions(PR_BODY_MD.replace(/([^\n])\n(?=[^\n])/g, '$1 '), [['upstream_pr', 'never reach', '/pr-prep']], 'ship Step 19');

@@ -588,14 +588,17 @@ _ghrepo() {
   case "$_u" in (*/*/*|*[!a-z0-9._/-]*) return 1 ;; (?*/?*) printf '%s\n' "$_u" ;; (*) return 1 ;; esac
 }
 _u=$(git remote get-url --push origin 2>/dev/null); _FORK=$(_ghrepo) || { echo "UPSTREAM_PR: none"; exit 0; }
-_UP=$(gh repo view "$_FORK" --json nameWithOwner,parent -q '.nameWithOwner + " " + (if .parent then .parent.owner.login + "/" + .parent.name else "" end)' 2>/dev/null | tr 'A-Z' 'a-z') && [ -n "$_UP" ] || { echo "UPSTREAM_PR: lookup failed - STOP"; exit 1; }
-_SEEN=" $_FORK ${_UP%% *} "; _UP=${_UP#* }; _NEW=$_UP; _OPEN=""
-for _R in $(git remote); do [ "$_R" = origin ] || _UP="$_UP $(_u=$(git remote get-url "$_R" 2>/dev/null); _ghrepo)"; done
-for _C in $(printf '%s\n' $_UP); do
-  case "$_SEEN" in (*" $_C "*) continue ;; esac; _SEEN="$_SEEN$_C "
-  _N=$(gh pr list --repo "$_C" --head <branch-name> --state open --json number -q '.[].number' 2>/dev/null) || { echo "UPSTREAM_PR: lookup failed - STOP"; exit 1; }
-  [ -z "$_N" ] || _OPEN="$_OPEN$(printf '%s\n' "$_N" | tr '\n' ' ')$_C "
-done
+_UP=$(gh repo view "$_FORK" --json nameWithOwner,parent -q '.nameWithOwner + " " + (if .parent then .parent.owner.login + "/" + .parent.name else "" end)' 2>/dev/null | tr 'A-Z' 'a-z') && [ -n "$_UP" ] || { echo "UPSTREAM_PR: lookup failed origin ($_FORK) - STOP"; exit 1; }
+_SEEN=" $_FORK ${_UP%% *} "; _NEW=${_UP#* }; _OPEN=""
+_prs() { gh pr list --repo "$_C" --head <branch-name> --state open --json number -q '.[].number'; }
+_ask() {
+  case "$_SEEN" in (*" $_C "*) return 0 ;; esac; _SEEN="$_SEEN$_C "
+  if _N=$(_prs 2>/dev/null); then [ -z "$_N" ] || _OPEN="$_OPEN$(printf '%s\n' "$_N" | tr '\n' ' ')$_C "; return 0; fi
+  [ -n "$_R" ] && case "$(_prs 2>&1 >/dev/null)" in (*"Could not resolve to a Repository"*) echo "UPSTREAM_PR_SKIP: remote $_R ($_C) not found on GitHub; not checked"; return 0 ;; esac
+  echo "UPSTREAM_PR: lookup failed ${_R:+remote }${_R:-fork parent} ($_C) - STOP"; exit 1
+}
+_R=""; _C=$_NEW; [ -z "$_C" ] || _ask
+for _R in $(git remote); do [ "$_R" = origin ] || { _C=$(_u=$(git remote get-url "$_R" 2>/dev/null); _ghrepo) && _ask; }; done
 if [ -n "$_OPEN" ]; then echo "UPSTREAM_PR: open ${_OPEN% }"; elif [ -n "$_NEW" ]; then echo "UPSTREAM_PR: new $_NEW"; else echo "UPSTREAM_PR: none"; fi
 ```
 
@@ -609,8 +612,12 @@ if [ -n "$_OPEN" ]; then echo "UPSTREAM_PR: open ${_OPEN% }"; elif [ -n "$_NEW" 
   `~/.claude/skills/gstack/bin/gstack-pr-watch poll --pr <number> --repo <repo>`
   must exit 0 before the owner pushes, then `/pr-prep body` refreshes the
   description. Then Step 20.
-- `lookup failed`: STOP; an unknown PR state never means no PR. Origin is on
-  GitHub and gh could not answer: repair gh's login or network, then rerun.
+- `lookup failed`: STOP; an unknown PR state never means no PR. The line names
+  what gh could not read (origin, the fork parent or a remote): repair gh's
+  login or network, or fix or remove that remote, then rerun.
+- An `UPSTREAM_PR_SKIP` line names a remote whose repo gh cannot find (deleted,
+  renamed, or private and out of this login's reach). It went unchecked; report
+  it so the owner can fix or remove the remote.
 
 **Credential pre-push guard — run before the push:**
 
