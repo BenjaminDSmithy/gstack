@@ -830,8 +830,8 @@ function cmdSelect(c: Ctx): number {
   const { sel, mb, changed } = selection(c, state);
   c.d.out(`RESULT SELECTED files=${sel.files.length} full=${sel.full.length ? 'yes' : 'no'} base=${c.base.slice(0, 12)} merge-base=${mb.slice(0, 12)}`);
   for (const f of sel.full) c.d.out(`FULL\t${f}`);
-  for (const s of sel.files) c.d.out(`SELECT\t${s.file}\t${s.rules.join(',')}`);
-  for (const f of sel.missingDeclared) c.d.out(`DECLARED_MISSING\t${f}`);
+  for (const s of sel.files) c.d.out(`SELECT\t${shownPath(s.file)}\t${s.rules.join(',')}`);
+  for (const f of sel.missingDeclared) c.d.out(`DECLARED_MISSING\t${shownPath(f)}`);
   // What run would call NO_TESTS if every selected file passed.
   const bare = uncoveredCode(untestedCode(changed, sel, f => fs.existsSync(path.join(c.tree, f))), sel, () => true);
   if (bare.length) c.d.out(noTestsLine(bare));
@@ -862,8 +862,8 @@ function cmdDeclare(c: Ctx): number {
     // A recorded verdict never ran a newly declared file: void it so push asks for a new run.
     const voided = added.length > 0 && s.validation !== null;
     writeState(c.stateDir, { ...s, focused: { paths, declaredAt: c.d.now().toISOString() }, validation: voided ? null : s.validation });
-    c.d.out(`RESULT DECLARED ${paths.length} path(s): ${paths.join(' ')}`);
-    if (voided) c.d.out(`NOTE the recorded validation of ${s.validation!.sha.slice(0, 12)} did not run ${added.join(' ')}: it is void; run gstack-pr-validate run again`);
+    c.d.out(`RESULT DECLARED ${paths.length} path(s): ${paths.map(shownPath).join(' ')}`);
+    if (voided) c.d.out(`NOTE the recorded validation of ${s.validation!.sha.slice(0, 12)} did not run ${added.map(shownPath).join(' ')}: it is void; run gstack-pr-validate run again`);
   });
   return 0;
 }
@@ -892,16 +892,28 @@ function movedFiles(a: { files: Map<string, string> }, b: { files: Map<string, s
   return [...new Set([...a.files.keys(), ...b.files.keys()])].filter(f => a.files.get(f) !== b.files.get(f));
 }
 
+const CONTROL_RE = /[\x00-\x1f\x7f-\x9f]/g;
+
+/** Text as printed: every C0, DEL and C1 character as a \u escape. */
+function escapeControl(s: string): string {
+  return s.replace(CONTROL_RE, ch => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
 /**
- * Paths as printed, at most five, comma-separated. `git status -z` hands
- * names over unquoted, and upstream code that runs in the preconditions
- * can name a file anything: a raw newline would print a line of its own
- * (a forged RESULT) and ESC or a C1 byte would drive the terminal. A path
- * holding one prints JSON-quoted, every such byte escaped.
+ * A tree path as printed. Names reach validate raw (`git status -z`, the
+ * test-file walk behind the universe), and upstream code that runs here can
+ * name a file anything: a raw newline would print a line of its own (a
+ * forged RESULT, or a line in the PR body gstack-pr-body publishes from the
+ * summary), and ESC or a C1 byte would drive the terminal. A path holding
+ * one prints JSON-quoted, every such byte escaped.
  */
+function shownPath(p: string): string {
+  return p.search(CONTROL_RE) === -1 ? p : escapeControl(JSON.stringify(p));
+}
+
+/** Paths as printed, at most five, comma-separated. */
 function shownPaths(paths: string[]): string {
-  const show = (p: string) => (/[\x00-\x1f\x7f-\x9f]/.test(p) ? JSON.stringify(p).replace(/[\x7f-\x9f]/g, ch => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`) : p);
-  return paths.slice(0, 5).map(show).join(', ');
+  return paths.slice(0, 5).map(shownPath).join(', ');
 }
 
 /** What `git status` lists against HEAD, one entry per path: tracked changes and untracked files (ignored files never appear). */
@@ -1032,7 +1044,7 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
     if (gained.length) line(`tree changed during the preconditions: untracked files ${shownPaths(gained)} appeared, which ${sha.slice(0, 12)} does not hold and the tests could use`, true);
   }
 
-  for (const f of sel.missingDeclared) line(`declared ${f} RED: not a free test file in this tree`, true);
+  for (const f of sel.missingDeclared) line(`declared ${shownPath(f)} RED: not a free test file in this tree`, true);
   if (sel.full.length) line(`selection FULL (${sel.full.join(', ')}): the full free suite is the real gate${c.f.acceptFull ? '; accepted by --accept-full-risk' : ''}`, !c.f.acceptFull);
 
   // Each selected file in its own bun process, as the runner shards would see it.
@@ -1046,7 +1058,7 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
     const { env: fileEnv, guard } = testFileEnv(testEnv, stateDir, file, tmpdir);
     const v = judgeBunRun(file, d.tool('bun', ['test', path.join(c.tree, file), '--timeout=30000', '--max-concurrency=1'], { cwd: c.tree, env: fileEnv, timeoutMs: 900_000 }));
     const wrote = guard.verify();
-    return wrote ? { ...v, ok: false, unverified: false, why: `home write: ${wrote}` } : v;
+    return wrote ? { ...v, ok: false, unverified: false, why: `home write: ${escapeControl(wrote)}` } : v;
   };
   sel.files.forEach((s, i) => {
     const v = runFile(s.file, path.join(tmp, `file-${i}`));
@@ -1055,10 +1067,10 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
       passed.add(s.file);
     }
     if (v.unverified) unverified.push(s.file);
-    line(`${s.file} rc=${v.rc} ${v.pass} pass ${v.fail} fail ${v.skip} skip ran=${v.ran ? 1 : 0} ${verdict(v)} [${s.rules.join(',')}]`, !v.ok && !v.unverified);
+    line(`${shownPath(s.file)} rc=${v.rc} ${v.pass} pass ${v.fail} fail ${v.skip} skip ran=${v.ran ? 1 : 0} ${verdict(v)} [${s.rules.join(',')}]`, !v.ok && !v.unverified);
     if (macos.has(s.file)) {
       const sys = runFile(s.file, path.join(tmp, `file-${i}-default-temp`), sysTmp);
-      line(`${s.file} (default temp root) rc=${sys.rc} ran=${sys.ran ? 1 : 0} ${verdict(sys)}`, !sys.ok && !sys.unverified);
+      line(`${shownPath(s.file)} (default temp root) rc=${sys.rc} ran=${sys.ran ? 1 : 0} ${verdict(sys)}`, !sys.ok && !sys.unverified);
     }
   });
 
@@ -1100,7 +1112,7 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
     line(`tree changed during the run: tracked files ${shownPaths(moved) || '(content)'} differ from what the preconditions left; ${sha.slice(0, 12)} was not what ran`, true);
   }
 
-  const skipped = unverified.length ? `; ${unverified.length} unverified (every test skipped: ${unverified.slice(0, 3).join(', ')}${unverified.length > 3 ? ', ...' : ''})` : '';
+  const skipped = unverified.length ? `; ${unverified.length} unverified (every test skipped: ${unverified.slice(0, 3).map(shownPath).join(', ')}${unverified.length > 3 ? ', ...' : ''})` : '';
   // The summary is what the push question shows and gstack-pr-body publishes: a waiver must travel with it.
   const waived = sel.full.length && c.f.acceptFull ? `; FULL waived (${sel.full.join(', ')}): the full suite did not run` : '';
   const summaryOf = () => `${green}/${sel.files.length} selected files green${skipped}${waived}${worst ? '; RED' : ''}`;
@@ -1113,7 +1125,7 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
     // the declared set at the start), and the declare found no verdict to void yet: this one cannot stand.
     const late = (s.focused?.paths ?? []).filter(p => !declaredAtStart.has(p));
     if (late.length) {
-      line(`declared during the run, never ran: ${late.join(', ')}: run gstack-pr-validate run again`, true);
+      line(`declared during the run, never ran: ${late.map(shownPath).join(', ')}: run gstack-pr-validate run again`, true);
       writeSummary();
       summary = summaryOf();
     }
