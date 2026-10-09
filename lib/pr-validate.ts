@@ -892,6 +892,18 @@ function movedFiles(a: { files: Map<string, string> }, b: { files: Map<string, s
   return [...new Set([...a.files.keys(), ...b.files.keys()])].filter(f => a.files.get(f) !== b.files.get(f));
 }
 
+/**
+ * Paths as printed, at most five, comma-separated. `git status -z` hands
+ * names over unquoted, and upstream code that runs in the preconditions
+ * can name a file anything: a raw newline would print a line of its own
+ * (a forged RESULT) and ESC or a C1 byte would drive the terminal. A path
+ * holding one prints JSON-quoted, every such byte escaped.
+ */
+function shownPaths(paths: string[]): string {
+  const show = (p: string) => (/[\x00-\x1f\x7f-\x9f]/.test(p) ? JSON.stringify(p).replace(/[\x7f-\x9f]/g, ch => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`) : p);
+  return paths.slice(0, 5).map(show).join(', ');
+}
+
 /** What `git status` lists against HEAD, one entry per path: tracked changes and untracked files (ignored files never appear). */
 function statusEntries(c: Ctx): { path: string; untracked: boolean }[] {
   const parts = gitOk(c.d, c.tree, ['status', '--porcelain', '-z', '--untracked-files=all'], 'git status').split('\0');
@@ -984,7 +996,7 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   if (pkg.scripts?.['gen:skill-docs']) {
     const g = tool('bun', ['run', 'gen:skill-docs', '--host', 'all'], 900_000);
     const diff = statusEntries(c).map(e => e.path);
-    line(`precondition gen-skill-docs-all rc=${g.status} drift=${diff.length}${diff.length ? ` (${diff.slice(0, 5).join(', ')})` : ''}`, g.status !== 0 || diff.length > 0);
+    line(`precondition gen-skill-docs-all rc=${g.status} drift=${diff.length}${diff.length ? ` (${shownPaths(diff)})` : ''}`, g.status !== 0 || diff.length > 0);
     diff.forEach(f => drifted.add(f));
     // The drift check judged everything up to here but a commit.
     settled = treeState(c);
@@ -1016,8 +1028,8 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
     const status = statusEntries(c).filter(e => !REBUILT_RE.test(e.path) && !drifted.has(e.path));
     const moved = [...new Set([...movedFiles(settled, before), ...status.filter(e => !e.untracked).map(e => e.path)])].filter(f => !REBUILT_RE.test(f));
     const gained = status.filter(e => e.untracked).map(e => e.path);
-    if (moved.length) line(`tree changed during the preconditions: tracked files ${moved.slice(0, 5).join(', ')} differ from ${sha.slice(0, 12)}, which is not what the tests would run`, true);
-    if (gained.length) line(`tree changed during the preconditions: untracked files ${gained.slice(0, 5).join(', ')} appeared, which ${sha.slice(0, 12)} does not hold and the tests could use`, true);
+    if (moved.length) line(`tree changed during the preconditions: tracked files ${shownPaths(moved)} differ from ${sha.slice(0, 12)}, which is not what the tests would run`, true);
+    if (gained.length) line(`tree changed during the preconditions: untracked files ${shownPaths(gained)} appeared, which ${sha.slice(0, 12)} does not hold and the tests could use`, true);
   }
 
   for (const f of sel.missingDeclared) line(`declared ${f} RED: not a free test file in this tree`, true);
@@ -1085,7 +1097,7 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   if (after.head !== before.head) line(`tree changed during the run: HEAD moved from ${before.head.slice(0, 12)} to ${after.head.slice(0, 12)}; the verdict cannot name either`, true);
   else if (after.diff !== before.diff) {
     const moved = movedFiles(before, after);
-    line(`tree changed during the run: tracked files ${moved.slice(0, 5).join(', ') || '(content)'} differ from what the preconditions left; ${sha.slice(0, 12)} was not what ran`, true);
+    line(`tree changed during the run: tracked files ${shownPaths(moved) || '(content)'} differ from what the preconditions left; ${sha.slice(0, 12)} was not what ran`, true);
   }
 
   const skipped = unverified.length ? `; ${unverified.length} unverified (every test skipped: ${unverified.slice(0, 3).join(', ')}${unverified.length > 3 ? ', ...' : ''})` : '';
