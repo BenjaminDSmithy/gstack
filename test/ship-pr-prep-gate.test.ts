@@ -191,8 +191,12 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     broken?: string[];
     /** gh cannot reach GitHub: every call fails (expired auth, locked keychain, network). */
     down?: true;
-    /** What `gh repo set-default` left as the default repo, for a check that asks it. */
-    ghDefault?: string;
+    /**
+     * The URL `gh repo view` prints with no repo named: gh's default repo, the
+     * one the bare gh commands in Steps 10, 18 and 19 act on. null: that
+     * lookup fails. Left out, the check must not ask (the stub refuses).
+     */
+    ghDefault?: string | null;
   }
 
   /**
@@ -231,7 +235,7 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
       'esac',
       ...(g.down ? ['echo "error connecting to api.github.com" >&2; exit 1'] : []),
       'case "$*" in',
-      `  "repo view --json nameWithOwner -q .nameWithOwner") ${g.ghDefault ? `echo '${g.ghDefault}'; exit 0` : 'exit 1'} ;;`,
+      ...(g.ghDefault === undefined ? [] : [`  "repo view --json url -q .url") ${g.ghDefault === null ? 'echo "HTTP 502: Bad Gateway (https://api.github.com/graphql)" >&2; exit 1' : `echo '${g.ghDefault}'; exit 0`} ;;`]),
       '  "repo view "*" --json nameWithOwner,parent -q "*) f="$d/repo-$(printf %s "$3" | tr / _).json"; q=$7 ;;',
       '  "pr list --repo "*" --head feat/x --state open --json number -q "*) r=$(printf %s "$4" | tr / _); f="$d/prs-$r.json"; q=${12}',
       '    [ -f "$d/broken-$r.json" ] && { echo "HTTP 502: Bad Gateway (https://api.github.com/graphql)" >&2; exit 1; } ;;',
@@ -275,29 +279,29 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
   // A remote gh cannot find: a contributor's deleted fork, or a private repo this login lost.
   const DEAD = 'https://github.com/someone/deleted-fork.git';
   const DEAD_SKIP = 'UPSTREAM_PR_SKIP: remote contributor (someone/deleted-fork) not found on GitHub; not checked';
-  const cases: { name: string; remotes: Record<string, string>; config?: [string, string][]; gh: Gh; want: string; skip?: string[]; code: number }[] = [
+  const cases: { name: string; remotes: Record<string, string>; config?: [string, string][]; gh: Gh; want: string; skip?: string[]; dflt?: string[]; code: number }[] = [
     { name: 'a fork branch with no PR yet is new (a GitLab mirror is not asked)', remotes: { origin: 'https://github.com/me/gstack.git', mirror: 'git@gitlab.example.com:me/gstack.git' }, gh: { repos: { 'Me/gstack': 'Garrytan/gstack' }, prs: { 'garrytan/gstack': [] } }, want: 'UPSTREAM_PR: new garrytan/gstack', code: 0 },
     { name: 'a fork branch with an open PR is open', remotes: { origin: 'git@github.com:me/gstack.git' }, gh: { repos: FORK, prs: { 'garrytan/gstack': [3066] } }, want: 'UPSTREAM_PR: open 3066 garrytan/gstack', code: 0 },
     { name: 'two open PRs on the branch are both named', remotes: { origin: 'ssh://git@ssh.github.com:443/me/gstack' }, gh: { repos: FORK, prs: { 'garrytan/gstack': [3066, 3067] } }, want: 'UPSTREAM_PR: open 3066 3067 garrytan/gstack', code: 0 },
     { name: 'a look-alike owner is still a fork', remotes: { origin: 'https://github.com/notgarrytan/gstack/' }, gh: { repos: { 'notgarrytan/gstack': 'garrytan/gstack' }, prs: { 'garrytan/gstack': [] } }, want: 'UPSTREAM_PR: new garrytan/gstack', code: 0 },
     // No PR list here: a lookup on origin's own repo would fail the case.
-    { name: 'origin is the repo itself (any case, ssh)', remotes: { origin: 'git@github.com:GarryTan/GStack.git' }, gh: { repos: { 'garrytan/gstack': null } }, want: 'UPSTREAM_PR: none', code: 0 },
+    { name: 'origin is the repo itself (any case, ssh)', remotes: { origin: 'git@github.com:GarryTan/GStack.git' }, gh: { repos: { 'garrytan/gstack': null }, ghDefault: 'https://github.com/garrytan/gstack' }, want: 'UPSTREAM_PR: none', code: 0 },
     { name: 'no GitHub repo (GitLab, gh down) is none', remotes: { origin: 'git@gitlab.example.com:me/gstack.git' }, gh: { down: true }, want: 'UPSTREAM_PR: none', code: 0 },
     { name: 'a failed PR lookup stops', remotes: { origin: 'https://github.com/me/gstack.git' }, gh: { repos: FORK }, want: 'UPSTREAM_PR: lookup failed fork parent (garrytan/gstack) - STOP', code: 1 },
     { name: 'a GitHub fork with gh down stops', remotes: { origin: 'https://github.com/me/gstack.git', upstream: 'https://github.com/garrytan/gstack.git' }, gh: { down: true }, want: 'UPSTREAM_PR: lookup failed origin (me/gstack) - STOP', code: 1 },
-    { name: "gh's default repo set to the fork still finds the upstream PR", remotes: { origin: 'https://github.com/me/gstack.git', upstream: 'https://github.com/garrytan/gstack.git' }, config: [['remote.origin.gh-resolved', 'base']], gh: { ghDefault: 'me/gstack', repos: FORK, prs: { 'garrytan/gstack': [3090] } }, want: 'UPSTREAM_PR: open 3090 garrytan/gstack', code: 0 },
+    { name: "gh's default repo set to the fork still finds the upstream PR", remotes: { origin: 'https://github.com/me/gstack.git', upstream: 'https://github.com/garrytan/gstack.git' }, config: [['remote.origin.gh-resolved', 'base']], gh: { ghDefault: 'https://github.com/me/gstack', repos: FORK, prs: { 'garrytan/gstack': [3090] } }, want: 'UPSTREAM_PR: open 3090 garrytan/gstack', code: 0 },
     { name: 'a fork of a fork: an upstream remote past the parent is asked too', remotes: { origin: 'git@github.com:me/gstack.git', upstream: 'git@github.com:garrytan/gstack.git' }, gh: { repos: { 'me/gstack': 'garrytan-agents/gstack' }, prs: { 'garrytan-agents/gstack': [], 'garrytan/gstack': [3090] } }, want: 'UPSTREAM_PR: open 3090 garrytan/gstack', code: 0 },
     { name: 'an ssh host alias for github.com is GitHub', remotes: { origin: 'git@github-me:me/gstack.git' }, gh: { repos: FORK, prs: { 'garrytan/gstack': [3066] } }, want: 'UPSTREAM_PR: open 3066 garrytan/gstack', code: 0 },
-    { name: 'your own repo with another GitHub remote and no PR there is none', remotes: { origin: 'https://github.com/me/gstack.git', fork: 'git@github.com:someone/gstack.git' }, gh: { repos: { 'me/gstack': null }, prs: { 'someone/gstack': [] } }, want: 'UPSTREAM_PR: none', code: 0 },
+    { name: 'your own repo with another GitHub remote and no PR there is none', remotes: { origin: 'https://github.com/me/gstack.git', fork: 'git@github.com:someone/gstack.git' }, gh: { repos: { 'me/gstack': null }, prs: { 'someone/gstack': [] }, ghDefault: 'https://github.com/me/gstack' }, want: 'UPSTREAM_PR: none', code: 0 },
     // A failed `gh repo view` is caught by its empty answer alone: the pipe's
     // status is tr's, and no other remote's lookup fails first.
     { name: 'a GitHub fork with no other remote and gh down stops', remotes: { origin: 'https://github.com/me/gstack.git' }, gh: { down: true }, want: 'UPSTREAM_PR: lookup failed origin (me/gstack) - STOP', code: 1 },
     // GitHub logins are case-insensitive; an unlowered URL fails the name check and reads as none.
     { name: 'an uppercase owner in the URL is the same fork', remotes: { origin: 'https://github.com/Me/GStack.git' }, gh: { repos: { 'Me/GStack': 'garrytan/gstack' }, prs: { 'garrytan/gstack': [3066] } }, want: 'UPSTREAM_PR: open 3066 garrytan/gstack', code: 0 },
     // A PR on origin's own repo is /ship's to update, whichever remote names that repo.
-    { name: "another remote for origin's own repo is not asked", remotes: { origin: 'https://github.com/me/gstack', 'gh-ssh': 'git@github.com:me/gstack.git' }, gh: { repos: { 'me/gstack': null }, prs: { 'me/gstack': [12] } }, want: 'UPSTREAM_PR: none', code: 0 },
+    { name: "another remote for origin's own repo is not asked", remotes: { origin: 'https://github.com/me/gstack', 'gh-ssh': 'git@github.com:me/gstack.git' }, gh: { repos: { 'me/gstack': null }, prs: { 'me/gstack': [12] }, ghDefault: 'https://github.com/me/gstack' }, want: 'UPSTREAM_PR: none', code: 0 },
     // gh cannot see a stale remote's repo, so this login cannot write a PR there: it is named and skipped, never a STOP on every run.
-    { name: 'your own repo with a dead extra remote is none, and the remote is named', remotes: { origin: 'https://github.com/garrytan/gstack.git', contributor: DEAD }, gh: { repos: { 'garrytan/gstack': null } }, want: 'UPSTREAM_PR: none', skip: [DEAD_SKIP], code: 0 },
+    { name: 'your own repo with a dead extra remote is none, and the remote is named', remotes: { origin: 'https://github.com/garrytan/gstack.git', contributor: DEAD }, gh: { repos: { 'garrytan/gstack': null }, ghDefault: 'https://github.com/garrytan/gstack' }, want: 'UPSTREAM_PR: none', skip: [DEAD_SKIP], code: 0 },
     { name: 'a fork with a dead extra remote is still new on its parent', remotes: { origin: 'https://github.com/me/gstack.git', upstream: 'https://github.com/garrytan/gstack.git', contributor: DEAD }, gh: { repos: FORK, prs: { 'garrytan/gstack': [] } }, want: 'UPSTREAM_PR: new garrytan/gstack', skip: [DEAD_SKIP], code: 0 },
     { name: 'a fork with a dead extra remote still finds the open PR', remotes: { origin: 'git@github.com:me/gstack.git', contributor: DEAD }, gh: { repos: FORK, prs: { 'garrytan/gstack': [3066] } }, want: 'UPSTREAM_PR: open 3066 garrytan/gstack', skip: [DEAD_SKIP], code: 0 },
     // GitHub Enterprise counts when gh has a login for its host; its repos carry the host, so gh asks the right server.
@@ -306,7 +310,7 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     { name: 'a gh without auth status --json still finds an Enterprise fork', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, gh: { old: '2.80', hosts: ['ghe.acme.test'], repos: { 'ghe.acme.test/me/proj': 'acme/proj' }, prs: { 'ghe.acme.test/acme/proj': [3066] } }, want: 'UPSTREAM_PR: open 3066 ghe.acme.test/acme/proj', code: 0 },
     { name: 'an Enterprise fork with gh down there stops', remotes: { origin: 'git@ghe.acme.test:me/proj.git' }, gh: { hosts: ['ghe.acme.test'], down: true }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', code: 1 },
     // gh answers a renamed repo with its new name; a PR on it is still origin's own, whichever remote names it.
-    { name: "a renamed Enterprise origin's new name is still its own repo", remotes: { origin: 'https://ghe.acme.test/me/old.git', other: 'https://ghe.acme.test/me/new.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.acme.test/me/old': null }, renamed: { 'ghe.acme.test/me/old': 'me/new' }, prs: { 'ghe.acme.test/me/new': [12] } }, want: 'UPSTREAM_PR: none', code: 0 },
+    { name: "a renamed Enterprise origin's new name is still its own repo", remotes: { origin: 'https://ghe.acme.test/me/old.git', other: 'https://ghe.acme.test/me/new.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.acme.test/me/old': null }, renamed: { 'ghe.acme.test/me/old': 'me/new' }, prs: { 'ghe.acme.test/me/new': [12] }, ghDefault: 'https://ghe.acme.test/me/new' }, want: 'UPSTREAM_PR: none', code: 0 },
     // A gh older than 2.81 fails plain `auth status` for a login that cannot answer too: that host is still GitHub, and stops.
     { name: 'a gh 2.40-2.80 whose Enterprise login cannot answer stops', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, gh: { old: '2.80', hosts: ['ghe.acme.test'], down: true }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', code: 1 },
     { name: 'a gh before 2.40 whose Enterprise login cannot answer stops', remotes: { origin: 'git@ghe.acme.test:me/proj.git' }, gh: { old: '2.39', hosts: ['ghe.acme.test'], down: true }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', code: 1 },
@@ -321,6 +325,17 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     { name: "a github.com PR on a same-named branch is not an Enterprise fork's", remotes: { origin: 'https://ghe.acme.test/me/proj.git', oss: 'https://github.com/garrytan/gstack.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.acme.test/me/proj': 'acme/proj' }, prs: { 'ghe.acme.test/acme/proj': [], 'garrytan/gstack': [3066] } }, want: 'UPSTREAM_PR: new ghe.acme.test/acme/proj', code: 0 },
     { name: "another Enterprise host's PR is not this Enterprise fork's", remotes: { origin: 'https://ghe.acme.test/me/proj.git', mirror: 'https://ghe.other.test/acme/proj.git' }, gh: { hosts: ['ghe.acme.test', 'ghe.other.test'], repos: { 'ghe.acme.test/me/proj': 'acme/proj' }, prs: { 'ghe.acme.test/acme/proj': [], 'ghe.other.test/acme/proj': [7] } }, want: 'UPSTREAM_PR: new ghe.acme.test/acme/proj', code: 0 },
     { name: 'an extra remote on the Enterprise host whose lookup errors stops and is named', remotes: { origin: 'https://ghe.acme.test/me/proj.git', other: 'git@work-ghe:someone/proj.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.acme.test/me/proj': 'acme/proj' }, prs: { 'ghe.acme.test/acme/proj': [] }, broken: ['ghe.acme.test/someone/proj'] }, want: 'UPSTREAM_PR: lookup failed remote other (ghe.acme.test/someone/proj) - STOP', code: 1 },
+    // Steps 10, 18 and 19 run bare gh, which acts on gh's default repo: without a
+    // set-default, gh 2.102 in a shell that cannot prompt takes the first remote
+    // ordered upstream, github, origin, whatever its host, once it has logins for
+    // both (context/remote.go, factory/remote_resolver.go). `none` lets those steps
+    // write, so it needs that repo to be origin's own; asked only when origin is not a fork.
+    { name: "your own github.com repo with a failing Enterprise remote is none when gh's default is origin", remotes: { origin: 'https://github.com/me/gstack.git', work: 'https://ghe.acme.test/x/y.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'me/gstack': null }, broken: ['ghe.acme.test/x/y'], ghDefault: 'https://github.com/me/gstack' }, want: 'UPSTREAM_PR: none', code: 0 },
+    { name: "an upstream remote on github.com is gh's default for an Enterprise origin, and its open PR is found", remotes: { origin: 'https://ghe.acme.test/me/proj.git', upstream: 'https://github.com/garrytan/gstack.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.acme.test/me/proj': null }, prs: { 'garrytan/gstack': [3066] }, ghDefault: 'https://github.com/garrytan/gstack' }, want: 'UPSTREAM_PR: open 3066 garrytan/gstack', dflt: ["UPSTREAM_PR_DEFAULT: gh's default repo is garrytan/gstack, not origin's ghe.acme.test/me/proj"], code: 0 },
+    { name: "an upstream remote on an Enterprise host is gh's default for a github.com origin, and its open PR is found", remotes: { origin: 'https://github.com/me/gstack.git', upstream: 'https://ghe.acme.test/acme/proj.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'me/gstack': null }, prs: { 'ghe.acme.test/acme/proj': [7] }, ghDefault: 'https://ghe.acme.test/acme/proj' }, want: 'UPSTREAM_PR: open 7 ghe.acme.test/acme/proj', dflt: ["UPSTREAM_PR_DEFAULT: gh's default repo is ghe.acme.test/acme/proj, not origin's me/gstack"], code: 0 },
+    { name: "gh's default on another repo with no PR is new, so Steps 18-19 never publish there", remotes: { origin: 'https://github.com/me/gstack.git', upstream: 'git@github.com:someone/gstack.git' }, gh: { repos: { 'me/gstack': null }, prs: { 'someone/gstack': [] }, ghDefault: 'https://github.com/someone/gstack' }, want: 'UPSTREAM_PR: new someone/gstack', dflt: ["UPSTREAM_PR_DEFAULT: gh's default repo is someone/gstack, not origin's me/gstack"], code: 0 },
+    { name: "a gh default that cannot be read stops", remotes: { origin: 'https://github.com/me/gstack.git' }, gh: { repos: { 'me/gstack': null }, ghDefault: null }, want: "UPSTREAM_PR: lookup failed gh's default repo - STOP", code: 1 },
+    { name: "a gh default whose PR lookup errors stops and is named", remotes: { origin: 'https://github.com/me/gstack.git', upstream: 'https://ghe.acme.test/acme/proj.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'me/gstack': null }, broken: ['ghe.acme.test/acme/proj'], ghDefault: 'https://ghe.acme.test/acme/proj' }, want: "UPSTREAM_PR: lookup failed gh's default repo (ghe.acme.test/acme/proj) - STOP", dflt: ["UPSTREAM_PR_DEFAULT: gh's default repo is ghe.acme.test/acme/proj, not origin's me/gstack"], code: 1 },
     // Any other failure on an extra remote still stops, and names the remote to fix or remove.
     { name: 'an extra remote whose lookup errors stops and is named', remotes: { origin: 'https://github.com/me/gstack.git', contributor: 'https://github.com/someone/gstack.git' }, gh: { repos: FORK, prs: { 'garrytan/gstack': [] }, broken: ['someone/gstack'] }, want: 'UPSTREAM_PR: lookup failed remote contributor (someone/gstack) - STOP', code: 1 },
   ];
@@ -335,6 +350,7 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
         const lines = r.out.split('\n');
         expect(lines.filter((l) => l.startsWith('UPSTREAM_PR:')), r.out).toEqual([c.want]);
         expect(lines.filter((l) => l.startsWith('UPSTREAM_PR_SKIP:')), r.out).toEqual(c.skip ?? []);
+        expect(lines.filter((l) => l.startsWith('UPSTREAM_PR_DEFAULT:')), r.out).toEqual(c.dflt ?? []);
         expect(r.code).toBe(c.code);
       });
     }
@@ -346,6 +362,9 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     expectMentions(prose, [
       // The upstream comes from origin, whatever `gh repo set-default` chose.
       ['upstream', "origin's url", 'parent', "never from gh's default"],
+      // ...but the later steps' bare gh acts on gh's default repo, so `none` needs it to be origin's.
+      ['steps 10, 18 and 19', "gh's default repo", 'not a fork', '`none`', "origin's own"],
+      ['handoff', "gh repo set-default <origin's repo>", "owner's to run"],
       // An Enterprise repo is named with its host, and its PR is the owner's to handle.
       ['enterprise', 'login', '<host>/<owner>/<name>', 'by hand'],
       // An open PR: no push, no body or title edit.
@@ -375,7 +394,8 @@ describe('/ship Step 10: Greptile triage on a fork PR to someone else\'s repo', 
     // Lines joined, bullet indents dropped; a blank line still ends a sentence.
     const prose = GREPTILE_MD.replace(/([^\n])\n[ \t]*(?=[^\n])/g, '$1 ');
     expectMentions(prose, [
-      ['new <repo>', 'open <number> <repo>', "someone else's repo"],
+      ['`none`', "gh's default repo", "origin's own"],
+      ['new <repo>', 'open <number> <repo>', "gh's default repo", "someone else's repo"],
       ['report-only', 'print each classification', 'no reply'],
       // A reply there waits for a same-turn yes under a registered id.
       ['reply', 'only after askuserquestion', '<gstack-qid:ship-upstream-pr-reply>', 'turn'],
