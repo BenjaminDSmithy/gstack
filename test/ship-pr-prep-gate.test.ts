@@ -245,6 +245,13 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     { name: 'a fork of a fork: an upstream remote past the parent is asked too', remotes: { origin: 'git@github.com:me/gstack.git', upstream: 'git@github.com:garrytan/gstack.git' }, gh: { repos: { 'me/gstack': 'garrytan-agents/gstack' }, prs: { 'garrytan-agents/gstack': [], 'garrytan/gstack': [3090] } }, want: 'UPSTREAM_PR: open 3090 garrytan/gstack', code: 0 },
     { name: 'an ssh host alias for github.com is GitHub', remotes: { origin: 'git@github-me:me/gstack.git' }, gh: { repos: FORK, prs: { 'garrytan/gstack': [3066] } }, want: 'UPSTREAM_PR: open 3066 garrytan/gstack', code: 0 },
     { name: 'your own repo with another GitHub remote and no PR there is none', remotes: { origin: 'https://github.com/me/gstack.git', fork: 'git@github.com:someone/gstack.git' }, gh: { repos: { 'me/gstack': null }, prs: { 'someone/gstack': [] } }, want: 'UPSTREAM_PR: none', code: 0 },
+    // A failed `gh repo view` is caught by its empty answer alone: the pipe's
+    // status is tr's, and no other remote's lookup fails first.
+    { name: 'a GitHub fork with no other remote and gh down stops', remotes: { origin: 'https://github.com/me/gstack.git' }, gh: { down: true }, want: 'UPSTREAM_PR: lookup failed', code: 1 },
+    // GitHub logins are case-insensitive; an unlowered URL fails the name check and reads as none.
+    { name: 'an uppercase owner in the URL is the same fork', remotes: { origin: 'https://github.com/Me/GStack.git' }, gh: { repos: { 'Me/GStack': 'garrytan/gstack' }, prs: { 'garrytan/gstack': [3066] } }, want: 'UPSTREAM_PR: open 3066 garrytan/gstack', code: 0 },
+    // A PR on origin's own repo is /ship's to update, whichever remote names that repo.
+    { name: "another remote for origin's own repo is not asked", remotes: { origin: 'https://github.com/me/gstack', 'gh-ssh': 'git@github.com:me/gstack.git' }, gh: { repos: { 'me/gstack': null }, prs: { 'me/gstack': [12] } }, want: 'UPSTREAM_PR: none', code: 0 },
   ];
 
   for (const [si, shell] of SHELLS.entries()) {
@@ -301,6 +308,8 @@ describe('/ship Step 10: Greptile triage on a fork PR to someone else\'s repo', 
       ['lookup failed', 'do not dispatch'],
       ['step 17 stops on the same check'],
     ], 'ship Step 10');
+    // The fix loop's return finishes saved replies; on a fork PR each still waits for its own yes.
+    expectMentions(between(prose, '**After triage:**', '---'), [['saved replies', 'after `new` or `open`', 'own yes']], 'ship Step 10 after triage');
   });
 
   test('that reply question is a registered one-way door: a stored preference never answers it', () => {
