@@ -154,55 +154,104 @@ describe('/ship Step 1.5: the rules around the gate', () => {
 // external contributor), Step 17 pushed to its head with no watch gate, and a
 // new fork PR was opened by ship's own non-draft `gh pr create` (2026-10-09).
 // Step 17's check decides, before any push, whether the branch is a fork PR
-// to someone else's repo and whether that PR is already open.
-describe('/ship Step 17: a fork PR to someone else\'s repo', () => {
+// to someone else's repo and whether that PR is already open. It reads the
+// upstream from origin's URL: gh's default repo is whatever `gh repo
+// set-default` last chose, and a check that asked it printed `none` for an
+// open upstream PR once the default was the fork, or when gh was down.
+describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', () => {
   const CHECK = (() => {
     const b = bashBlocks(STEP_17).find((x) => x.includes('UPSTREAM_PR'));
     if (!b) throw new Error('no UPSTREAM_PR block in ship/SKILL.md Step 17');
     return b.replaceAll('<branch-name>', 'feat/x');
   })();
 
-  /** A gh that answers only the two reads the check makes, and only for the expected repo and branch. */
-  function gh(opts: { repo?: string; prs?: string; listFails?: boolean }): string {
+  interface Gh {
+    /** Repos gh can see, as GitHub spells them, each with its fork parent (null: not a fork). */
+    repos?: Record<string, string | null>;
+    /** Open PR numbers whose head branch is feat/x, per lowercase repo; a repo left out fails its lookup. */
+    prs?: Record<string, number[]>;
+    /** gh cannot reach GitHub: every call fails (expired auth, locked keychain, network). */
+    down?: true;
+    /** What `gh repo set-default` left as the default repo, for a check that asks it. */
+    ghDefault?: string;
+  }
+
+  /**
+   * A gh that answers the check's reads from fixture JSON through the check's
+   * own -q expression (jq, as gh's gojq would), and refuses any other call.
+   * An `ssh` beside it resolves the one host alias the cases use.
+   */
+  function gh(g: Gh): string {
     const dir = fs.mkdtempSync(path.join(tmp, 'gh-'));
-    const view = opts.repo === undefined ? 'exit 1' : `echo '${opts.repo}'`;
-    const list = opts.listFails ? 'exit 1' : `printf '%s' '${opts.prs ?? ''}'`;
+    const file = (kind: string, repo: string) => path.join(dir, `${kind}-${repo.replace('/', '_')}.json`);
+    // The shape gh 2.102 returns for `--json nameWithOwner,parent`: the parent
+    // carries `name` and `owner.login`, never `nameWithOwner` (measured
+    // 2026-10-09 on BenjaminDSmithy/gstack, a fork of garrytan/gstack).
+    for (const [repo, parent] of Object.entries(g.repos ?? {})) {
+      const [login, name] = (parent ?? '/').split('/');
+      fs.writeFileSync(file('repo', repo.toLowerCase()), JSON.stringify({ nameWithOwner: repo, parent: parent === null ? null : { id: 'R_1', name, owner: { id: 'U_1', login } } }));
+    }
+    for (const [repo, nums] of Object.entries(g.prs ?? {})) fs.writeFileSync(file('prs', repo), JSON.stringify(nums.map((number) => ({ number }))));
     fs.writeFileSync(path.join(dir, 'gh'), [
       '#!/bin/sh',
+      'd=$(dirname "$0")',
+      ...(g.down ? ['echo "error connecting to api.github.com" >&2; exit 1'] : []),
       'case "$*" in',
-      `  "repo view --json nameWithOwner -q .nameWithOwner") ${view} ;;`,
-      `  "pr list --repo garrytan/gstack --head feat/x --state open --json number -q .[].number") ${list} ;;`,
+      `  "repo view --json nameWithOwner -q .nameWithOwner") ${g.ghDefault ? `echo '${g.ghDefault}'; exit 0` : 'exit 1'} ;;`,
+      '  "repo view "*" --json nameWithOwner,parent -q "*) f="$d/repo-$(printf %s "$3" | tr / _).json"; q=$7 ;;',
+      '  "pr list --repo "*" --head feat/x --state open --json number -q "*) f="$d/prs-$(printf %s "$4" | tr / _).json"; q=${12} ;;',
       '  *) echo "unexpected gh $*" >&2; exit 3 ;;',
       'esac',
+      '[ -f "$f" ] || { echo "GraphQL: Could not resolve to a Repository" >&2; exit 1; }',
+      'exec jq -r "$q" "$f"',
+      '',
+    ].join('\n'), { mode: 0o755 });
+    fs.writeFileSync(path.join(dir, 'ssh'), [
+      '#!/bin/sh',
+      '[ "$1" = -G ] || { echo "unexpected ssh $*" >&2; exit 3; }',
+      'echo "user git"',
+      'case "$2" in github-me) echo "hostname github.com" ;; *) echo "hostname $2" ;; esac',
+      'echo "port 22"',
       '',
     ].join('\n'), { mode: 0o755 });
     return dir;
   }
 
-  function clone(name: string, origin: string): string {
+  function clone(name: string, remotes: Record<string, string>, config: [string, string][] = []): string {
     const dir = repo(name);
-    const r = spawnSync('git', ['remote', 'add', 'origin', origin], { cwd: dir, encoding: 'utf-8', timeout: 30_000 });
-    if (r.status !== 0) throw new Error(`git remote add: ${r.stderr}`);
+    const git = (args: string[]) => {
+      const r = spawnSync('git', args, { cwd: dir, encoding: 'utf-8', timeout: 30_000 });
+      if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
+    };
+    for (const [remote, url] of Object.entries(remotes)) git(['remote', 'add', remote, url]);
+    for (const [key, value] of config) git(['config', key, value]);
     return dir;
   }
 
-  const cases: { name: string; origin: string; gh: Parameters<typeof gh>[0]; want: string; code: number }[] = [
-    { name: 'a fork branch with no PR yet is new', origin: 'https://github.com/me/gstack.git', gh: { repo: 'Garrytan/gstack' }, want: 'UPSTREAM_PR: new garrytan/gstack', code: 0 },
-    { name: 'a fork branch with an open PR is open', origin: 'git@github.com:me/gstack.git', gh: { repo: 'garrytan/gstack', prs: '3066' }, want: 'UPSTREAM_PR: open 3066 garrytan/gstack', code: 0 },
-    { name: 'two open PRs on the branch are both named', origin: 'git@github.com:me/gstack.git', gh: { repo: 'garrytan/gstack', prs: '3066\n3067' }, want: 'UPSTREAM_PR: open 3066 3067 garrytan/gstack', code: 0 },
-    { name: 'a look-alike owner is still a fork', origin: 'https://github.com/notgarrytan/gstack', gh: { repo: 'garrytan/gstack' }, want: 'UPSTREAM_PR: new garrytan/gstack', code: 0 },
-    { name: 'origin is the repo itself (any case, ssh)', origin: 'git@github.com:GarryTan/GStack.git', gh: { repo: 'garrytan/gstack', listFails: true }, want: 'UPSTREAM_PR: none', code: 0 },
-    { name: 'no GitHub repo (GitLab, no gh) is none', origin: 'git@gitlab.example.com:me/gstack.git', gh: {}, want: 'UPSTREAM_PR: none', code: 0 },
-    { name: 'a failed PR lookup stops', origin: 'https://github.com/me/gstack.git', gh: { repo: 'garrytan/gstack', listFails: true }, want: 'UPSTREAM_PR: lookup failed', code: 1 },
+  const FORK = { 'me/gstack': 'garrytan/gstack' };
+  const cases: { name: string; remotes: Record<string, string>; config?: [string, string][]; gh: Gh; want: string; code: number }[] = [
+    { name: 'a fork branch with no PR yet is new (a GitLab mirror is not asked)', remotes: { origin: 'https://github.com/me/gstack.git', mirror: 'git@gitlab.example.com:me/gstack.git' }, gh: { repos: { 'Me/gstack': 'Garrytan/gstack' }, prs: { 'garrytan/gstack': [] } }, want: 'UPSTREAM_PR: new garrytan/gstack', code: 0 },
+    { name: 'a fork branch with an open PR is open', remotes: { origin: 'git@github.com:me/gstack.git' }, gh: { repos: FORK, prs: { 'garrytan/gstack': [3066] } }, want: 'UPSTREAM_PR: open 3066 garrytan/gstack', code: 0 },
+    { name: 'two open PRs on the branch are both named', remotes: { origin: 'ssh://git@ssh.github.com:443/me/gstack' }, gh: { repos: FORK, prs: { 'garrytan/gstack': [3066, 3067] } }, want: 'UPSTREAM_PR: open 3066 3067 garrytan/gstack', code: 0 },
+    { name: 'a look-alike owner is still a fork', remotes: { origin: 'https://github.com/notgarrytan/gstack/' }, gh: { repos: { 'notgarrytan/gstack': 'garrytan/gstack' }, prs: { 'garrytan/gstack': [] } }, want: 'UPSTREAM_PR: new garrytan/gstack', code: 0 },
+    // No PR list here: a lookup on origin's own repo would fail the case.
+    { name: 'origin is the repo itself (any case, ssh)', remotes: { origin: 'git@github.com:GarryTan/GStack.git' }, gh: { repos: { 'garrytan/gstack': null } }, want: 'UPSTREAM_PR: none', code: 0 },
+    { name: 'no GitHub repo (GitLab, gh down) is none', remotes: { origin: 'git@gitlab.example.com:me/gstack.git' }, gh: { down: true }, want: 'UPSTREAM_PR: none', code: 0 },
+    { name: 'a failed PR lookup stops', remotes: { origin: 'https://github.com/me/gstack.git' }, gh: { repos: FORK }, want: 'UPSTREAM_PR: lookup failed', code: 1 },
+    { name: 'a GitHub fork with gh down stops', remotes: { origin: 'https://github.com/me/gstack.git', upstream: 'https://github.com/garrytan/gstack.git' }, gh: { down: true }, want: 'UPSTREAM_PR: lookup failed', code: 1 },
+    { name: "gh's default repo set to the fork still finds the upstream PR", remotes: { origin: 'https://github.com/me/gstack.git', upstream: 'https://github.com/garrytan/gstack.git' }, config: [['remote.origin.gh-resolved', 'base']], gh: { ghDefault: 'me/gstack', repos: FORK, prs: { 'garrytan/gstack': [3090] } }, want: 'UPSTREAM_PR: open 3090 garrytan/gstack', code: 0 },
+    { name: 'a fork of a fork: an upstream remote past the parent is asked too', remotes: { origin: 'git@github.com:me/gstack.git', upstream: 'git@github.com:garrytan/gstack.git' }, gh: { repos: { 'me/gstack': 'garrytan-agents/gstack' }, prs: { 'garrytan-agents/gstack': [], 'garrytan/gstack': [3090] } }, want: 'UPSTREAM_PR: open 3090 garrytan/gstack', code: 0 },
+    { name: 'an ssh host alias for github.com is GitHub', remotes: { origin: 'git@github-me:me/gstack.git' }, gh: { repos: FORK, prs: { 'garrytan/gstack': [3066] } }, want: 'UPSTREAM_PR: open 3066 garrytan/gstack', code: 0 },
+    { name: 'your own repo with another GitHub remote and no PR there is none', remotes: { origin: 'https://github.com/me/gstack.git', fork: 'git@github.com:someone/gstack.git' }, gh: { repos: { 'me/gstack': null }, prs: { 'someone/gstack': [] } }, want: 'UPSTREAM_PR: none', code: 0 },
   ];
 
   for (const [si, shell] of SHELLS.entries()) {
     for (const [i, c] of cases.entries()) {
       test(`under ${shell}: ${c.name}`, () => {
-        const cwd = clone(`up-${si}-${i}`, c.origin);
+        const cwd = clone(`up-${si}-${i}`, c.remotes, c.config);
         const r = run(shell, CHECK, cwd, {}, gh(c.gh));
-        expect(r.out).not.toContain('unexpected gh');
-        expect(r.out.split('\n').filter((l) => l.startsWith('UPSTREAM_PR:'))).toEqual([c.want + (c.code ? ' - STOP' : '')]);
+        expect(r.out).not.toContain('unexpected');
+        expect(r.out.split('\n').filter((l) => l.startsWith('UPSTREAM_PR:')), r.out).toEqual([c.want + (c.code ? ' - STOP' : '')]);
         expect(r.code).toBe(c.code);
       });
     }
@@ -212,6 +261,8 @@ describe('/ship Step 17: a fork PR to someone else\'s repo', () => {
     expectOrdered(STEP_17, ['UPSTREAM_PR: none', '**Credential pre-push guard', 'git push -u origin'], 'ship Step 17');
     const prose = STEP_17.replace(/([^\n])\n(?=[^\n])/g, '$1 ');
     expectMentions(prose, [
+      // The upstream comes from origin, whatever `gh repo set-default` chose.
+      ['upstream', "origin's url", 'parent', "never from gh's default"],
       // An open PR: no push, no body or title edit.
       ['open', 'never writes'],
       ['do not push', 'skip steps 18-19', 'screenshot'],
