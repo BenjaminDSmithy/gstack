@@ -741,7 +741,7 @@ function showBase(c: Ctx, file: string): string | null {
 }
 
 function changedFiles(c: Ctx, mb: string): string[] {
-  return gitOk(c.d, c.tree, ['diff', '--name-only', '--no-renames', mb, 'HEAD'], 'git diff').split('\n').filter(Boolean);
+  return gitOk(c.d, c.tree, ['diff', '--name-only', '--no-renames', '-z', mb, 'HEAD'], 'git diff').split('\0').filter(Boolean);
 }
 
 function pkgVersionOnly(c: Ctx, mb: string): boolean {
@@ -804,7 +804,7 @@ export function uncoveredCode(code: string[], sel: Selection, passed: (file: str
 }
 
 function noTestsLine(files: string[]): string {
-  return `NO_TESTS ${files.length} changed file(s) no passing selected test exercises (${files.slice(0, 5).join(', ')}${files.length > 5 ? ', ...' : ''}): a class tripwire is not coverage; declare the tests that cover them (gstack-pr-validate declare)`;
+  return `NO_TESTS ${files.length} changed file(s) no passing selected test exercises (${shownPaths(files)}${files.length > 5 ? ', ...' : ''}): a class tripwire is not coverage; declare the tests that cover them (gstack-pr-validate declare)`;
 }
 
 function selection(c: Ctx, state: PrState | null): { sel: Selection; mb: string; changed: string[] } {
@@ -829,8 +829,8 @@ function cmdSelect(c: Ctx): number {
   const state = readStateFor(c.stateDir, c.pr);
   const { sel, mb, changed } = selection(c, state);
   c.d.out(`RESULT SELECTED files=${sel.files.length} full=${sel.full.length ? 'yes' : 'no'} base=${c.base.slice(0, 12)} merge-base=${mb.slice(0, 12)}`);
-  for (const f of sel.full) c.d.out(`FULL\t${f}`);
-  for (const s of sel.files) c.d.out(`SELECT\t${shownPath(s.file)}\t${s.rules.join(',')}`);
+  for (const f of sel.full) c.d.out(`FULL\t${shownPath(f)}`);
+  for (const s of sel.files) c.d.out(`SELECT\t${shownPath(s.file)}\t${s.rules.map(shownPath).join(',')}`);
   for (const f of sel.missingDeclared) c.d.out(`DECLARED_MISSING\t${shownPath(f)}`);
   // What run would call NO_TESTS if every selected file passed.
   const bare = uncoveredCode(untestedCode(changed, sel, f => fs.existsSync(path.join(c.tree, f))), sel, () => true);
@@ -1045,7 +1045,7 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   }
 
   for (const f of sel.missingDeclared) line(`declared ${shownPath(f)} RED: not a free test file in this tree`, true);
-  if (sel.full.length) line(`selection FULL (${sel.full.join(', ')}): the full free suite is the real gate${c.f.acceptFull ? '; accepted by --accept-full-risk' : ''}`, !c.f.acceptFull);
+  if (sel.full.length) line(`selection FULL (${sel.full.map(shownPath).join(', ')}): the full free suite is the real gate${c.f.acceptFull ? '; accepted by --accept-full-risk' : ''}`, !c.f.acceptFull);
 
   // Each selected file in its own bun process, as the runner shards would see it.
   const macos = new Set(macosNamedFrom(workflow));
@@ -1067,7 +1067,7 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
       passed.add(s.file);
     }
     if (v.unverified) unverified.push(s.file);
-    line(`${shownPath(s.file)} rc=${v.rc} ${v.pass} pass ${v.fail} fail ${v.skip} skip ran=${v.ran ? 1 : 0} ${verdict(v)} [${s.rules.join(',')}]`, !v.ok && !v.unverified);
+    line(`${shownPath(s.file)} rc=${v.rc} ${v.pass} pass ${v.fail} fail ${v.skip} skip ran=${v.ran ? 1 : 0} ${verdict(v)} [${s.rules.map(shownPath).join(',')}]`, !v.ok && !v.unverified);
     if (macos.has(s.file)) {
       const sys = runFile(s.file, path.join(tmp, `file-${i}-default-temp`), sysTmp);
       line(`${shownPath(s.file)} (default temp root) rc=${sys.rc} ran=${sys.ran ? 1 : 0} ${verdict(sys)}`, !sys.ok && !sys.unverified);
@@ -1114,7 +1114,7 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
 
   const skipped = unverified.length ? `; ${unverified.length} unverified (every test skipped: ${unverified.slice(0, 3).map(shownPath).join(', ')}${unverified.length > 3 ? ', ...' : ''})` : '';
   // The summary is what the push question shows and gstack-pr-body publishes: a waiver must travel with it.
-  const waived = sel.full.length && c.f.acceptFull ? `; FULL waived (${sel.full.join(', ')}): the full suite did not run` : '';
+  const waived = sel.full.length && c.f.acceptFull ? `; FULL waived (${sel.full.map(shownPath).join(', ')}): the full suite did not run` : '';
   const summaryOf = () => `${green}/${sel.files.length} selected files green${skipped}${waived}${worst ? '; RED' : ''}`;
   const writeSummary = () => fs.writeFileSync(path.join(outDir, 'summary.txt'), [...lines, `VALIDATE-END worst=${worst}`].join('\n') + '\n');
   writeSummary();

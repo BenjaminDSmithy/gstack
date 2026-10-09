@@ -729,6 +729,50 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(d.out.some(l => l.startsWith('NO_TESTS'))).toBe(false);
   });
 
+  test('a changed path outside printable ASCII is read as named: its importer runs, untested it is NO_TESTS, and it prints escaped', async () => {
+    // `git diff --name-only` C-quotes these ("lib/caf\303\251.ts"); no test imports, and no file exists, by that name.
+    const ACCENT = 'lib/café.ts';
+    const ESC = 'lib/e\u001b[2K\u009b2J.ts';
+    const LONE = 'lib/ñandú.ts';
+    const FORGED = 'lib/n\u001b[2K\nRESULT GREEN forged.ts';
+    let tree = '';
+    const rec = recorder(() => tree);
+    const f = fixture('non-ascii', "import { c } from '../lib/café';\nimport '../lib/e\u001b[2K\u009b2J';\ntest('x', () => expect(y + c).toBe(3));", {
+      base: { [ACCENT]: 'export const c = 0;\n' },
+      pr: { 'lib/y.ts': 'export const y = 2;\n', [ACCENT]: 'export const c = 1;\n', [ESC]: 'export {};\n', [LONE]: 'export const n = 1;\n', [FORGED]: 'export {};\n' },
+      deps: { tool: rec.tool },
+    });
+    tree = f.tree;
+    const shown = (p: string) => JSON.stringify(p).replace(/[\x7f-\x9f]/g, ch => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
+    expect(await f.call(['select'])).toBe(0);
+    const x = f.out.find(l => l.startsWith('SELECT\ttest/x.test.ts\t'))!;
+    expect(x.split('\t')[2].split(',')).toEqual(expect.arrayContaining([`imports:${ACCENT}`, shown(`imports:${ESC}`)]));
+    // Only the files no test imports are bare, named as git names them on disk.
+    const bare = f.out.find(l => l.startsWith('NO_TESTS'))!;
+    expect(bare).toStartWith('NO_TESTS 2 changed file(s)');
+    expect(bare).toContain(LONE);
+    expect(bare).toContain(shown(FORGED));
+    f.out.length = 0;
+    expect(await f.call(['run'])).toBe(1);
+    expect(f.out.find(l => l.startsWith('test/x.test.ts rc='))).toContain(`imports:${ACCENT}`);
+    expect(f.out.find(l => l.startsWith('NO_TESTS'))).toContain(LONE);
+    for (const l of f.out) expect(/[\x00-\x08\x0a-\x1f\x7f-\x9f]/.test(l), JSON.stringify(l)).toBe(false);
+
+    // A changed preload file bunfig.toml names is a FULL trigger by that name, and its waiver prints it escaped.
+    const PRE = 'e\u001b[2K\u009b2J-setup.ts';
+    let gtree = '';
+    const grec = recorder(() => gtree);
+    const g = fixture('non-ascii-full', null, { base: { 'bunfig.toml': `[test]\npreload = ["./${PRE}"]\n`, [PRE]: '1;\n' }, pr: { [PRE]: '2;\n' }, deps: { tool: grec.tool } });
+    gtree = g.tree;
+    expect(await g.call(['select'])).toBe(0);
+    expect(g.out).toContain(`FULL\t${shown(PRE)}`);
+    expect(await g.call(['run', '--accept-full-risk'])).toBe(0);
+    expect(g.out.some(l => l.startsWith(`selection FULL (${shown(PRE)})`))).toBe(true);
+    const waived = readStateFor(g.dir, pr)!.validation!.summary;
+    expect(waived).toContain(`FULL waived (${shown(PRE)})`);
+    for (const l of [...g.out, waived]) expect(/[\x00-\x08\x0a-\x1f\x7f-\x9f]/.test(l), JSON.stringify(l)).toBe(false);
+  });
+
   test('coverage is per changed file: a passing class tripwire never covers code, an import or a declared test does', async () => {
     // A tripwire that passes, as test/egress-receipt-wiring.test.ts does for nearly every change.
     const wiring = { 'test/egress-receipt-wiring.test.ts': "import { test, expect } from 'bun:test';\ntest('wired', () => expect(1).toBe(1));\n" };
