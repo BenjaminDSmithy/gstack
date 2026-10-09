@@ -65,6 +65,10 @@ trailer on a commit not linked to this PR). A latched P0/P1 keeps its
 level until acknowledged, even when a later poll reads it lower (an
 edited comment, a sender reclassified); its SIGNAL line then ends with
 what it reads now.
+A maintainer is OWNER, MEMBER or COLLABORATOR by GitHub's association,
+or, for a timeline event (which carries none), the repo owner or a person
+who merged one of the last 200 merged PRs. A proxy is capy-ai[bot] or any
+other account that merged one of the last 30.
 
 Exit codes: 0 quiet (no unacknowledged P0/P1), 1 error, 2 usage,
 10 unacknowledged P0, 11 unacknowledged P1, 12 UNVERIFIED (an endpoint
@@ -116,6 +120,36 @@ export function classifyActor(a: { login?: string; type?: string; assoc?: string
   if (a.assoc && MAINTAINER_ASSOC.has(a.assoc)) return 'maintainer';
   if (a.type === 'Bot' || /\[bot\]$/.test(a.login ?? '')) return 'bot';
   return 'external';
+}
+
+/** Merged PRs read for mergerRoles: the proxy window is the newest PROXY_WINDOW of MERGED_SAMPLE. */
+export const MERGED_SAMPLE = 200;
+export const PROXY_WINDOW = 30;
+
+/**
+ * Who the merged PRs (newest first, gh's `mergedBy`) make strong. Any
+ * merger among the newest PROXY_WINDOW other than the repo owner or an
+ * infra bot is a proxy, as before. A person who merged any of the
+ * MERGED_SAMPLE has write access, so is a maintainer: timeline events
+ * carry no author_association, and an actor known only by an older merge
+ * read as external, so a collaborator's cross-reference from a maintainer
+ * PR was P2 and left the write gate open (upstream's COLLABORATOR
+ * 16francej merged 7 of the last 200 and none of the last 30, 2026-10-08).
+ * An older bot merger stays out: a bot is a proxy only inside the window.
+ */
+export function mergerRoles(merged: readonly { mergedBy?: { login?: string; is_bot?: boolean } | null }[], owner: string): { proxies: Set<string>; maintainers: Set<string> } {
+  const proxies = new Set<string>(SEED_PROXIES);
+  const maintainers = new Set<string>([owner]);
+  merged.slice(0, MERGED_SAMPLE).forEach((m, i) => {
+    const login = m?.mergedBy?.login ?? '';
+    if (!login) return;
+    const key = actorKey(login, m.mergedBy?.is_bot === true);
+    const bare = key.replace(/\[bot\]$/, '');
+    if (bare === owner.toLowerCase() || hasLogin(INFRA_BOTS, bare)) return;
+    if (i < PROXY_WINDOW) proxies.add(key);
+    else if (!key.endsWith('[bot]')) maintainers.add(login);
+  });
+  return { proxies, maintainers };
 }
 
 export interface Signal {
@@ -496,17 +530,8 @@ export function poll(d: WatchDeps, repo: string, n: number, cwd: string): PollRe
     const comments = ghList<Comment>(d, `repos/${repo}/issues/${n}/comments`, 'comments');
     const reviews = ghList<Review>(d, `repos/${repo}/pulls/${n}/reviews`, 'reviews');
     const timeline = ghList<TimelineEvent>(d, `repos/${repo}/issues/${n}/timeline`, 'timeline', ['-H', 'Accept: application/vnd.github+json']);
-    const merged = ghJson<{ mergedBy?: { login?: string; is_bot?: boolean } | null }[]>(d, ['pr', 'list', '--repo', repo, '--state', 'merged', '--limit', '30', '--json', 'mergedBy'], 'merged PRs');
-    const owner = repo.split('/')[0];
-    const proxies = new Set<string>(SEED_PROXIES);
-    for (const m of merged) {
-      const login = m.mergedBy?.login ?? '';
-      if (!login) continue;
-      const key = actorKey(login, m.mergedBy?.is_bot === true);
-      const bare = key.replace(/\[bot\]$/, '');
-      if (bare !== owner.toLowerCase() && !hasLogin(INFRA_BOTS, bare)) proxies.add(key);
-    }
-    const maintainers = new Set<string>([owner]);
+    const merged = ghJson<{ mergedBy?: { login?: string; is_bot?: boolean } | null }[]>(d, ['pr', 'list', '--repo', repo, '--state', 'merged', '--limit', String(MERGED_SAMPLE), '--json', 'mergedBy'], 'merged PRs');
+    const { proxies, maintainers } = mergerRoles(merged, repo.split('/')[0]);
     for (const c of [...comments, ...reviews]) if (c.author_association && MAINTAINER_ASSOC.has(c.author_association) && c.user?.login) maintainers.add(c.user.login);
     // The git half runs last and cannot discard what the REST reads found: a
     // definite P0/P1 outranks a failed scan (reported as error=), and a scan

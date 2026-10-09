@@ -12,7 +12,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { classifyActor, signalsFrom, sizeVerdict, percentile, watchMain, poll, pollForWrite, absorptionOf, SEED_PROXIES } from '../lib/pr-watch';
+import { classifyActor, signalsFrom, sizeVerdict, percentile, watchMain, poll, pollForWrite, absorptionOf, mergerRoles, SEED_PROXIES } from '../lib/pr-watch';
 import { prStateDir, topicFor, readStateFor, writeState, withPrLock, defaultGit, type GhRunner } from '../lib/pr-context';
 
 setDefaultTimeout(120_000);
@@ -164,6 +164,15 @@ describe('cross-references', () => {
   test('a MEMBER\'s PR counts as a maintainer PR from its author_association, without a comment here', () => {
     expect(run(xref('colleague', { login: 'colleague', assoc: 'MEMBER' }))).toEqual([['P0', 'maintainer-cross-reference', 'colleague (maintainer)']]);
   });
+  test('a person who merged one of the last 200 PRs is a maintainer for the timeline; only the last 30 make proxies', () => {
+    // Upstream 2026-10-08: COLLABORATOR 16francej merged 7 of the last 200 merged PRs and none of the last 30.
+    const window = Array.from({ length: 30 }, () => ({ mergedBy: { login: 'app/capy-ai', is_bot: true } }));
+    const roles = mergerRoles([...window, { mergedBy: { login: '16francej', is_bot: false } }, { mergedBy: { login: 'app/oldbot', is_bot: true } }, { mergedBy: { login: 'garrytan', is_bot: false } }], 'garrytan');
+    expect([...roles.proxies].sort()).toEqual(['capy-ai[bot]']);
+    expect([...roles.maintainers].sort()).toEqual(['16francej', 'garrytan']);
+    const seen = signalsFrom({ number: 1, self: 'me', ...roles, pull: { state: 'open' }, comments: [], reviews: [], timeline: [xref('16francej', { login: 'garrytan', assoc: 'OWNER' })] as never[], absorbed: [] });
+    expect(seen.map(s => [s.level, s.kind, s.who])).toEqual([['P0', 'maintainer-cross-reference', '16francej (maintainer)']]);
+  });
 });
 
 describe('size', () => {
@@ -267,7 +276,11 @@ function fakeGh(t: { fork: string }, data: FakeData): GhRunner & { calls: string
     }
     if (args[0] === 'api' && route === 'repos/acme/gw/pulls/7/reviews') return page(data.reviews);
     if (args[0] === 'api' && route === 'repos/acme/gw/issues/7/timeline') return page(data.timeline);
-    if (args[0] === 'pr' && args[1] === 'list') return ok(data.merged ?? [{ mergedBy: { login: 'app/capy-ai', is_bot: true } }]); // gh's shape for a bot merger, read 2026-10-09
+    if (args[0] === 'pr' && args[1] === 'list') {
+      // gh's shape for a bot merger, read 2026-10-09; at most --limit items (gh's default 30), newest first.
+      const limit = args.includes('--limit') ? Number(args[args.indexOf('--limit') + 1]) : 30;
+      return ok((data.merged ?? [{ mergedBy: { login: 'app/capy-ai', is_bot: true } }]).slice(0, limit));
+    }
     return { status: 1, stdout: '', stderr: `unexpected gh ${args.join(' ')}` };
   }) as GhRunner & { calls: string[][] };
   gh.calls = calls;
@@ -394,6 +407,19 @@ describe('poll, ack and the write gate', () => {
       expect(r.code, r.text).toBe(10);
       expect(r.text).toContain('SIGNAL\tP0\txref:50\tmaintainer-cross-reference');
     });
+  });
+
+  test('poll reads the last 200 merged PRs: a collaborator outside the 30-merge proxy window referencing from a maintainer PR is P0', async () => {
+    const t = topology('xref-collaborator', null);
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(t.base, 'home') };
+    const merged = [...Array.from({ length: 30 }, () => ({ mergedBy: { login: 'app/capy-ai', is_bot: true } })), { mergedBy: { login: 'collab', is_bot: false } }];
+    const timeline = [{ event: 'cross-referenced', actor: { login: 'collab', type: 'User' }, created_at: '2026-10-02T00:00:00Z', source: { issue: { number: 50, user: { login: 'acme' }, author_association: 'OWNER', pull_request: { url: 'https://api.github.com/repos/acme/gw/pulls/50' } } } }];
+    const gh = fakeGh(t, { merged, timeline });
+    const out: string[] = [];
+    const code = await watchMain(['poll', '--pr', '7', '--repo', 'acme/gw', '--cwd', t.clone], { gh, env, out: l => out.push(l) });
+    expect(code, out.join('\n')).toBe(10);
+    expect(out.join('\n')).toContain('SIGNAL\tP0\txref:50\tmaintainer-cross-reference\tcollab (maintainer)');
+    expect(gh.calls.find(c => c[0] === 'pr' && c[1] === 'list')).toContain('200');
   });
 
   test('our trailer on a base commit that cites this PR is ABSORBED-WITH-CREDIT; credit for another PR is information', async () => {
