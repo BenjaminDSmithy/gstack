@@ -442,7 +442,8 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
 
   test('the check runs before the push, and neither handoff writes to the upstream PR', () => {
     expectOrdered(STEP_17, ['UPSTREAM_PR: none', '**Credential pre-push guard', 'git push -u origin'], 'ship Step 17');
-    const prose = STEP_17.replace(/([^\n])\n(?=[^\n])/g, '$1 ');
+    // Fenced code is left out: the check's own echo lines must not stand in for the prose that explains them.
+    const prose = STEP_17.replace(/```[\s\S]*?```/g, '').replace(/([^\n])\n(?=[^\n])/g, '$1 ');
     expectMentions(prose, [
       // The upstream comes from origin, whatever `gh repo set-default` chose.
       ['upstream', "origin's url", 'parent', "never from gh's default"],
