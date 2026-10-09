@@ -15,6 +15,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { between, expectMentions, expectOrdered } from './helpers/prompt-structure';
+import { getQuestion } from '../scripts/question-registry';
 
 setDefaultTimeout(120_000);
 
@@ -22,6 +23,7 @@ const ROOT = path.resolve(import.meta.dir, '..');
 const read = (rel: string) => fs.readFileSync(path.join(ROOT, rel), 'utf-8');
 const SHIP_MD = read('ship/SKILL.md');
 const PR_BODY_MD = read('ship/sections/pr-body.md');
+const GREPTILE_MD = read('ship/sections/greptile.md');
 const PR_PREP_MD = read('pr-prep/SKILL.md');
 
 /** Every top-level ```bash block in `text`. */
@@ -274,5 +276,34 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     ], 'ship Step 17');
     // Step 19, if reached anyway, says the same.
     expectMentions(PR_BODY_MD.replace(/([^\n])\n(?=[^\n])/g, '$1 '), [['upstream_pr', 'never reach', '/pr-prep']], 'ship Step 19');
+  });
+});
+
+// Step 10 runs before Step 17, and for a fork branch whose open PR is on
+// someone else's repo, review/greptile-triage.md resolves REPO and PR_NUMBER
+// to that upstream PR: the "already fixed" reply posted there with "no
+// AskUserQuestion needed", and a Fix-now answer posted a Fix reply. D2: every
+// write to an open upstream PR needs the owner's yes in the same turn.
+describe('/ship Step 10: Greptile triage on a fork PR to someone else\'s repo', () => {
+  test('the upstream check runs before the dispatch and any reply; a fork PR is report-only', () => {
+    expectOrdered(GREPTILE_MD, ['PR: exists', 'Upstream PR check', 'Dispatch a subagent', 'Reply using'], 'ship Step 10');
+    // Lines joined, bullet indents dropped; a blank line still ends a sentence.
+    const prose = GREPTILE_MD.replace(/([^\n])\n[ \t]*(?=[^\n])/g, '$1 ');
+    expectMentions(prose, [
+      ['new <repo>', 'open <number> <repo>', "someone else's repo"],
+      ['report-only', 'print each classification', 'no reply'],
+      // A reply there waits for a same-turn yes under a registered id.
+      ['reply', 'only after askuserquestion', '<gstack-qid:ship-upstream-pr-reply>', 'turn'],
+      ['one yes covers one reply'],
+      // Nothing else in the step stands in for that yes.
+      ['fix-now', 'false-positive', 'no askuserquestion needed', 'never approve'],
+      ['already fixed', 'after `none`', 'no askuserquestion needed'],
+      ['lookup failed', 'do not dispatch'],
+      ['step 17 stops on the same check'],
+    ], 'ship Step 10');
+  });
+
+  test('that reply question is a registered one-way door: a stored preference never answers it', () => {
+    expect(getQuestion('ship-upstream-pr-reply')).toMatchObject({ skill: 'ship', door_type: 'one-way' });
   });
 });
