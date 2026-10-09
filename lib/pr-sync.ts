@@ -63,7 +63,8 @@ exact commit.
   push     publishes the staged sync commit (needs --yes); once the PR
            or the head remote reports it, fast-forwards the local PR
            branch and removes the scratch worktree. Run again after an
-           UNVERIFIED push: once the head remote holds the commit, it
+           UNVERIFIED push: once the head remote holds the commit (when
+           it is on github.com; otherwise once the PR reports it), it
            records the push, sending nothing
   abort    removes the staged sync, or the scratch worktree an interrupted
            merge left; only a worktree gstack-pr-sync made is removed.
@@ -101,10 +102,10 @@ also a draft not bound to this PR's current head and newest run), 31
 validation missing, red, or a waived full suite without --accept-full-risk
 for the staged commit, 32 PR body still stale from an earlier push, 40 remote moved
 or not fast-forward, 41 a pre-push hook or the remote refused the push
-(stop and report; never --no-verify), 42 git push exited 0 but neither
-the PR nor the head remote shows the commit, or the head remote could not
-be read back (UNVERIFIED: nothing recorded; check the push URL, then push
---yes again), 45 lock busy, 50 a sync is already
+(stop and report; never --no-verify), 42 the PR does not show the
+commit and neither does the head remote, or it could not be read back,
+or it does but is not on github.com (UNVERIFIED: nothing recorded; check
+the push URL, then push --yes again), 45 lock busy, 50 a sync is already
 staged, the scratch path holds something gstack-pr-sync did not make, or
 the local branch has unpushed commits, 60 the version queue could not be
 read (never guessed).`;
@@ -333,12 +334,18 @@ export interface SyncDeps {
   readbackDelayMs: number;
   /** The HostName ssh connects to for a host alias (`ssh -G`), or null. */
   sshHostName: (alias: string) => string | null;
+  /**
+   * Whether a fetch URL is on the PR's host (github.com, an ssh alias
+   * resolved through `sshHostName`): only such a head remote holding the
+   * pushed commit shows a PR that does not report it yet is lagging.
+   */
+  onPrHost: (fetchUrl: string, cwd: string, sshHostName: (alias: string) => string | null) => boolean;
 }
 
 const realDeps = (): SyncDeps => ({
   gh: defaultGh, git: defaultGit, tool: defaultTool, env: process.env, now: () => new Date(),
   out: l => process.stdout.write(l + '\n'), err: l => process.stderr.write(l + '\n'), preWriteGate: defaultPreWriteGate,
-  readbackDelayMs: 2_000, sshHostName: sshConfigHostName,
+  readbackDelayMs: 2_000, sshHostName: sshConfigHostName, onPrHost: onGithub,
 });
 
 // ── staged-sync record ──────────────────────────────────────────────────────
@@ -1085,6 +1092,11 @@ function urlDestination(url: string, cwd: string, sshHostName: (alias: string) =
   return `host:${isGithub(host) ? 'github.com' : host}`;
 }
 
+/** A remote URL on github.com (or a subdomain, or an ssh alias whose HostName is): the default SyncDeps.onPrHost. */
+export function onGithub(url: string, cwd: string, sshHostName: (alias: string) => string | null): boolean {
+  return urlDestination(url, cwd, sshHostName) === 'host:github.com';
+}
+
 /**
  * The push URLs that would not reach the repository the fetch URL names:
  * each must name OWNER/NAME on a path boundary AND land where the fetch URL
@@ -1170,28 +1182,36 @@ function cmdPush(c: Ctx): number {
     // The head remote already holds the staged commit while the PR lags behind
     // it: an earlier push of this sync landed and its bookkeeping never ran (its
     // read-back of the head remote failed, or the run was killed after the
-    // send). Record it and send nothing; "abort and re-sync" would lose it.
-    if (now === staged.sha) return recordLanded(c, staged, `pending (${c.pr.headOid.slice(0, 12)})`);
+    // send). Record it and send nothing; "abort and re-sync" would lose it. Only
+    // a head remote on the PR's host shows that: a mirror holding the commit
+    // says nothing about the PR, so then nothing is sent or recorded.
+    if (now === staged.sha) {
+      if (headRemoteOnPrHost(c)) return recordLanded(c, staged, `pending (${c.pr.headOid.slice(0, 12)})`);
+      return unverified(c, staged, c.pr.headOid, "the PR's head; nothing sent now", [
+        `NOTE ${c.headRemote}/${c.pr.headRef} already holds ${staged.sha.slice(0, 12)} but the PR still reports ${c.pr.headOid.slice(0, 12)}: ${UNVERIFIED_KEPT}. Once ${landedWhen(c, staged.sha, false)}, \`gstack-pr-sync push --yes\` records the push without sending anything; if it never does, check where \`git remote get-url --push ${c.headRemote}\` sends it, then \`gstack-pr-sync abort\` and re-sync`,
+      ]);
+    }
     if (now !== staged.h0) throw new PrContextError(`${c.headRemote}/${c.pr.headRef} moved to ${now.slice(0, 12)}; abort and re-sync`, SYNC_EXIT.REMOTE_MOVED);
     pushOrThrow(c, staged.scratch, staged.sha, 'pr-sync-push', gateAt);
     // git exit 0. A PR still at H0 after every read-back is either GitHub lagging
-    // its own refs or a push that went somewhere else; the head remote (its fetch
-    // URL is the repository the PR names) tells them apart. Nothing is recorded
-    // only when that remote does not hold the commit, or cannot be read. A failed
+    // its own refs or a push that went somewhere else; a head remote on the PR's
+    // host (its fetch URL is the repository the PR names, and every push URL
+    // lands there) tells them apart. Nothing is recorded when that remote does
+    // not hold the commit, cannot be read, or is not on the PR's host. A failed
     // gh read is no evidence either way, so it still records.
     const rb = readback(c, staged.sha, staged.h0);
     if (rb.stillH0) {
       const at = headRemoteAt(c);
-      if (at.sha !== staged.sha) {
-        d.out(`RESULT UNVERIFIED sha=${staged.sha.slice(0, 12)} pr=${c.pr.number} readback=${staged.h0.slice(0, 12)} (the head before the push)`);
-        const kept = 'nothing was recorded (the staged sync, its scratch and the local branch are as they were)';
-        if (at.error !== null) {
-          d.out(`NOTE git push exited 0 but the PR still reports ${staged.h0.slice(0, 12)} and ${c.headRemote}/${c.pr.headRef} could not be read back: ${kept}. Run \`gstack-pr-sync push --yes\` again: once ${c.headRemote} answers with ${staged.sha.slice(0, 12)} it records the push without sending anything`);
-          d.out(envelope(at.error, `git fetch ${c.headRemote}`));
-        } else {
-          d.out(`NOTE git push exited 0 but neither the PR nor ${c.headRemote}/${c.pr.headRef} (${at.sha.slice(0, 12)}) shows ${staged.sha.slice(0, 12)}: ${kept}. Check where \`git remote get-url --push ${c.headRemote}\` sends it. Once ${c.headRemote} holds ${staged.sha.slice(0, 12)}, \`gstack-pr-sync push --yes\` records the push without sending anything; if it never does, \`gstack-pr-sync abort\` and re-sync`);
-        }
-        return SYNC_EXIT.UNVERIFIED;
+      const onHost = headRemoteOnPrHost(c);
+      if (at.sha !== staged.sha || !onHost) {
+        const ref = `${c.headRemote}/${c.pr.headRef}`;
+        const h0 = staged.h0.slice(0, 12);
+        const sha = staged.sha.slice(0, 12);
+        const when = landedWhen(c, staged.sha, onHost);
+        const notes = at.error !== null
+          ? [`NOTE git push exited 0 but the PR still reports ${h0} and ${ref} could not be read back: ${UNVERIFIED_KEPT}. Run \`gstack-pr-sync push --yes\` again: once ${when}, it records the push without sending anything`, envelope(at.error, `git fetch ${c.headRemote}`)]
+          : [`NOTE git push exited 0 but ${at.sha === staged.sha ? `the PR still reports ${h0} (${ref} holds ${sha})` : `neither the PR nor ${ref} (${at.sha.slice(0, 12)}) shows ${sha}`}: ${UNVERIFIED_KEPT}. Check where \`git remote get-url --push ${c.headRemote}\` sends it. Once ${when}, \`gstack-pr-sync push --yes\` records the push without sending anything; if it never does, \`gstack-pr-sync abort\` and re-sync`];
+        return unverified(c, staged, staged.h0, 'the head before the push', notes);
       }
       rb.detail.push(`NOTE the PR still reports ${staged.h0.slice(0, 12)} after the read-backs, but ${c.headRemote}/${c.pr.headRef} holds ${staged.sha.slice(0, 12)}: GitHub has not caught up; check it with gstack-pr-watch poll`);
     }
@@ -1200,6 +1220,40 @@ function cmdPush(c: Ctx): number {
     for (const line of [...done, ...rb.detail]) d.out(line);
     return SYNC_EXIT.SYNCED;
   });
+}
+
+const UNVERIFIED_KEPT = 'nothing was recorded (the staged sync, its scratch and the local branch are as they were)';
+
+/**
+ * Exit 42: the push cannot be shown to have reached the PR, so nothing is
+ * recorded. `seen` is the PR head this run read; `notes` say why, and what
+ * shows the push landed so that running push again records it.
+ */
+function unverified(c: Ctx, staged: StagedSync, seen: string, what: string, notes: string[]): number {
+  c.d.out(`RESULT UNVERIFIED sha=${staged.sha.slice(0, 12)} pr=${c.pr.number} readback=${seen.slice(0, 12)} (${what})`);
+  for (const line of notes) c.d.out(line);
+  return SYNC_EXIT.UNVERIFIED;
+}
+
+/**
+ * What shows an UNVERIFIED push landed: the head remote holding the commit
+ * when that remote is on the PR's host, otherwise only the PR reporting it.
+ */
+function landedWhen(c: Ctx, sha: string, onHost: boolean): string {
+  const s = sha.slice(0, 12);
+  return onHost ? `${c.headRemote} holds ${s}` : `the PR reports ${s} (${c.headRemote} is not on github.com, so its copy shows nothing about the PR)`;
+}
+
+/**
+ * Whether the head remote's fetch URL is on the PR's host. Only then does
+ * that remote holding a commit the PR does not report yet mean GitHub is
+ * lagging: a mirror, or a local path, holding it says nothing about the PR.
+ * False when the URL cannot be read.
+ */
+function headRemoteOnPrHost(c: Ctx): boolean {
+  const r = c.d.git(['remote', 'get-url', c.headRemote], { cwd: c.cwd });
+  const url = r.status === 0 ? r.stdout.trim() : '';
+  return !!url && c.d.onPrHost(url, c.cwd, c.d.sshHostName);
 }
 
 /** The head remote's PR branch now (a read-only fetch), or why it could not be read. */
