@@ -1002,6 +1002,42 @@ describe('push', () => {
     expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBe(s.sha);
   });
 
+  test('the 42 NOTE names the --accept-* flags its push was given; the push it names records the landed push, sending nothing', async () => {
+    // Upstream lands our own hunk (proof CHANGED), and the validation waived the full suite.
+    const t = topology('p29', { pr: ourFeature, main: d => { write(d, 'src/a.txt', 'a1\nOURS\na3\n'); write(d, 'src/b.txt', 'b9\n'); } });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(21);
+    const s = readStagedSync(stateDir(t), pr)!;
+    recordValidation(t, s.sha, 0, '3/3 selected files green; FULL waived (bunfig.toml): the full suite did not run');
+    const lagging = reportingHead(t, s.h0);
+    const sent = () => listReceipts(path.join(t.base, 'home')).filter(x => x.payload_class === 'pr-sync-push').length;
+    let pushed = false;
+    const unreachableAfterPush: GitRunner = (args, opts) => {
+      if (pushed && (args[0] === 'fetch' || args[0] === 'ls-remote')) return { status: 128, stdout: '', stderr: 'fatal: unable to access the remote: HTTP 503' };
+      const res = defaultGit(args, opts);
+      if (args[0] === 'push' && res.status === 0) pushed = true;
+      return res;
+    };
+    const r = await run(t, ['push', '--yes', '--accept-full-risk', '--accept-diff-change'], { gh: lagging, git: unreachableAfterPush, ...forkIsPrHost(t) });
+    expect(r.code, r.out.join('\n')).toBe(42);
+    expect(sent()).toBe(1);
+    // The bare `push --yes` is refused by the gates the record path re-runs.
+    const bare = await run(t, ['push', '--yes'], { gh: lagging, ...forkIsPrHost(t) });
+    expect(bare.code, bare.out.join('\n')).toBe(31);
+    expect(readStagedSync(stateDir(t), pr)?.sha).toBe(s.sha);
+    // The command the NOTE names, as written.
+    const named = /`gstack-pr-sync (push [^`]*)`/.exec(r.out.filter(l => l.startsWith('NOTE ')).join('\n'));
+    expect(named, r.out.join('\n')).not.toBeNull();
+    const argv = named![1].split(' ');
+    expect(argv).toEqual(expect.arrayContaining(['--yes', '--accept-full-risk', '--accept-diff-change']));
+    const again = await run(t, argv, { gh: lagging, ...forkIsPrHost(t) });
+    expect(again.code, again.out.join('\n')).toBe(0);
+    expect(again.out[0]).toStartWith('RESULT PUSHED');
+    expect(sent()).toBe(1);
+    expect(readStagedSync(stateDir(t), pr)).toBeNull();
+    expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBe(s.sha);
+  });
+
   test('a PR retargeted to another base after the sync was staged is refused (30)', async () => {
     const t = topology('p11', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
     queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
