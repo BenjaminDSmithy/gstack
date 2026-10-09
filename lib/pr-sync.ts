@@ -551,23 +551,33 @@ function defaultScratch(c: Ctx): string {
   return path.join(root, `${c.topic}-sync`);
 }
 
+/** `p` with the symlinks of its deepest existing ancestor resolved: one spelling for a path that may be gone. */
+function canonPath(p: string): string {
+  const abs = path.resolve(p);
+  try {
+    return fs.realpathSync(abs);
+  } catch {
+    const parent = path.dirname(abs);
+    return parent === abs ? abs : path.join(canonPath(parent), path.basename(abs));
+  }
+}
+
+/** `<common>/worktrees`, where git keeps one admin dir per linked worktree. */
+function adminRoot(c: Ctx): string | null {
+  const common = c.d.git(['rev-parse', '--git-common-dir'], { cwd: c.cwd });
+  return common.status === 0 ? path.join(canonPath(path.resolve(c.cwd, common.stdout.trim())), 'worktrees') : null;
+}
+
 /**
  * The worktree of this repository registered at `dir`: whether it is
  * detached, and its admin dir under `<common>/worktrees/`. Null when `dir`
  * is not a worktree of this repository (another repo, a plain directory).
  */
 function worktreeAt(c: Ctx, dir: string): { detached: boolean; admin: string } | null {
-  const real = (p: string) => {
-    try {
-      return fs.realpathSync(p);
-    } catch {
-      return path.resolve(p);
-    }
-  };
   const list = c.d.git(['worktree', 'list', '--porcelain'], { cwd: c.cwd });
   if (list.status !== 0) return null;
-  const want = real(dir);
-  const block = list.stdout.split('\n\n').map(b => b.split('\n')).find(b => b[0]?.startsWith('worktree ') && real(b[0].slice(9)) === want);
+  const want = canonPath(dir);
+  const block = list.stdout.split('\n\n').map(b => b.split('\n')).find(b => b[0]?.startsWith('worktree ') && canonPath(b[0].slice(9)) === want);
   if (!block) return null;
   let dotgit = '';
   try {
@@ -576,11 +586,36 @@ function worktreeAt(c: Ctx, dir: string): { detached: boolean; admin: string } |
     return null;
   }
   const m = /^gitdir: (.+)$/m.exec(dotgit);
-  const common = c.d.git(['rev-parse', '--git-common-dir'], { cwd: c.cwd });
-  if (!m || common.status !== 0) return null;
-  const admin = real(path.resolve(dir, m[1].trim()));
-  if (path.dirname(admin) !== path.join(real(path.resolve(c.cwd, common.stdout.trim())), 'worktrees')) return null;
+  const root = adminRoot(c);
+  if (!m || !root) return null;
+  const admin = canonPath(path.resolve(dir, m[1].trim()));
+  if (path.dirname(admin) !== root) return null;
   return { detached: block.includes('detached'), admin };
+}
+
+/**
+ * The admin dir of the registration whose gitdir names `<dir>/.git`, for a
+ * worktree whose directory is gone (so its `.git` file cannot be read).
+ * Null when no registration names it.
+ */
+function registrationFor(c: Ctx, dir: string): string | null {
+  const root = adminRoot(c);
+  if (!root) return null;
+  const want = canonPath(path.join(dir, '.git'));
+  let ids: string[] = [];
+  try {
+    ids = fs.readdirSync(root);
+  } catch {
+    return null;
+  }
+  for (const id of ids) {
+    const admin = path.join(root, id);
+    try {
+      // gitdir is absolute, or relative to the admin dir (worktree.useRelativePaths).
+      if (canonPath(path.resolve(admin, fs.readFileSync(path.join(admin, 'gitdir'), 'utf8').trim())) === want) return admin;
+    } catch { /* not a worktree admin dir */ }
+  }
+  return null;
 }
 
 function markScratch(c: Ctx, scratch: string, h0: string): void {
@@ -589,32 +624,48 @@ function markScratch(c: Ctx, scratch: string, h0: string): void {
   fs.writeFileSync(path.join(wt.admin, SCRATCH_MARKER), JSON.stringify({ tool: 'gstack-pr-sync', repo: c.repo, number: c.pr.number, headRef: c.pr.headRef, h0 }) + '\n');
 }
 
-/** A detached worktree of this repository carrying merge's marker for this PR. */
-function isOurScratch(c: Ctx, dir: string): boolean {
-  const wt = worktreeAt(c, dir);
-  if (!wt?.detached) return false;
+/** The admin dir carries merge's marker for this PR. */
+function carriesOurMarker(c: Ctx, admin: string): boolean {
   try {
-    const m = JSON.parse(fs.readFileSync(path.join(wt.admin, SCRATCH_MARKER), 'utf8')) as Record<string, unknown>;
+    const m = JSON.parse(fs.readFileSync(path.join(admin, SCRATCH_MARKER), 'utf8')) as Record<string, unknown>;
     return m.tool === 'gstack-pr-sync' && m.repo === c.repo && m.number === c.pr.number;
   } catch {
     return false;
   }
 }
 
+/** A detached worktree of this repository carrying merge's marker for this PR. */
+function isOurScratch(c: Ctx, dir: string): boolean {
+  const wt = worktreeAt(c, dir);
+  return !!wt?.detached && carriesOurMarker(c, wt.admin);
+}
+
 /**
  * Remove a scratch worktree, only through `git worktree remove` and only one
  * this tool made: `made` (this run created it) or isOurScratch. Anything
  * else at the path (another repository, the owner's own worktree, a plain
- * directory) is left as it is: 'foreign'. Never a recursive delete.
+ * directory) is left as it is: 'foreign'. Never a recursive delete, and
+ * never `git worktree prune`, which would also drop every other worktree of
+ * the repository whose directory is missing right now (a moved directory,
+ * an unmounted volume) and orphan a detached one's commits. A scratch whose
+ * directory is gone loses only its own registration, and only when that
+ * registration is detached and carries this PR's marker.
  */
 function removeScratch(c: Ctx, scratch: string, made = false): 'removed' | 'absent' | 'foreign' | 'failed' {
   if (!fs.existsSync(scratch)) {
-    c.d.git(['worktree', 'prune'], { cwd: c.cwd });
+    const admin = registrationFor(c, scratch);
+    let head = '';
+    try {
+      head = admin ? fs.readFileSync(path.join(admin, 'HEAD'), 'utf8') : '';
+    } catch { /* no HEAD: not a registration to touch */ }
+    if (admin && /^[0-9a-f]{40,64}\s*$/.test(head) && carriesOurMarker(c, admin)) {
+      c.d.git(['worktree', 'remove', '--force', scratch], { cwd: c.cwd });
+      if (fs.existsSync(admin)) c.d.err(`gstack-pr-sync: git worktree remove left the registration of ${scratch} in place; run \`git worktree remove --force ${scratch}\``);
+    }
     return 'absent';
   }
   if (!made && !isOurScratch(c, scratch)) return 'foreign';
   c.d.git(['worktree', 'remove', '--force', scratch], { cwd: c.cwd });
-  c.d.git(['worktree', 'prune'], { cwd: c.cwd });
   if (!fs.existsSync(scratch)) return 'removed';
   c.d.err(`gstack-pr-sync: git worktree remove left ${scratch} in place; remove it by hand`);
   return 'failed';
