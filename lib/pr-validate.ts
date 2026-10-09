@@ -898,10 +898,17 @@ function headerPath(header: string): string {
   return Buffer.concat(bytes).toString('utf8');
 }
 
-/** HEAD and the tracked worktree changes against it (`git diff HEAD`), per file and as one digest. */
+/**
+ * HEAD and the tracked worktree changes against it (`git diff HEAD`), per
+ * file and as one digest. The prefixes are explicit: a caller's
+ * diff.noprefix, diff.mnemonicPrefix, diff.srcPrefix or diff.dstPrefix
+ * would move the header off `a/<f> b/<f>`, headerPath would key the file
+ * by the whole header, and a precondition's own rebuilt output would read
+ * as a tree change.
+ */
 function treeState(c: Ctx): { head: string; diff: string; files: Map<string, string> } {
   const head = gitOk(c.d, c.tree, ['rev-parse', 'HEAD'], 'git rev-parse').trim();
-  const r = c.d.git(['diff', 'HEAD', '--no-color', '--binary', '--no-ext-diff'], { cwd: c.tree });
+  const r = c.d.git(['diff', 'HEAD', '--no-color', '--binary', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/'], { cwd: c.tree });
   if (r.status !== 0) throw new PrContextError(`git diff HEAD failed: ${(r.error ?? r.stderr).trim().split('\n').at(-1)}`, 1);
   const files = new Map<string, string>();
   for (const part of r.stdout.split(/^(?=diff --git )/m).filter(p => p.startsWith('diff --git '))) {
