@@ -20,6 +20,7 @@ const section = (id: string) => fs.readFileSync(path.join(ROOT, 'pr-prep', 'sect
 const MODES = ['open', 'sync', 'body', 'watch', 'ci', 'liveness'];
 /** Paragraphs and list items (a bullet with its wrapped lines) of a section. */
 const blocks = (text: string) => text.split(/\n\s*\n|\n(?=- )/);
+const bashFences = (text: string) => [...text.matchAll(/^```bash\n([\s\S]*?)\n```$/gm)].map(m => m[1]);
 // The section whose AskUserQuestion gates each write, and that write's registered question id.
 const WRITE_QIDS: Record<string, string> = {
   sync: 'pr-prep-sync-push', body: 'pr-prep-body-publish', ci: 'pr-prep-ci-retrigger-push', open: 'pr-prep-open-pr',
@@ -76,6 +77,7 @@ describe('write safety', () => {
     expectMentions(safety, [
       ['AskUserQuestion', 'same turn'],
       // D2: one yes, one write; never a standing grant.
+      ['--yes', 'only after', 'yes'],
       ['yes', 'one write', 'never'],
       ['Auto-fix', 'never', 'consent'],
       ['force-push', 'no-verify', 'gh pr ready'],
@@ -119,7 +121,8 @@ describe('mode sections', () => {
     const open = section('open');
     expectTokens(open, ['git ls-remote', 'PR_PREP_OPEN_HEAD'], 'open section');
     expectOrdered(open, ['PR_PREP_OPEN_HEAD', 'gh pr create --draft'], 'open section');
-    expectMentions(open, [['owner', 'push', 'never']], 'open section');
+    // The block only prints MISMATCH; this sentence is what stops the create.
+    expectMentions(open, [['owner', 'push', 'never'], ['MISMATCH', 'do not open']], 'open section');
   });
 
   test('the screenshot and ready-for-review stay with the owner', () => {
@@ -183,8 +186,29 @@ describe('mode sections', () => {
     // is unacknowledged: a sync that stops on every exit 11 can never run.
     const sync = section('sync');
     expectTokens(sync, ['mergeable-dirty', 'mergeable-behind'], 'sync section');
-    expectOrdered(sync, ['gstack-pr-watch poll', 'gstack-pr-watch ack', 'gstack-pr-sync push'], 'sync section');
-    expectMentions(sync, [['owner', 'yes', 'ack']], 'sync section');
+    expectOrdered(sync, ['gstack-pr-watch poll', '<gstack-qid:pr-prep-sync-push>', 'gstack-pr-watch ack', 'gstack-pr-sync push'], 'sync section');
+    // The ack records that the owner read the signal, so it follows their yes
+    // (an earlier ['owner', 'yes', 'ack'] check was met by the push line alone:
+    // "upstream owner/name ... --yes", "gstack").
+    expectMentions(between(sync, '### 4.', 'gstack-pr-watch ack'), [["owner's yes", 'only then', 'ack']], 'sync step 4');
+  });
+
+  test("sync's push line carries --yes alone, and its question names every thing that yes accepts", () => {
+    // A push line with --accept-diff-change or --accept-full-risk on it sends a
+    // CHANGED diff or a waived suite on any yes; the question is where the
+    // owner sees both, and the mergeable-* signal the push will clear.
+    const sync = section('sync');
+    const push = bashFences(sync).filter(f => f.includes('gstack-pr-sync push'));
+    expect(push.length).toBe(1);
+    expectTokens(push[0], ['--yes'], 'sync push line');
+    expectAbsent(push[0], ['--accept-diff-change', '--accept-full-risk'], 'sync push line');
+    expectMentions(between(sync, '### 4.', '```'), [['pr-prep-sync-push', 'proof', 'CHANGED', 'FULL waived', 'mergeable']], 'sync step 4 question');
+  });
+
+  test("sync stops on a maintainer's P1 at Step 1; only its own conflict signal goes on", () => {
+    // The push's gate refuses an unacked P1 anyway, but merge and validate run
+    // first, and the owner never hears a maintainer spoke.
+    expectMentions(between(section('sync'), '### 1.', '### 2.'), [['11', 'maintainer', 'STOP']], 'sync Step 1');
   });
 });
 
