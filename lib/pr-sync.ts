@@ -74,8 +74,9 @@ exact commit.
            --message); the tree is unchanged, so no new validation.
            Refused (30) unless the draft is in this PR's state dir,
            unedited, and bound to the head the remote holds and the
-           newest Windows run on it: re-run triage. A landed push or
-           sync push removes every ci: draft
+           newest Windows run on it, still a finished failure (not
+           re-run since): re-run triage. A landed push or sync push
+           removes every ci: draft
 
 Options:
   --pr N|URL              the upstream PR (required)
@@ -1270,8 +1271,7 @@ function cmdRetrigger(c: Ctx): number {
   if (binding.head !== h0 || (binding.tree !== null && binding.tree !== tree)) {
     throw new PrContextError(`the draft for run ${binding.run} was triaged on head ${binding.head.slice(0, 12)}, but the PR head is ${h0.slice(0, 12)}: re-run gstack-pr-ci-triage on the current head`, SYNC_EXIT.PRECONDITION);
   }
-  const newer = newerWindowsRuns(c, h0, binding.run);
-  if (newer.length) throw new PrContextError(`run ${binding.run} is no longer the newest Windows Free Tests run on ${h0.slice(0, 12)} (${newer.join(', ')}): re-run gstack-pr-ci-triage`, SYNC_EXIT.PRECONDITION);
+  assertBoundRunCurrent(c, h0, binding.run);
   const gateAt = d.now().getTime();
   const gate = d.preWriteGate({ gh: d.gh, git: d.git, env: d.env, cwd: c.cwd, repo: c.repo, number: c.pr.number, expectHead: h0, state: st0 });
   if (!gate.ok) throw new PrContextError(`pre-write gate: ${gate.reason}`, SYNC_EXIT.PRECONDITION);
@@ -1293,9 +1293,19 @@ function cmdRetrigger(c: Ctx): number {
   });
 }
 
-/** Windows Free Tests runs on `head` newer than `run` (read-only gh run list); a failed read refuses (1). */
-function newerWindowsRuns(c: Ctx, head: string, run: number): string[] {
-  const r = c.d.gh(['run', 'list', '-R', c.repo, '--workflow', 'windows-free-tests.yml', '--commit', head, '--limit', '20', '--json', 'databaseId']);
+/** A GitHub enum value (status, conclusion) as printable text; anything else prints as '?'. */
+const enumWord = (v: unknown): string => (typeof v === 'string' && /^[a-z_]{1,32}$/.test(v) ? v : '?');
+
+/**
+ * The run the draft was triaged on must still be the newest Windows Free
+ * Tests run on `head` (read-only gh run list) and still a finished failure.
+ * A maintainer's "Re-run failed jobs" keeps the run id: in progress, the ci:
+ * push would cancel it (the workflow's concurrency group cancels in
+ * progress), and green, the push is pointless. Either refuses 30, as does a
+ * bound run the list no longer shows; a failed read refuses 1.
+ */
+function assertBoundRunCurrent(c: Ctx, head: string, run: number): void {
+  const r = c.d.gh(['run', 'list', '-R', c.repo, '--workflow', 'windows-free-tests.yml', '--commit', head, '--limit', '20', '--json', 'databaseId,status,conclusion']);
   let runs: unknown = null;
   try {
     runs = r.status === 0 ? JSON.parse(r.stdout) : null;
@@ -1303,7 +1313,14 @@ function newerWindowsRuns(c: Ctx, head: string, run: number): string[] {
     runs = null;
   }
   if (!Array.isArray(runs)) throw new PrContextError(`gh run list on ${head.slice(0, 12)} failed, so run ${run} cannot be shown to be the newest: nothing was sent`, SYNC_EXIT.ERROR);
-  return runs.map(x => (x as { databaseId?: unknown }).databaseId).filter((id): id is number => typeof id === 'number' && id > run).map(String);
+  const listed = runs as { databaseId?: unknown; status?: unknown; conclusion?: unknown }[];
+  const newer = listed.map(x => x?.databaseId).filter((id): id is number => typeof id === 'number' && id > run).map(String);
+  if (newer.length) throw new PrContextError(`run ${run} is no longer the newest Windows Free Tests run on ${head.slice(0, 12)} (${newer.join(', ')}): re-run gstack-pr-ci-triage`, SYNC_EXIT.PRECONDITION);
+  const bound = listed.find(x => x?.databaseId === run);
+  if (!bound) throw new PrContextError(`run ${run} is not listed among the Windows Free Tests runs on ${head.slice(0, 12)}: re-run gstack-pr-ci-triage`, SYNC_EXIT.PRECONDITION);
+  if (bound.status !== 'completed' || bound.conclusion !== 'failure') {
+    throw new PrContextError(`run ${run} is now ${enumWord(bound.status)}/${enumWord(bound.conclusion)}, not the finished failure triage saw (re-run since?): the ci: push would cancel or repeat it; re-run gstack-pr-ci-triage`, SYNC_EXIT.PRECONDITION);
+  }
 }
 
 /**
