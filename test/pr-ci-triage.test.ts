@@ -726,8 +726,11 @@ describe('scratch cleanup', () => {
     const env = { ...process.env, PATH: `${fakebin}:${process.env.PATH}`, TMPDIR: `${tmp}/`, GSTACK_STATE_ROOT: path.join(ROOT, 'sig-state') };
     const child = spawn(process.execPath, [BIN, 'run', '--pr', '3', '--repo', 'acme/gt', '--cwd', repoDir], { env, stdio: 'ignore' });
     const exited = new Promise<number | null>(resolve => child.on('exit', code => resolve(code)));
-    const guard = setTimeout(() => child.kill('SIGKILL'), 60_000);
-    for (let i = 0; i < 600 && !fs.existsSync(started); i++) await Bun.sleep(100);
+    // Under the 120 s test timeout with room to spare: up to 45 s for the
+    // download to start, then until 90 s from spawn for the SIGTERM exit,
+    // so a slow machine ends in this test's own assertion, never a bun timeout.
+    const guard = setTimeout(() => child.kill('SIGKILL'), 90_000);
+    for (let i = 0; i < 450 && !fs.existsSync(started); i++) await Bun.sleep(100);
     expect(fs.existsSync(started)).toBe(true);
     expect(leftovers(tmp)).toHaveLength(1);
     child.kill('SIGTERM');
