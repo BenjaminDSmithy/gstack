@@ -330,16 +330,43 @@ function reportedBuckets(file: string | undefined): unknown[] {
   }
 }
 
+/** Does a report name EXACT_DUP: its `worst`, a commit row or an audited row? */
+function holdsExactDup(r: PriorReport): boolean {
+  const rows: unknown[] = [...(Array.isArray(r.commits) ? r.commits : []), ...(Array.isArray(r.audited) ? r.audited : [])];
+  return [r.worst, ...rows.map(x => (x && typeof x === 'object' ? (x as { bucket?: unknown }).bucket : null))].some(b => normBucket(b) === 'EXACT_DUP');
+}
+
+/**
+ * Does the prior a refused stamp read hold an EXACT_DUP the refused report
+ * must keep? Read leniently: never throws. A known EXACT_DUP whose
+ * re-check search failed stays until a full search returns a verdict
+ * (stampReport's keepsDup), and /ship reads only --out, so a refusal for
+ * an unrelated row must not drop it. With a valid --repo it counts when
+ * the prior carries to that repo (priorForRepo); without one nothing can
+ * be checked, so any EXACT_DUP the prior holds stands.
+ */
+function priorHoldsDup(file: string | null, repo: string | undefined): boolean {
+  try {
+    const p: unknown = file && fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : null;
+    if (!p || typeof p !== 'object' || Array.isArray(p)) return false;
+    const prior = repo && REPO_RE.test(repo) ? priorForRepo(p as PriorReport, repo) : (p as PriorReport);
+    return prior !== null && holdsExactDup(prior);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * A refused stamp still writes --out: /ship removes the old report before
  * the audit, so writing nothing read as "no report", UNVERIFIED, and an
  * EXACT_DUP the agent did report stopped blocking. The refused report
  * never ranks below UNVERIFIED and keeps any EXACT_DUP a row or the
- * agent's own `worst` names. The persistent copy, the next list's prior,
- * is left alone. Returns the worst written, or null when the write failed.
+ * agent's own `worst` names, or the prior holds (priorHoldsDup). The
+ * persistent copy, the next list's prior, is left alone. Returns the worst
+ * written, or null when the write failed.
  */
-function writeRefused(out: string, why: string, report: string | undefined, now: Date): Bucket | null {
-  const worst = worstOf(['UNVERIFIED', ...reportedBuckets(report)]);
+function writeRefused(out: string, why: string, report: string | undefined, now: Date, priorDup: boolean): Bucket | null {
+  const worst = worstOf(['UNVERIFIED', ...reportedBuckets(report), ...(priorDup ? ['EXACT_DUP'] : [])]);
   try {
     writeAtomic(out, JSON.stringify({ summary: `stamp refused: ${why}`, worst, refused: true, commits: [], generated_at: now.toISOString() }) + '\n');
     return worst;
@@ -383,8 +410,9 @@ export const COMMITS_USAGE = `gstack-pr-prep-commits <list|stamp|self|paths> [op
           --persist (the next list's prior), atomically; a failed
           --persist is a WARN line, never a failed stamp. A refused or
           failed stamp still writes --out as a refused report whose
-          worst is UNVERIFIED, or EXACT_DUP when a row or the report's
-          own worst says so, and never --persist
+          worst is UNVERIFIED, or EXACT_DUP when a row, the report's own
+          worst or the prior says so (a prior that carries to --repo,
+          or any prior when --repo is missing), and never --persist
   self    drop this branch's own open PR from a candidate list on stdin
   paths   print the default persistent report path for this branch
 
@@ -406,6 +434,14 @@ export async function commitsMain(argv: string[], deps: { git?: GitRunner; out?:
   const env = deps.env ?? process.env;
   const sub = argv[0] ?? '';
   const flags: Record<string, string> = {};
+  const cwdOf = () => path.resolve(flags.cwd ?? process.cwd());
+  const persistDefault = () => {
+    const cwd = cwdOf();
+    const branch = git(g, cwd, ['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+    return path.join(prStateDir({ cwd, topic: topicFor(branch), env }), 'audit.json');
+  };
+  /** The prior list and stamp read: --prior, else the persistent copy when it exists. */
+  const priorFile = () => flags.prior ?? (fs.existsSync(persistDefault()) ? persistDefault() : null);
   try {
     if (!sub || argv.includes('--help')) {
       out(COMMITS_USAGE);
@@ -416,11 +452,7 @@ export async function commitsMain(argv: string[], deps: { git?: GitRunner; out?:
       if (!k.startsWith('--') || argv[i + 1] === undefined) throw new PrContextError(`bad argument ${k}`, 2);
       flags[k.slice(2)] = argv[++i];
     }
-    const cwd = path.resolve(flags.cwd ?? process.cwd());
-    const persistDefault = () => {
-      const branch = git(g, cwd, ['rev-parse', '--abbrev-ref', 'HEAD']).trim();
-      return path.join(prStateDir({ cwd, topic: topicFor(branch), env }), 'audit.json');
-    };
+    const cwd = cwdOf();
     if (sub === 'paths') {
       out(persistDefault());
       return 0;
@@ -441,7 +473,7 @@ export async function commitsMain(argv: string[], deps: { git?: GitRunner; out?:
     if (!flags.base) throw new PrContextError('--base is required', 2);
     // list and stamp must agree on the prior, so both need the repo.
     if (!flags.repo || !REPO_RE.test(flags.repo)) throw new PrContextError('--repo <owner/name> (the upstream repo the audit searches) is required', 2);
-    const prior = priorForRepo(readJson<PriorReport>(flags.prior ?? (fs.existsSync(persistDefault()) ? persistDefault() : null)), flags.repo);
+    const prior = priorForRepo(readJson<PriorReport>(priorFile()), flags.repo);
     const list = listAuditCommits(g, cwd, flags.base, prior);
     if (sub === 'list') {
       // The prior's hits hold upstream-authored titles; the model needs only
@@ -481,7 +513,13 @@ export async function commitsMain(argv: string[], deps: { git?: GitRunner; out?:
     // `&& mv` silently left the own PR in place to score against itself.
     (sub === 'self' || sub === 'paths' ? err : out)(`RESULT ${code === 2 ? 'USAGE' : 'ERROR'} ${(error as Error).message}`);
     if (sub === 'stamp' && flags.out) {
-      const worst = writeRefused(flags.out, (error as Error).message, flags.report, (deps.now ?? (() => new Date()))());
+      let file: string | null = null;
+      try {
+        file = priorFile();
+      } catch {
+        // no branch to name the persistent copy (a git failure): no prior was read
+      }
+      const worst = writeRefused(flags.out, (error as Error).message, flags.report, (deps.now ?? (() => new Date()))(), priorHoldsDup(file, flags.repo));
       out(worst ? `PR_PREP_REPORT: ${flags.out} (${worst}, refused)` : `PR_PREP_REPORT: ${flags.out} not written`);
     }
     return code;
