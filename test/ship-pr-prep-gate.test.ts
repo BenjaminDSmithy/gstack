@@ -287,9 +287,11 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     // mise 2026's words for a shim with no version selected.
     if (g.crashes) fs.writeFileSync(path.join(dir, 'gh'), '#!/bin/sh\necho "mise ERROR No version is set for shim: gh" >&2\nexit 1\n', { mode: 0o755 });
     // GH_CONFIG_DIR (run() points it here); the layout gh 2.102 writes: one top-level key per host.
-    // The same dir is XDG_CONFIG_HOME/gh under xdg and ~/.config/gh under home.
+    // The same dir is XDG_CONFIG_HOME/gh under xdg and ~/.config/gh under home;
+    // xdg-empty is an XDG_CONFIG_HOME with no gh dir in it.
     fs.mkdirSync(path.join(dir, 'cfg'));
     fs.mkdirSync(path.join(dir, 'xdg'));
+    fs.mkdirSync(path.join(dir, 'xdg-empty'));
     fs.symlinkSync('../cfg', path.join(dir, 'xdg', 'gh'));
     fs.mkdirSync(path.join(dir, 'home', '.config'), { recursive: true });
     fs.symlinkSync('../../cfg', path.join(dir, 'home', '.config', 'gh'));
@@ -370,6 +372,8 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     { name: 'a gh that does not run and has no hosts.yml leaves a GitLab origin none', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, gh: { crashes: true }, want: 'UPSTREAM_PR: none', note: [noteFor('gitlab.example.com')], code: 0 },
     { name: 'a gh that does not run still stops an Enterprise origin its hosts.yml names', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, gh: { crashes: true, hostsYml: ['github.com', 'ghe.acme.test'] }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', note: [noteFor('ghe.acme.test')], code: 1 },
     { name: 'a gh that does not run reads hosts.yml under XDG_CONFIG_HOME when GH_CONFIG_DIR is empty', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, env: { GH_CONFIG_DIR: '', XDG_CONFIG_HOME: '{stub}/xdg' }, gh: { crashes: true, hostsYml: ['github.com', 'ghe.acme.test'] }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', note: [noteFor('ghe.acme.test')], code: 1 },
+    // gh 2.102 reads GH_CONFIG_DIR before XDG_CONFIG_HOME when both are set (measured with `gh config get`).
+    { name: 'a gh that does not run reads hosts.yml under GH_CONFIG_DIR, not XDG_CONFIG_HOME, when both are set', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, env: { XDG_CONFIG_HOME: '{stub}/xdg-empty' }, gh: { crashes: true, hostsYml: ['github.com', 'ghe.acme.test'] }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', note: [noteFor('ghe.acme.test')], code: 1 },
     // The path everyone without either variable has; run() sets GH_CONFIG_DIR for every other row.
     { name: 'a gh that does not run reads hosts.yml under ~/.config/gh when neither GH_CONFIG_DIR nor XDG_CONFIG_HOME is set', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, env: { GH_CONFIG_DIR: '', XDG_CONFIG_HOME: '', HOME: '{stub}/home' }, gh: { crashes: true, hostsYml: ['github.com', 'ghe.acme.test'] }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', note: [noteFor('ghe.acme.test')], code: 1 },
     { name: 'a gh that does not run still stops an Enterprise origin GH_HOST names', remotes: { origin: 'git@work-ghe:me/proj.git' }, env: { GH_HOST: 'GHE.Acme.test' }, gh: { crashes: true, hostsYml: ['github.com'] }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', note: [noteFor('ghe.acme.test')], code: 1 },
