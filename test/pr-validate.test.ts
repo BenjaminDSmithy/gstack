@@ -120,6 +120,40 @@ describe('selectTests', () => {
     expect(rules(['lib/foobar.ts'])['test/a.test.ts']).toBeUndefined();
   });
 
+  test('a test that reaches a changed module through the modules it imports selects it: an index, a helper, a cycle', () => {
+    const local: Record<string, string> = {
+      'test/r.test.ts': "import { pick } from '../lib/ci';\nimport { h } from './helpers/h';",
+      'lib/ci/index.ts': "export { pick } from './picker';\nexport * from './cycle-a';",
+      'lib/ci/picker.ts': "import { util } from '../util.js';\nexport const pick = 1;",
+      'lib/ci/cycle-a.ts': "import './cycle-b';",
+      'lib/ci/cycle-b.ts': "import './cycle-a';\nimport '../deep';",
+      'lib/deep.ts': 'export {};',
+      'lib/util.ts': 'export const util = 1;',
+      'test/helpers/h.ts': "import { x } from '../../lib/helped';\nimport '../other.test';",
+      'lib/helped.ts': 'export const x = 1;',
+      'test/other.test.ts': "import '../lib/only-via-test';",
+      'lib/only-via-test.ts': 'export {};',
+    };
+    const pick = (changed: string[]) => selectTests({
+      changed, universe: [...universe, 'test/r.test.ts', 'test/other.test.ts'], declared: [], pkgVersionOnly: true, source: f => local[f] ?? src[f] ?? '',
+    });
+    const rules = (changed: string[]) => Object.fromEntries(pick(changed).files.map(f => [f.file, f.rules]));
+    expect(rules(['lib/ci/picker.ts'])['test/r.test.ts']).toEqual(['reaches:lib/ci/picker.ts']);
+    // Two hops, a `.js` specifier naming the .ts; through an import cycle; through a test helper.
+    expect(rules(['lib/util.ts'])['test/r.test.ts']).toEqual(['reaches:lib/util.ts']);
+    expect(rules(['lib/deep.ts'])['test/r.test.ts']).toEqual(['reaches:lib/deep.ts']);
+    expect(rules(['lib/helped.ts'])['test/r.test.ts']).toEqual(['reaches:lib/helped.ts']);
+    // A direct import is reported as one, not again as reached.
+    expect(rules(['lib/ci/index.ts'])['test/r.test.ts']).toEqual(['imports:lib/ci/index.ts']);
+    // Another test file is not a module of this one.
+    const viaTest = rules(['lib/only-via-test.ts']);
+    expect(viaTest['test/r.test.ts']).toBeUndefined();
+    expect(viaTest['test/other.test.ts']).toEqual(['imports:lib/only-via-test.ts']);
+    // A reached module is covered by the reaching test's pass.
+    expect(uncoveredCode(['lib/ci/picker.ts'], pick(['lib/ci/picker.ts']), f => f === 'test/r.test.ts')).toEqual([]);
+    expect(uncoveredCode(['lib/ci/picker.ts'], pick(['lib/ci/picker.ts']), () => false)).toEqual(['lib/ci/picker.ts']);
+  });
+
   test('a test that names several changed paths records each; path.join segments name a path too', () => {
     const local = {
       'test/c.test.ts': "spawnSync('bun', ['run', path.join(ROOT, 'scripts', 'eval-list.ts')]);\nrun(path.join(ROOT, 'bin', 'gstack-thing'));\nconst cfg = 'docs/notes.txt';",
@@ -407,6 +441,23 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(await f.call(['run'])).toBe(1);
     expect(f.out.find(l => l.startsWith('test/x.test.ts'))).toMatch(/RED: .*\[imports:lib\/y\.ts\]$/);
     expect(readStateFor(f.dir, pr)!.validation).toMatchObject({ worst: 1 });
+  });
+
+  test('a module reached only through another module runs the test that imports that one: green when it passes, red when it fails', async () => {
+    // test/x.test.ts imports lib/y.ts, which re-exports lib/inner.ts; the PR changes lib/inner.ts alone.
+    const base = { 'lib/inner.ts': 'export const inner = 1;\n', 'lib/y.ts': "export { inner as y } from './inner';\n" };
+    const green = fixture('reach-green', null, { base, pr: { 'lib/inner.ts': '// renamed nothing\nexport const inner = 1;\n' } });
+    expect(await green.call(['select'])).toBe(0);
+    expect(green.out).toContain('SELECT\ttest/x.test.ts\treaches:lib/inner.ts');
+    green.out.length = 0;
+    expect(await green.call(['run'])).toBe(0);
+    expect(green.out.some(l => l.startsWith('NO_TESTS'))).toBe(false);
+    expect(readStateFor(green.dir, pr)!.validation).toMatchObject({ worst: 0, summary: '1/1 selected files green' });
+
+    const red = fixture('reach-red', null, { base, pr: { 'lib/inner.ts': 'export const inner = 2;\n' } });
+    expect(await red.call(['run'])).toBe(1);
+    expect(red.out.find(l => l.startsWith('test/x.test.ts'))).toMatch(/RED: .*\[reaches:lib\/inner\.ts\]$/);
+    expect(readStateFor(red.dir, pr)!.validation).toMatchObject({ worst: 1 });
   });
 
   test('changed code that no selected test verified is red, never GREEN 0/0; a docs-only change stays green', async () => {
