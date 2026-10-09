@@ -1131,11 +1131,13 @@ stage 4's recovery before publication. Otherwise continue to Step 17.
 **Upstream PR check — before anything is pushed.** A PR on a repo that
 `origin` is not (a fork PR to someone else's project) is the owner's to write to.
 The check reads the upstream from origin's URL (its GitHub fork parent, plus every
-other GitHub remote), never from gh's default repo. A GitHub Enterprise host
-counts when gh has a login there, even one that cannot answer now (that stops
-below; a gh before 2.81 lacks `auth status --json`, so only its own words for a
-missing login rule a host out); its repos print as `<host>/<owner>/<name>`,
-which /pr-prep's watch poll refuses (exit 2), so the owner handles that PR by hand:
+other remote on origin's GitHub host; a PR's head lives on its base's host, so a
+PR on another host cannot come from origin's branch), never from gh's default
+repo. A GitHub Enterprise host counts when gh has a login there, even one that
+cannot answer now (that stops below; a gh before 2.81 lacks `auth status --json`,
+so only its own words for a missing login rule a host out); its repos print as
+`<host>/<owner>/<name>`, which /pr-prep's watch poll refuses (exit 2), so the
+owner handles that PR by hand:
 
 ```bash
 _ghrepo() {
@@ -1162,7 +1164,7 @@ _ask() {
   echo "UPSTREAM_PR: lookup failed ${_R:+remote }${_R:-fork parent} ($_C) - STOP"; exit 1
 }
 _R=""; _C=$_NEW; [ -z "$_C" ] || _ask
-for _R in $(git remote); do [ "$_R" = origin ] || { _C=$(_u=$(git remote get-url "$_R" 2>/dev/null); _ghrepo) && _ask; }; done
+for _R in $(git remote); do [ "$_R" = origin ] || { _C=$(_u=$(git remote get-url "$_R" 2>/dev/null); _ghrepo) && case "$_C" in (*/*/*) [ "${_C%%/*}/" = "$_P" ] ;; (*) [ -z "$_P" ] ;; esac && _ask; }; done
 if [ -n "$_OPEN" ]; then echo "UPSTREAM_PR: open ${_OPEN% }"; elif [ -n "$_NEW" ]; then echo "UPSTREAM_PR: new $_NEW"; else echo "UPSTREAM_PR: none"; fi
 ```
 
