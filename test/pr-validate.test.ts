@@ -1482,8 +1482,8 @@ describe('run, select and declare against a fixture PR tree', () => {
       } finally {
         if (shape === 'promisor remote gone') fs.renameSync(`${up}.gone`, up);
       }
-      // The selection reads the caller's repo, which follows the replace ref and sees no change: only the scan is pinned there.
-      if (shape !== 'replace ref on the merge base') expect(rec.calls.some(c => c.line.startsWith('bun test test/x.test.ts ')), shape).toBe(true);
+      // The selection ignores a replace ref too: the PR's change runs its test.
+      expect(rec.calls.some(c => c.line.startsWith('bun test test/x.test.ts ')), shape).toBe(true);
       expect(rc, shape).toBe(1);
       expect(f.out[0], shape).toStartWith('RESULT RED');
       if (shape === 'promisor remote gone') {
@@ -1496,6 +1496,40 @@ describe('run, select and declare against a fixture PR tree', () => {
         expect(held(), shape).toBe(true);
       }
     }
+  });
+
+  test('a caller\'s replace ref never changes what validate reads: CI\'s checkout has none', async () => {
+    // On the merge base, a stand-in carrying the PR's tree hides every change from git's default view.
+    const onBase = fixture('replace-merge-base', null);
+    const b1 = git(onBase.tree, 'rev-parse', 'main');
+    git(onBase.tree, 'replace', b1, git(onBase.tree, 'commit-tree', 'HEAD^{tree}', '-m', 'stand-in'));
+    expect(git(onBase.tree, 'diff', '--name-only', b1, 'HEAD')).toBe('');
+    expect(await onBase.call(['select'])).toBe(0);
+    expect(onBase.out.filter(l => l.startsWith('SELECT'))).toEqual(['SELECT\ttest/x.test.ts\timports:lib/y.ts']);
+    onBase.out.length = 0;
+    // test/x.test.ts still expects y = 1: the PR breaks it, and the run says so instead of GREEN 0/0.
+    expect(await onBase.call(['run'])).toBe(1);
+    expect(onBase.out[0]).toStartWith('RESULT RED');
+    expect(onBase.out.find(l => l.startsWith('test/x.test.ts '))).toMatch(/^test\/x\.test\.ts rc=1 .* RED: /);
+    expect(readStateFor(onBase.dir, pr)!.validation).toMatchObject({ worst: 1 });
+
+    // On the PR's head, with the staged tree checked out under it: git status reads it clean, yet it
+    // holds the base's lib/y.ts, not what the commit the verdict would name holds.
+    let tree = '';
+    const rec = recorder(() => tree);
+    const onHead = fixture('replace-head', null, { deps: { tool: rec.tool } });
+    const p = git(onHead.tree, 'rev-parse', 'HEAD');
+    git(onHead.tree, 'replace', p, git(onHead.tree, 'commit-tree', 'main^{tree}', '-p', 'main', '-m', 'stand-in'));
+    tree = path.join(path.dirname(onHead.tree), 'scratch');
+    git(onHead.tree, 'worktree', 'add', '-q', '--detach', tree, p);
+    expect(fs.readFileSync(path.join(tree, 'lib/y.ts'), 'utf8')).toBe('export const y = 1;\n');
+    expect(git(tree, 'status', '--porcelain')).toBe('');
+    fs.mkdirSync(onHead.dir, { recursive: true });
+    fs.writeFileSync(path.join(onHead.dir, 'sync.json'), JSON.stringify({ repo: 'acme/fx', number: 5, scratch: tree, base: git(onHead.tree, 'rev-parse', 'main'), h0: p }));
+    expect(await onHead.call(['run'])).toBe(30);
+    expect(onHead.out[0]).toMatch(/^RESULT PRECONDITION .* has uncommitted changes \(lib\/y\.ts\) against HEAD as CI's checkout holds it, read without this repo's 1 replace ref\(s\) \(git replace -l\); /);
+    expect(rec.calls.some(c => c.line.startsWith('bun test'))).toBe(false);
+    expect(readStateFor(onHead.dir, pr)?.validation ?? null).toBeNull();
   });
 
   test('gen:skill-docs output that is not committed is red', async () => {
