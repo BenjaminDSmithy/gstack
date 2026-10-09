@@ -874,6 +874,24 @@ function cmdDeclare(c: Ctx): number {
  */
 const REBUILT_RE = /^lib\/diagram-render\/dist\//;
 
+const C_ESCAPES: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13 };
+
+/**
+ * The a/ path of a `diff --git` header line, as named on disk. git
+ * C-quotes a path holding a control byte, a quote, a backslash or, under
+ * the default core.quotePath, a non-ASCII byte ("a/lib/caf\303\251.ts").
+ */
+function headerPath(header: string): string {
+  const quoted = /^diff --git "a\/((?:[^"\\]|\\.)*)"/.exec(header);
+  if (!quoted) return /^diff --git a\/(.+?) b\//.exec(header)?.[1] ?? header;
+  const bytes = quoted[1].split(/(\\(?:[0-3][0-7]{2}|.))/).map(part => {
+    if (!part.startsWith('\\')) return Buffer.from(part, 'utf8');
+    const e = part.slice(1);
+    return Buffer.from([/^[0-7]{3}$/.test(e) ? parseInt(e, 8) : C_ESCAPES[e] ?? e.charCodeAt(0)]);
+  });
+  return Buffer.concat(bytes).toString('utf8');
+}
+
 /** HEAD and the tracked worktree changes against it (`git diff HEAD`), per file and as one digest. */
 function treeState(c: Ctx): { head: string; diff: string; files: Map<string, string> } {
   const head = gitOk(c.d, c.tree, ['rev-parse', 'HEAD'], 'git rev-parse').trim();
@@ -881,8 +899,7 @@ function treeState(c: Ctx): { head: string; diff: string; files: Map<string, str
   if (r.status !== 0) throw new PrContextError(`git diff HEAD failed: ${(r.error ?? r.stderr).trim().split('\n').at(-1)}`, 1);
   const files = new Map<string, string>();
   for (const part of r.stdout.split(/^(?=diff --git )/m).filter(p => p.startsWith('diff --git '))) {
-    const name = /^diff --git a\/(.+?) b\//.exec(part)?.[1] ?? part.split('\n')[0];
-    files.set(name, createHash('sha256').update(part).digest('hex'));
+    files.set(headerPath(part.split('\n')[0]), createHash('sha256').update(part).digest('hex'));
   }
   return { head, diff: createHash('sha256').update(r.stdout).digest('hex'), files };
 }
