@@ -236,7 +236,7 @@ describe('/pr-prep identifiers take what its helpers print, and nothing else', (
     const rendered = path.join(dir, 'pr-body-2026-10-09.md');
     takes('<rendered file>', [rendered]);
     refuses('<rendered file>', ['pr-body-2026-10-09.md', path.join(dir, 'body.tmpl.md'), rendered.replace('state root', "it's"), rendered.replace('state root', '$(id)'), '/etc/passwd']);
-    const draft = writeRetriggerDraft(dir, { repo: 'garrytan/gstack', pr: 3066, run: 18213456789, head: 'a'.repeat(40), tree: null, message: 'ci: re-run\n', shards: [] });
+    const draft = writeRetriggerDraft(dir, { repo: 'garrytan/gstack', pr: 3066, run: 18213456789, attempt: 1, head: 'a'.repeat(40), tree: null, message: 'ci: re-run\n', shards: [] });
     takes('<drafted message file>', [draft.message]);
     refuses('<drafted message file>', [draft.binding, draft.message.replace('state root', 'a`id`b'), path.join(tmp, 'ci-retrigger-1.txt')]);
   });
