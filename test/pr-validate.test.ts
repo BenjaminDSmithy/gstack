@@ -1403,6 +1403,44 @@ describe('run, select and declare against a fixture PR tree', () => {
     }
   });
 
+  /** Stands in for gate-secret-scan.mjs: red on an added line holding the secret; keeps what it read. */
+  function secretScanner(rec: { tool: ToolRunner }) {
+    const scanned: string[] = [];
+    const tool: ToolRunner = (cmd, args, o) => {
+      if (args[0]?.endsWith('/.github/scripts/gate-secret-scan.mjs')) {
+        scanned.push(o.input ?? '');
+        return { status: /^\+.*ZZSECRET/m.test(o.input ?? '') ? 1 : 0, stdout: '', stderr: '' };
+      }
+      return rec.tool(cmd, args, o);
+    };
+    return { scanned, tool };
+  }
+  const SCAN_FX = {
+    base: { '.github/scripts/gate-secret-scan.mjs': 'process.exit(0);\n' },
+    pr: { 'lib/y.ts': 'export const y = 2; // ZZSECRET\n' },
+  };
+
+  test('the secret scan reads a linked worktree\'s object store: pr-sync\'s staged scratch, where .git is a file', async () => {
+    let tree = '';
+    const rec = recorder(() => tree);
+    const scan = secretScanner(rec);
+    const f = fixture('scan-linked-worktree', "test('x', () => expect(y).toBe(2));", { ...SCAN_FX, deps: { tool: scan.tool } });
+    // gstack-pr-sync stages its merge in a detached linked worktree and names it in sync.json.
+    const scratch = path.join(path.dirname(f.tree), 'scratch');
+    git(f.tree, 'worktree', 'add', '-q', '--detach', scratch, 'HEAD');
+    expect(fs.statSync(path.join(scratch, '.git')).isFile()).toBe(true);
+    tree = scratch;
+    fs.mkdirSync(f.dir, { recursive: true });
+    fs.writeFileSync(path.join(f.dir, 'sync.json'), JSON.stringify({ repo: 'acme/fx', number: 5, scratch, base: git(f.tree, 'rev-parse', 'main'), h0: git(f.tree, 'rev-parse', 'HEAD') }));
+    expect(await f.call(['run'])).toBe(1);
+    // The staged scratch is the tree that ran, not --cwd.
+    expect(rec.calls.some(c => c.line.startsWith('bun test test/x.test.ts '))).toBe(true);
+    expect(scan.scanned).toHaveLength(1);
+    expect(scan.scanned[0]).toMatch(/^\+export const y = 2; \/\/ ZZSECRET$/m);
+    expect(f.out).toContain('mirror secret-scan rc=1');
+    expect(f.out[0]).toStartWith('RESULT RED');
+  });
+
   test('gen:skill-docs output that is not committed is red', async () => {
     let tree = '';
     const rec = recorder(() => tree, { onCall: l => { if (l === 'bun run gen:skill-docs --host all') write(tree, 'drift/SKILL.md', 'stale\n'); } });
