@@ -92,8 +92,10 @@ green.
 Each changed file (anything but release files, *.md and FULL triggers)
 needs a passing selected test that exercises it: the file itself, a test
 importing it (directly or through the modules it imports), pointing a
-relative path at it or naming it, or for a template, resolver or host
-the skill-rendering tests. A class
+relative path at it, joining its path segments (from the repo root, the
+test's own directory or file, or a const resolved from them; a code
+file's extension may be left off when the join ends there) or naming it,
+or for a template, resolver or host the skill-rendering tests. A class
 tripwire's pass (egress wiring, sync-spawn timeouts, ...) is not
 coverage. A file with none is red (NO_TESTS), never "0/0 green": declare
 the tests that cover it (a passing declared test covers the change).
@@ -279,23 +281,86 @@ export function relativeImports(file: string, src: string): { imports: string[];
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-/** Path segments as consecutive quoted path.join arguments: `'scripts', 'eval-list.ts'`. */
-function joinedSegmentsRe(segs: string[]): RegExp {
-  return new RegExp(segs.map((s, i) => `(['"\`])${escapeRe(s)}\\${i + 1}`).join('\\s*,\\s*'));
+const CODE_EXT_RE = /\.[cm]?[jt]sx?$/;
+
+/**
+ * Path segments as consecutive quoted path.join arguments (`'scripts',
+ * 'eval-list.ts'`), right after `anchor` (a regex source for the first
+ * argument) when given, and closing the call when `closes`.
+ */
+function joinedSegmentsRe(segs: string[], anchor: string | null = null, closes = false): RegExp {
+  const args = segs.map((s, i) => `(['"\`])${escapeRe(s)}\\${i + 1}`).join('\\s*,\\s*');
+  return new RegExp(`${anchor === null ? '' : `(?:${anchor})\\s*,\\s*`}${args}${closes ? '\\s*\\)' : ''}`);
 }
 
 /**
- * A test naming `f` relative to its own directory (`dir`, with a trailing
- * slash), as `import.meta.dir`/`__dirname` joins do: two or more segments,
- * joined (`'fixtures', 'one.json'`) or as one literal (`'fixtures/one.json'`).
+ * The joins that name a path given as `segs`: as written, and without a
+ * code file's extension when the join ends there (a test that runs
+ * `path.join(ROOT, 'hosts', 'claude', 'hooks', 'question-log-hook')`
+ * runs the shim that execs question-log-hook.ts; a join that goes on,
+ * `'hosts', 'claude', 'hooks'`, names a directory, not hosts/claude.ts).
  */
-function namesFromDir(src: string, dir: string, f: string, cache: Map<string, RegExp[]>): boolean {
-  if (!f.startsWith(dir)) return false;
-  const rel = f.slice(dir.length);
-  if (!rel.includes('/')) return false;
-  let res = cache.get(rel);
-  if (!res) cache.set(rel, (res = [joinedSegmentsRe(rel.split('/')), new RegExp(`(['"\`])${escapeRe(rel)}\\1`)]));
-  return res.some(re => re.test(src));
+function joinsOf(segs: string[], anchor: string | null = null): RegExp[] {
+  const last = segs[segs.length - 1];
+  const stem = last.replace(CODE_EXT_RE, '');
+  const res = [joinedSegmentsRe(segs, anchor)];
+  if (stem && stem !== last) res.push(joinedSegmentsRe([...segs.slice(0, -1), stem], anchor, true));
+  return res;
+}
+
+// `const NAME = path.resolve(<base>, 'seg', ...)`: a path a test joins from later.
+const CONST_JOIN_RE = /\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*(?:path\.)?(?:resolve|join)\(\s*(import\.meta\.(?:dirname|dir|path|filename)|__dirname|__filename|[A-Za-z_$][\w$]*)((?:\s*,\s*(?:'[^'\n]*'|"[^"\n]*"))*)\s*\)/g;
+
+/**
+ * What a test's path.join/resolve calls start from, as [anchor regex
+ * source, repo-relative path]: its own directory (`import.meta.dir`,
+ * `__dirname`), its own file (`import.meta.path, '..'` resolves to the
+ * directory), and every `const NAME = path.resolve(<one of those>, ...)`
+ * it declares (browse/test's `const ROOT = path.resolve(__dirname, '..')`
+ * is browse/). A const that leaves the repo is dropped.
+ */
+function joinAnchors(t: string, src: string): [string, string][] {
+  const dir = path.posix.dirname(t);
+  const anchors: [string, string][] = [['import\\.meta\\.dir(?:name)?\\b|\\b__dirname\\b', dir], ['import\\.meta\\.(?:path|filename)\\b|\\b__filename\\b', t]];
+  const bases = new Map<string, string>([['import.meta.dir', dir], ['import.meta.dirname', dir], ['__dirname', dir], ['import.meta.path', t], ['import.meta.filename', t], ['__filename', t]]);
+  for (const m of src.matchAll(CONST_JOIN_RE)) {
+    const from = bases.get(m[2]);
+    if (from === undefined) continue;
+    const segs = [...m[3].matchAll(/['"]([^'"\n]*)['"]/g)].map(q => q[1]);
+    const base = path.posix.normalize(path.posix.join(from, ...segs));
+    if (base === '..' || base.startsWith('../')) continue;
+    bases.set(m[1], base);
+    anchors.push([`\\b${escapeRe(m[1])}\\b`, base]);
+  }
+  return anchors;
+}
+
+type JoinCache = Map<string, { joins: RegExp[]; names: RegExp[] }>;
+
+/**
+ * How test `t` names `f` relative to where its joins start (joinAnchors):
+ * joined right after the anchor, at any depth
+ * (`import.meta.dir, '..', 'src', 'cli.ts'`, `ROOT, 'src', 'server.ts'`),
+ * or, below its own directory, two or more segments joined anywhere
+ * (`'fixtures', 'one.json'`) or as one literal (`'fixtures/one.json'`, a
+ * name rather than a join).
+ */
+function fromAnchors(src: string, t: string, anchors: [string, string][], f: string, cache: JoinCache): 'joins' | 'names' | null {
+  for (const [anchor, base] of anchors) {
+    const rel = path.posix.relative(base, f);
+    if (!rel) continue;
+    const key = `${anchor}\0${rel}`;
+    let c = cache.get(key);
+    if (!c) cache.set(key, (c = { joins: joinsOf(rel.split('/'), anchor), names: [] }));
+    if (c.joins.some(re => re.test(src))) return 'joins';
+  }
+  const rel = path.posix.relative(path.posix.dirname(t), f);
+  const segs = rel.split('/');
+  if (segs.length < 2 || segs[0] === '..') return null;
+  let c = cache.get(rel);
+  if (!c) cache.set(rel, (c = { joins: joinsOf(segs), names: [new RegExp(`(['"\`])${escapeRe(rel)}\\1`)] }));
+  if (c.joins.some(re => re.test(src))) return 'joins';
+  return c.names.some(re => re.test(src)) ? 'names' : null;
 }
 
 /** The files an import specifier can name, in bun's order (as written, an extension, /index, .js naming a .ts). */
@@ -384,19 +449,21 @@ export function selectTests(x: { changed: string[]; universe: string[]; declared
   // prints, so the edge is resolved rather than searched for as text.
   const nonRelease = x.changed.filter(f => !RELEASE_FILES.includes(f));
   const importable = new Set(nonRelease);
-  // How a test can name a changed path: the path itself, a bin's basename,
-  // or its segments as path.join arguments (path.join(ROOT, 'scripts',
-  // 'eval-list.ts')); every changed path a test names is recorded, since
-  // each one's coverage is judged on its own.
+  // How a test can name a changed path: its segments as path.join
+  // arguments, from the repo root (path.join(ROOT, 'scripts',
+  // 'eval-list.ts')) or from where the test's joins start (joinAnchors)
+  // (`joins:`), else the path itself or a bin's basename (`names:`). Every
+  // changed path a test names is recorded, since each one's coverage is
+  // judged on its own.
   const named = nonRelease
     .filter(f => !universe.has(f))
     .map(f => {
       const tokens = [f];
       const base = path.basename(f);
       if (f.startsWith('bin/') && base.length >= 6) tokens.push(base);
-      return { f, base, tokens, joined: f.includes('/') ? joinedSegmentsRe(f.split('/')) : null };
+      return { f, stem: base.replace(CODE_EXT_RE, '') || base, tokens, joins: f.includes('/') ? joinsOf(f.split('/')) : [] };
     });
-  const relRes = new Map<string, RegExp[]>();
+  const joinCache: JoinCache = new Map();
   const graph = importGraph(x.source);
   if (importable.size) {
     for (const t of x.universe) {
@@ -418,11 +485,13 @@ export function selectTests(x: { changed: string[]; universe: string[]; declared
         const hit = importedChange(spec, importable);
         if (hit && hit !== t && !direct.has(hit)) add(t, `reaches:${hit}`);
       });
-      const dir = `${path.posix.dirname(t)}/`;
+      let anchors: [string, string][] | null = null;
       for (const n of named) {
-        // Every form below contains the basename: a cheap exact pre-filter.
-        if (!src.includes(n.base)) continue;
-        if (n.tokens.some(tok => src.includes(tok)) || n.joined?.test(src) || namesFromDir(src, dir, n.f, relRes)) add(t, `names:${n.f}`);
+        // Every form below contains the basename without its extension: a cheap exact pre-filter.
+        if (!src.includes(n.stem)) continue;
+        anchors ??= joinAnchors(t, src);
+        const how = n.joins.some(re => re.test(src)) ? 'joins' : (fromAnchors(src, t, anchors, n.f, joinCache) ?? (n.tokens.some(tok => src.includes(tok)) ? 'names' : null));
+        if (how) add(t, `${how}:${n.f}`);
       }
     }
   }
@@ -660,7 +729,7 @@ export function untestedCode(changed: string[], sel: Selection, exists: (f: stri
 /**
  * The changed files in `code` that no passing selected file exercises. A
  * pick covers the path its rule names (`changed` a test file itself,
- * `imports:`, `reaches:`, `refs:`, `names:`), and `class:skill(<f>)` covers its
+ * `imports:`, `reaches:`, `refs:`, `joins:`, `names:`), and `class:skill(<f>)` covers its
  * template, resolver or host, since those tests render every template for
  * every host. The other class picks (code, test, release) are tripwires
  * that scan source for one pattern: they run, but never count as
@@ -674,7 +743,7 @@ export function uncoveredCode(code: string[], sel: Selection, passed: (file: str
     if (s.rules.includes('declared')) return [];
     for (const r of s.rules) {
       if (r === 'changed') covered.add(s.file);
-      const m = /^(?:imports|reaches|refs|names):(.+)$/.exec(r) ?? /^class:skill\((.+)\)$/.exec(r);
+      const m = /^(?:imports|reaches|refs|joins|names):(.+)$/.exec(r) ?? /^class:skill\((.+)\)$/.exec(r);
       if (m) covered.add(m[1]);
     }
   }
