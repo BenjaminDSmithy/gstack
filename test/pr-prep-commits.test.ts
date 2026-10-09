@@ -505,6 +505,36 @@ describe('CLI', () => {
     expect(fs.existsSync(out.at(-1)!)).toBe(false);
   });
 
+  test('a refused stamp keeps the EXACT_DUP the prior holds when its re-check search failed', async () => {
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(ROOT, 'home-refused-prior') };
+    let out: string[] = [];
+    const agent = path.join(ROOT, 'agent-refused-prior.json');
+    const ship = path.join(ROOT, 'ship-refused-prior.json');
+    const stamp = async (rows: { sha: string; bucket: string }[], extra: string[] = ['--repo', UP]) => {
+      out = [];
+      fs.writeFileSync(agent, JSON.stringify({ summary: 's', commits: rows }));
+      fs.rmSync(ship, { force: true });
+      const code = await commitsMain(['stamp', '--base', base, ...extra, '--report', agent, '--out', ship, '--cwd', repo], { out: l => out.push(l), env });
+      return [code, JSON.parse(fs.readFileSync(ship, 'utf8')).worst];
+    };
+    // Run 1 found c1 an EXACT_DUP: the persistent copy holds it, and the next list re-checks c1 in full.
+    expect(await stamp([{ sha: sha.c1, bucket: 'EXACT_DUP' }, { sha: sha.c4, bucket: 'CLEAN' }])).toEqual([0, 'EXACT_DUP']);
+    expect(await commitsMain(['paths', '--cwd', repo], { out: l => out.push(l), env })).toBe(0);
+    const persisted = out.at(-1)!;
+    // The re-check search failed (UNVERIFIED) and the stamp is refused for an unrelated row: /ship must still stop.
+    const failedRecheck = { sha: sha.c1, bucket: 'UNVERIFIED' };
+    expect(await stamp([failedRecheck, { sha: sha.c4.slice(0, 6), bucket: 'CLEAN' }])).toEqual([2, 'EXACT_DUP']);
+    expect(out).toEqual([expect.stringMatching(/^RESULT USAGE commits\[1\]\.sha/), `PR_PREP_REPORT: ${ship} (EXACT_DUP, refused)`]);
+    // --repo left off: which repo the copy searched cannot be checked, so its duplicate stands.
+    expect(await stamp([failedRecheck, { sha: sha.c4, bucket: 'CLEAN' }], [])).toEqual([2, 'EXACT_DUP']);
+    expect(JSON.parse(fs.readFileSync(persisted, 'utf8')).worst).toBe('EXACT_DUP');
+    // A prior from before repo stamping carries nothing to a valid --repo, refused or not.
+    const legacy = path.join(ROOT, 'prior-refused-legacy.json');
+    fs.writeFileSync(legacy, JSON.stringify({ ...JSON.parse(fs.readFileSync(persisted, 'utf8')), repo: undefined }));
+    expect(await stamp([failedRecheck, { sha: sha.c4.slice(0, 6), bucket: 'CLEAN' }], ['--repo', UP, '--prior', legacy])).toEqual([2, 'UNVERIFIED']);
+    expect(await stamp([failedRecheck, { sha: sha.c4.slice(0, 6), bucket: 'CLEAN' }], ['--prior', legacy])).toEqual([2, 'EXACT_DUP']);
+  });
+
   test('a reader that closes the pipe early (`| head -1`) leaves the exit code as computed, never 1', () => {
     const bin = path.join(import.meta.dir, '..', 'bin', 'gstack-pr-prep-commits');
     for (const [args, want] of [[[], 2], [['--help'], 0]] as const) {
