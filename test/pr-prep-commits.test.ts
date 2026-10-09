@@ -510,9 +510,9 @@ describe('CLI', () => {
     let out: string[] = [];
     const agent = path.join(ROOT, 'agent-refused-prior.json');
     const ship = path.join(ROOT, 'ship-refused-prior.json');
-    const stamp = async (rows: { sha: string; bucket: string }[], extra: string[] = ['--repo', UP]) => {
+    const stamp = async (rows: { sha: string; bucket: string }[], extra: string[] = ['--repo', UP], worst?: string) => {
       out = [];
-      fs.writeFileSync(agent, JSON.stringify({ summary: 's', commits: rows }));
+      fs.writeFileSync(agent, JSON.stringify({ summary: 's', ...(worst ? { worst } : {}), commits: rows }));
       fs.rmSync(ship, { force: true });
       const code = await commitsMain(['stamp', '--base', base, ...extra, '--report', agent, '--out', ship, '--cwd', repo], { out: l => out.push(l), env });
       return [code, JSON.parse(fs.readFileSync(ship, 'utf8')).worst];
@@ -533,6 +533,12 @@ describe('CLI', () => {
     fs.writeFileSync(legacy, JSON.stringify({ ...JSON.parse(fs.readFileSync(persisted, 'utf8')), repo: undefined }));
     expect(await stamp([failedRecheck, { sha: sha.c4.slice(0, 6), bucket: 'CLEAN' }], ['--repo', UP, '--prior', legacy])).toEqual([2, 'UNVERIFIED']);
     expect(await stamp([failedRecheck, { sha: sha.c4.slice(0, 6), bucket: 'CLEAN' }], ['--prior', legacy])).toEqual([2, 'EXACT_DUP']);
+    // A copy can hold its EXACT_DUP only as `worst` (an agent's declared worst, or a skipped
+    // commit's verdict) over CLEAN rows: list floors at it, so a refused stamp keeps it too.
+    expect(await stamp([{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4, bucket: 'CLEAN' }], ['--repo', UP], 'EXACT_DUP')).toEqual([0, 'EXACT_DUP']);
+    const worstOnly = JSON.parse(fs.readFileSync(persisted, 'utf8'));
+    expect([worstOnly.worst, ...[...worstOnly.commits, ...worstOnly.audited].map((r: { bucket: string }) => r.bucket)]).toEqual(['EXACT_DUP', 'CLEAN', 'CLEAN', 'CLEAN', 'CLEAN']);
+    expect(await stamp([{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4.slice(0, 6), bucket: 'CLEAN' }])).toEqual([2, 'EXACT_DUP']);
   });
 
   test('stamp refuses a --repo other than the one a prior holding an EXACT_DUP was stamped for, and keeps that copy', async () => {
