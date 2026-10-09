@@ -273,8 +273,13 @@ const RENDER_TESTS = ['test/gen-skill-docs.test.ts', 'test/skill-validation.test
 // Tripwires over the skill surface: the generated files' size budgets and the
 // tracker-text wiring scan. Like every class pick they run but never cover,
 // and a path they only name (names:) is a file they reason about, not one they
-// run; the code they import, reach or join runs in them and is covered.
+// run. The code they import or reach runs in them and is covered; a path they
+// point at or join (refs:, joins:) is a file they read, which is covered only
+// when it is data (tripwireData), never a template or code they scan as text.
 const CLASS_SKILL = ['test/catalog-budget.test.ts', 'test/context-budget-ratchet.test.ts', 'test/tracker-guard-wiring.test.ts'];
+// Data a skill tripwire reads and checks: a test fixture, or a file that is
+// neither on the skill surface, under a code root, nor a script.
+const tripwireData = (f: string) => /(?:^|\/)test\/fixtures\//.test(f) || (!SKILL_SURFACE_RE.test(f) && !under(f, CODE_ROOTS) && !/\.(?:[cm]?[jt]sx?|sh)$/.test(f));
 const CLASS_CODE = ['test/egress-receipt-wiring.test.ts'];
 const CLASS_TEST = ['test/spawnsync-timeout-tripwire.test.ts', 'test/test-of-test-ratchet.test.ts', 'test/paid-orphan-tripwire.test.ts', 'test/test-free-shards.test.ts'];
 const CLASS_RELEASE = ['test/agents-digest.test.ts', 'test/gstack-version-bump.test.ts', 'test/gstack-next-version.test.ts', 'test/ship-version-sync.test.ts', 'test/version-source.test.ts'];
@@ -772,22 +777,27 @@ export function untestedCode(changed: string[], sel: Selection, exists: (f: stri
  * tripwires that scan source or generated files for one pattern, and they
  * run without exercising the change. A skill-surface tripwire's `names:`
  * never covers either: it names the files it reasons about
- * (test/tracker-guard-wiring.test.ts's exemption list), not code it runs;
- * what it imports, reaches, points at or joins runs in it, as in any test
+ * (test/tracker-guard-wiring.test.ts's exemption list), not code it runs.
+ * What it imports or reaches runs in it, as in any test
  * (test/context-budget-ratchet.test.ts is the only importer of the capture
- * helper). A passing declared test covers everything: the owner declared
- * it for the change.
+ * helper); what it points at or joins is a file it reads, covered only when
+ * that is data it checks (a fixture), since only the renderers cover a skill
+ * file and a module it reads as text never ran. A passing declared test
+ * covers everything: the owner declared it for the change.
  */
 export function uncoveredCode(code: string[], sel: Selection, passed: (file: string) => boolean): string[] {
   const covered = new Set<string>();
   for (const s of sel.files) {
     if (!passed(s.file)) continue;
     if (s.rules.includes('declared')) return [];
-    const rule = CLASS_SKILL.includes(s.file) ? /^(?:imports|reaches|refs|joins):(.+)$/ : /^(?:imports|reaches|refs|joins|names|renders):(.+)$/;
+    const tripwire = CLASS_SKILL.includes(s.file);
     for (const r of s.rules) {
       if (r === 'changed') covered.add(s.file);
-      const m = rule.exec(r);
-      if (m) covered.add(m[1]);
+      const m = /^(imports|reaches|refs|joins|names|renders):(.+)$/.exec(r);
+      if (!m) continue;
+      const [, kind, f] = m;
+      if (tripwire && !(kind === 'imports' || kind === 'reaches' || ((kind === 'refs' || kind === 'joins') && tripwireData(f)))) continue;
+      covered.add(f);
     }
   }
   return code.filter(f => !covered.has(f));

@@ -320,6 +320,47 @@ describe('selectTests', () => {
     expect(cov(['zz/SKILL.md.tmpl'], uni.filter(f => !['test/gen-skill-docs.test.ts', 'test/skill-validation.test.ts'].includes(f)))).toEqual(['zz/SKILL.md.tmpl']);
   });
 
+  test('a skill tripwire\'s path literal or join covers the fixture data it reads, never a template or code it reads as text', () => {
+    const uni = [...universe, 'test/catalog-budget.test.ts', 'test/tracker-guard-wiring.test.ts'];
+    const local: Record<string, string> = {
+      // The budget reads templates and its own data; the tracker scan reads modules as text. Neither runs them.
+      'test/catalog-budget.test.ts': [
+        "const A = readFileSync(path.join(import.meta.dir, '../zz/SKILL.md.tmpl'), 'utf8');",
+        "const B = readFileSync(path.join(import.meta.dir, '..', 'yy', 'SKILL.md.tmpl'), 'utf8');",
+        "const C = readFileSync(path.join(import.meta.dir, '..', 'lib', 'zz-joined.ts'), 'utf8');",
+        "const D = JSON.parse(readFileSync(path.join(import.meta.dir, './fixtures/zz-limits.json'), 'utf8'));",
+        "const E = readFileSync(path.join(import.meta.dir, 'fixtures', 'zz-limits.txt'), 'utf8');",
+        "const F = readFileSync(path.join(import.meta.dir, '..', 'bin', 'gstack-zz-read'), 'utf8');",
+        "const G = readFileSync(path.join(import.meta.dir, '../make-pdf/src/zz-read.ts'), 'utf8');",
+        "const H = readFileSync(path.join(import.meta.dir, 'fixtures', 'zz-tree', 'SKILL.md.tmpl'), 'utf8');",
+      ].join('\n'),
+      'test/tracker-guard-wiring.test.ts': "const S = readFileSync(path.join(import.meta.dir, '../lib/zz-scanned.ts'), 'utf8');",
+    };
+    const pick = (changed: string[]) => selectTests({ changed, universe: uni, declared: [], pkgVersionOnly: true, source: f => local[f] ?? src[f] ?? '' });
+    const rulesOf = (changed: string[]) => Object.fromEntries(pick(changed).files.map(f => [f.file, f.rules]));
+    // Only the tripwires pass: the renderers that cover a template are red.
+    const tripwires = ['test/catalog-budget.test.ts', 'test/tracker-guard-wiring.test.ts'];
+    const cov = (f: string) => uncoveredCode([f], pick([f]), t => tripwires.includes(t));
+    const budget = 'test/catalog-budget.test.ts';
+    const cases: [string, string, string, boolean][] = [
+      ['zz/SKILL.md.tmpl', budget, 'refs', false],
+      ['yy/SKILL.md.tmpl', budget, 'joins', false],
+      ['lib/zz-joined.ts', budget, 'joins', false],
+      ['lib/zz-scanned.ts', 'test/tracker-guard-wiring.test.ts', 'refs', false],
+      // A script under a code root, or code outside one, is still code.
+      ['bin/gstack-zz-read', budget, 'joins', false],
+      ['make-pdf/src/zz-read.ts', budget, 'refs', false],
+      ['test/fixtures/zz-limits.json', budget, 'refs', true],
+      ['test/fixtures/zz-limits.txt', budget, 'joins', true],
+      // A fixture is data even when it is shaped like a template.
+      ['test/fixtures/zz-tree/SKILL.md.tmpl', budget, 'joins', true],
+    ];
+    for (const [f, by, kind, covers] of cases) {
+      expect(rulesOf([f])[by], f).toContain(`${kind}:${f}`);
+      expect(cov(f), f).toEqual(covers ? [] : [f]);
+    }
+  });
+
   test('the skill surface cannot drift from the files the tracker-text tripwire scans', () => {
     // Read the tripwire's own trackedFiles filter and run it over this repo's tracked files.
     const REPO = path.resolve(import.meta.dir, '..');
