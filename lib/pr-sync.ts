@@ -43,7 +43,7 @@ import { pruneDrafts, readRetriggerDraft } from './pr-ci-triage';
 
 export const SYNC_EXIT = {
   SYNCED: 0, ERROR: 1, USAGE: 2, NOTHING: 10, CODE_CONFLICT: 20, DIFF_CHANGED: 21, PRECONDITION: 30,
-  VALIDATION: 31, BODY_STALE: 32, REMOTE_MOVED: 40, HOOK_REFUSED: 41, LOCKED: 45, DIRTY: 50, VERSION_SOURCE: 60,
+  VALIDATION: 31, BODY_STALE: 32, REMOTE_MOVED: 40, HOOK_REFUSED: 41, UNVERIFIED: 42, LOCKED: 45, DIRTY: 50, VERSION_SOURCE: 60,
 } as const;
 
 export const SYNC_USAGE = `gstack-pr-sync <plan|merge|push|abort|status> --pr <number|url> [options]
@@ -60,8 +60,10 @@ exact commit.
            the conflicts a merge would hit
   merge    builds and commits the sync in a scratch worktree
            (<worktree-root>/<topic>-sync); nothing is pushed
-  push     publishes the staged sync commit (needs --yes); then fast-
-           forwards the local PR branch and removes the scratch worktree
+  push     publishes the staged sync commit (needs --yes); once the PR
+           reports it, fast-forwards the local PR branch and removes the
+           scratch worktree. Run again after an UNVERIFIED push once the
+           PR reports the commit: it records the push, sending nothing
   abort    removes the staged sync, or the scratch worktree an interrupted
            merge left; only a worktree gstack-pr-sync made is removed.
            Runs for a closed or merged PR too, to clear the sync it left
@@ -97,7 +99,9 @@ also a draft not bound to this PR's current head and newest run), 31
 validation missing, red, or a waived full suite without --accept-full-risk
 for the staged commit, 32 PR body still stale from an earlier push, 40 remote moved
 or not fast-forward, 41 a pre-push hook or the remote refused the push
-(stop and report; never --no-verify), 45 lock busy, 50 a sync is already
+(stop and report; never --no-verify), 42 git push exited 0 but the PR
+still reports the head from before it (UNVERIFIED: nothing recorded;
+check the push URL), 45 lock busy, 50 a sync is already
 staged, the scratch path holds something gstack-pr-sync did not make, or
 the local branch has unpushed commits, 60 the version queue could not be
 read (never guessed).`;
@@ -1120,6 +1124,8 @@ function cmdPush(c: Ctx): number {
   requireApproval(c.f.argv, { valueFlags: VALUE_FLAGS });
   const pending = readStagedSync(c.stateDir, c.pr);
   if (!pending) throw new PrContextError('no sync is staged: run `gstack-pr-sync merge` first', SYNC_EXIT.PRECONDITION);
+  // An earlier push of this sync ended UNVERIFIED and the PR now reports it: record it, send nothing.
+  if (c.pr.headOid === pending.sha) return recordLatePush(c, pending);
   // The gate polls gstack-pr-watch, which takes the PR lock itself: run it just before taking the lock.
   const gateAt = d.now().getTime();
   const gate = d.preWriteGate({ gh: d.gh, git: d.git, env: d.env, cwd: c.cwd, repo: c.repo, number: c.pr.number, expectHead: pending.h0, state: readStateFor(c.stateDir, c.pr) });
@@ -1147,44 +1153,83 @@ function cmdPush(c: Ctx): number {
     const now = pinBranch(d.git, c.cwd, c.headRemote, c.pr.headRef).sha;
     if (now !== staged.h0) throw new PrContextError(`${c.headRemote}/${c.pr.headRef} moved to ${now.slice(0, 12)}; abort and re-sync`, SYNC_EXIT.REMOTE_MOVED);
     pushOrThrow(c, staged.scratch, staged.sha, 'pr-sync-push', gateAt);
-    // It landed (git exit 0): record that before any network read can fail.
-    const after = readStateFor(c.stateDir, c.pr) ?? state;
-    writeState(c.stateDir, { ...after, bodyStaleSince: staged.sha });
-    fs.rmSync(syncFile(c.stateDir), { force: true });
-    const pruned = pruneDraftsAfterPush(c);
-    let local = 'local branch not moved (dirty or diverged)';
-    const clean = d.git(['status', '--porcelain', '--untracked-files=no'], { cwd: c.cwd });
-    if (clean.status === 0 && !clean.stdout.trim()) {
-      const ff = d.git(['merge', '--ff-only', '-q', staged.sha], { cwd: c.cwd });
-      if (ff.status === 0) local = `local ${c.pr.headRef} fast-forwarded`;
+    // git exit 0. A PR that still reports H0 after every read-back did not get
+    // the commit, as far as anyone can show: nothing is recorded. A failed read
+    // is not that evidence, so it still records (the push most likely landed).
+    const rb = readback(c, staged.sha, staged.h0);
+    if (rb.stillH0) {
+      d.out(`RESULT UNVERIFIED sha=${staged.sha.slice(0, 12)} pr=${c.pr.number} readback=${staged.h0.slice(0, 12)} (the head before the push)`);
+      d.out(`NOTE git push exited 0 but the PR still reports ${staged.h0.slice(0, 12)}: nothing was recorded (the staged sync, its scratch and the local branch are as they were). Check where \`git remote get-url --push ${c.headRemote}\` sends it. Once the PR reports ${staged.sha.slice(0, 12)}, \`gstack-pr-sync push --yes\` records the push without sending anything; if it never does, \`gstack-pr-sync abort\` and re-sync`);
+      return SYNC_EXIT.UNVERIFIED;
     }
-    const gone = removeScratch(c, staged.scratch);
-    const rb = readback(c, staged.sha);
+    const done = recordPush(c, staged);
     d.out(`RESULT PUSHED sha=${staged.sha.slice(0, 12)} pr=${c.pr.number} readback=${rb.word}`);
-    d.out(`NOTE ${local}; scratch ${gone === 'removed' || gone === 'absent' ? 'removed' : `left at ${staged.scratch}`}; the PR body is stale until gstack-pr-body publish`);
-    if (pruned) d.out(pruned);
-    for (const line of rb.detail) d.out(line);
+    for (const line of [...done, ...rb.detail]) d.out(line);
     return SYNC_EXIT.SYNCED;
   });
 }
 
 /**
- * Best effort, after the push landed: does the PR report the new head yet?
- * GitHub can lag a few seconds, and a failed read changes nothing (the push
- * and its bookkeeping are already done), so it is reported, never thrown.
+ * The bookkeeping of a push that reached the PR: the body is stale since
+ * the staged commit, the staged sync and the ci: drafts for the old head
+ * are gone, the local branch fast-forwards when it is clean, and the
+ * scratch is removed. Returns the NOTE lines to print.
  */
-function readback(c: Ctx, sha: string): { word: string; detail: string[] } {
+function recordPush(c: Ctx, staged: StagedSync): string[] {
+  const { d } = c;
+  const st = readStateFor(c.stateDir, c.pr) ?? freshState(c.pr, { headRemote: c.headRemote, upstreamRemote: c.upRemote });
+  writeState(c.stateDir, { ...st, bodyStaleSince: staged.sha });
+  fs.rmSync(syncFile(c.stateDir), { force: true });
+  const pruned = pruneDraftsAfterPush(c);
+  let local = 'local branch not moved (dirty or diverged)';
+  const clean = d.git(['status', '--porcelain', '--untracked-files=no'], { cwd: c.cwd });
+  if (clean.status === 0 && !clean.stdout.trim()) {
+    const ff = d.git(['merge', '--ff-only', '-q', staged.sha], { cwd: c.cwd });
+    if (ff.status === 0) local = `local ${c.pr.headRef} fast-forwarded`;
+  }
+  const gone = removeScratch(c, staged.scratch);
+  return [
+    `NOTE ${local}; scratch ${gone === 'removed' || gone === 'absent' ? 'removed' : `left at ${staged.scratch}`}; the PR body is stale until gstack-pr-body publish`,
+    ...(pruned ? [pruned] : []),
+  ];
+}
+
+/**
+ * The PR reports the staged commit as its head: an earlier push of it ended
+ * UNVERIFIED (GitHub lagged past the read-backs) and has since shown up.
+ * Records it once the head remote holds it too. Nothing is sent, so no gate.
+ */
+function recordLatePush(c: Ctx, pending: StagedSync): number {
+  return withPrLock(c.stateDir, () => {
+    const staged = readStagedSync(c.stateDir, c.pr);
+    if (!staged || staged.sha !== pending.sha) throw new PrContextError('the staged sync changed; re-run push', SYNC_EXIT.PRECONDITION);
+    const now = pinBranch(c.d.git, c.cwd, c.headRemote, c.pr.headRef).sha;
+    if (now !== staged.sha) throw new PrContextError(`the PR reports ${staged.sha.slice(0, 12)} but ${c.headRemote}/${c.pr.headRef} is ${now.slice(0, 12)}: re-run push`, SYNC_EXIT.REMOTE_MOVED);
+    const done = recordPush(c, staged);
+    c.d.out(`RESULT PUSHED sha=${staged.sha.slice(0, 12)} pr=${c.pr.number} readback=ok (an earlier push landed; nothing sent now)`);
+    for (const line of done) c.d.out(line);
+    return SYNC_EXIT.SYNCED;
+  });
+}
+
+/**
+ * After git exit 0: does the PR report the new head? GitHub can lag a few
+ * seconds, so it reads up to 5 times. `stillH0` when the last read still
+ * shows the head from before the push. A failed read is reported, never
+ * thrown.
+ */
+function readback(c: Ctx, sha: string, h0: string): { word: string; detail: string[]; stillH0: boolean } {
   let seen = '';
   for (let i = 0; i < 5; i++) {
     try {
       seen = readPr(c.d.gh, c.repo, c.pr.number).headOid;
     } catch (error) {
-      return { word: 'unverified', detail: ['NOTE the PR head could not be read back after the push landed (gh failed); check it with gstack-pr-watch poll', envelope((error as Error).message, 'gh pr view')] };
+      return { word: 'unverified', stillH0: false, detail: ['NOTE the PR head could not be read back after the push landed (gh failed); check it with gstack-pr-watch poll', envelope((error as Error).message, 'gh pr view')] };
     }
-    if (seen === sha) return { word: 'ok', detail: [] };
+    if (seen === sha) return { word: 'ok', detail: [], stillH0: false };
     if (i < 4) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, c.d.readbackDelayMs);
   }
-  return { word: `pending (${seen.slice(0, 12)})`, detail: [] };
+  return { word: `pending (${seen.slice(0, 12)})`, detail: [], stillH0: seen === h0 };
 }
 
 /**

@@ -785,6 +785,47 @@ describe('push', () => {
     expect((await run(t, ['retrigger', '--message', msg, '--yes'])).code).toBe(32);
   });
 
+  test('a PR still at its old head after the read-backs is UNVERIFIED (42) and nothing is recorded; push again records it once the PR shows it, sending nothing', async () => {
+    const t = topology('p23', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    recordValidation(t, s.sha, 0);
+    const local = git(t.clone, 'rev-parse', 'HEAD');
+    const quiet = fakeGh(t);
+    const reporting = (oid: string) => ((args: string[]) => {
+      const r = quiet(args);
+      return args[0] === 'pr' && args[1] === 'view' ? { ...r, stdout: JSON.stringify({ ...JSON.parse(r.stdout), headRefOid: oid }) } : r;
+    }) as GhRunner;
+    const sent = () => listReceipts(path.join(t.base, 'home')).filter(x => x.payload_class === 'pr-sync-push').length;
+    // A PR that claims the staged commit while the head remote does not hold it records nothing (40).
+    const claimed = await run(t, ['push', '--yes'], { gh: reporting(s.sha) });
+    expect(claimed.code, claimed.out.join('\n')).toBe(40);
+    expect(sent()).toBe(0);
+    expect(readStagedSync(stateDir(t), pr)?.sha).toBe(s.sha);
+    expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBeNull();
+    // gh pr view keeps reporting H0, whatever the push did.
+    const r = await run(t, ['push', '--yes'], { gh: reporting(s.h0) });
+    expect(r.code, r.out.join('\n')).toBe(42);
+    expect(r.out[0]).toStartWith('RESULT UNVERIFIED');
+    expect(r.out.join('\n')).not.toContain('RESULT PUSHED');
+    expect(sent()).toBe(1);
+    expect(readStagedSync(stateDir(t), pr)?.sha).toBe(s.sha);
+    expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBeNull();
+    expect(fs.existsSync(s.scratch)).toBe(true);
+    expect(git(t.clone, 'rev-parse', 'HEAD')).toBe(local);
+
+    // GitHub catches up: the PR reports the staged commit, so push records it without a second send.
+    const again = await run(t, ['push', '--yes']);
+    expect(again.code, again.out.join('\n')).toBe(0);
+    expect(again.out[0]).toStartWith('RESULT PUSHED');
+    expect(sent()).toBe(1);
+    expect(readStagedSync(stateDir(t), pr)).toBeNull();
+    expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBe(s.sha);
+    expect(fs.existsSync(s.scratch)).toBe(false);
+    expect(git(t.clone, 'rev-parse', 'HEAD')).toBe(s.sha);
+  });
+
   test('a PR retargeted to another base after the sync was staged is refused (30)', async () => {
     const t = topology('p11', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
     queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
