@@ -1013,6 +1013,66 @@ describe('push', () => {
     expect(git(t.clone, 'worktree', 'list').split('\n')).toHaveLength(1);
   });
 
+  test('a moved-aside sibling worktree with a unique commit survives abort, a failed merge and a push', async () => {
+    const t = topology('p20', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    // The owner's detached worktree, one commit only it holds, its directory moved away (an unmounted volume, a rename).
+    const sib = path.join(t.base, 'sibling');
+    git(t.clone, 'worktree', 'add', '-q', '--detach', sib, 'HEAD');
+    write(sib, 'only-here.txt', 'unique\n');
+    git(sib, 'add', 'only-here.txt');
+    git(sib, 'commit', '-q', '-m', 'only here');
+    const unique = git(sib, 'rev-parse', 'HEAD');
+    fs.renameSync(sib, `${sib}.moved`);
+    const registered = () => git(t.clone, 'worktree', 'list', '--porcelain').split('\n').includes(`worktree ${sib}`);
+    expect(registered()).toBe(true);
+
+    const ab = await run(t, ['abort']);
+    expect(ab.code, ab.out.join('\n')).toBe(0);
+    expect(ab.out[0]).toContain('(absent)');
+    expect(registered()).toBe(true);
+
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0', offline: true });
+    expect((await run(t, ['merge'])).code).toBe(60);
+    expect(registered()).toBe(true);
+
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    recordValidation(t, s.sha, 0);
+    const p = await run(t, ['push', '--yes']);
+    expect(p.code, p.out.join('\n')).toBe(0);
+    expect(fs.existsSync(s.scratch)).toBe(false);
+    expect(registered()).toBe(true);
+
+    fs.renameSync(`${sib}.moved`, sib);
+    expect(spawnSync('git', ['status', '--porcelain'], { cwd: sib, timeout: 30_000 }).status).toBe(0);
+    expect(git(sib, 'rev-parse', 'HEAD')).toBe(unique);
+  });
+
+  test('abort clears the registration of its own scratch deleted by hand, and only that one', async () => {
+    const t = topology('p21', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    const listed = () => git(t.clone, 'worktree', 'list', '--porcelain').split('\n').filter(l => l.startsWith('worktree ')).map(l => l.slice(9));
+    fs.rmSync(s.scratch, { recursive: true, force: true });
+    // Another worktree of the repo whose directory is also gone, and not the scratch: left registered.
+    const other = path.join(t.base, 'other-wt');
+    git(t.clone, 'worktree', 'add', '-q', '--detach', other, 'HEAD');
+    fs.rmSync(other, { recursive: true, force: true });
+    const a = await run(t, ['abort']);
+    expect(a.code, a.out.join('\n')).toBe(0);
+    expect(listed()).toEqual([t.clone, other]);
+    // The path is free again: the next merge can add its scratch there.
+    expect((await run(t, ['merge'])).code).toBe(0);
+    // The owner's own worktree registered at the scratch path, directory gone: no marker, so abort leaves it.
+    expect((await run(t, ['abort'])).code).toBe(0);
+    git(t.clone, 'worktree', 'add', '-q', '--detach', s.scratch, 'HEAD');
+    fs.rmSync(s.scratch, { recursive: true, force: true });
+    expect((await run(t, ['abort'])).code).toBe(0);
+    expect(listed()).toEqual([t.clone, other, s.scratch]);
+  });
+
   test('run from a linked worktree of the PR checkout, merge marks its scratch and abort removes it', async () => {
     const t = topology('p15', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
     queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
