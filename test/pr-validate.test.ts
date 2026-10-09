@@ -100,7 +100,7 @@ describe('selectTests', () => {
     const s = sel(['test/a.test.ts', 'bin/gstack-thing', 'x/SKILL.md.tmpl', 'VERSION']);
     const rules = Object.fromEntries(s.files.map(f => [f.file, f.rules]));
     expect(rules['test/a.test.ts']).toContain('changed');
-    expect(rules['test/b.test.ts']).toEqual(['names:bin/gstack-thing']);
+    expect(rules['test/b.test.ts']).toEqual(['joins:bin/gstack-thing']);
     expect(rules['test/gen-skill-docs.test.ts']).toEqual(['class:skill(x/SKILL.md.tmpl)']);
     expect(rules['test/egress-receipt-wiring.test.ts']).toEqual(['class:code(bin/gstack-thing)']);
     expect(rules['test/spawnsync-timeout-tripwire.test.ts']).toEqual(['class:test(test/a.test.ts)']);
@@ -154,7 +154,7 @@ describe('selectTests', () => {
     expect(uncoveredCode(['lib/ci/picker.ts'], pick(['lib/ci/picker.ts']), () => false)).toEqual(['lib/ci/picker.ts']);
   });
 
-  test('a test that names several changed paths records each; path.join segments name a path too', () => {
+  test('a test that names several changed paths records each; path.join segments join a path', () => {
     const local = {
       'test/c.test.ts': "spawnSync('bun', ['run', path.join(ROOT, 'scripts', 'eval-list.ts')]);\nrun(path.join(ROOT, 'bin', 'gstack-thing'));\nconst cfg = 'docs/notes.txt';",
       'test/d.test.ts': "const fx = path.join(import.meta.dir, 'fixtures', 'pr', 'one.json');\nconst two = path.join(__dirname, \"fixtures/pr/two.json\");",
@@ -164,12 +164,40 @@ describe('selectTests', () => {
       changed, universe: [...universe, ...Object.keys(local)], declared: [], pkgVersionOnly: true, source: f => local[f as keyof typeof local] ?? src[f] ?? '',
     }).files.map(f => [f.file, f.rules]));
     expect(rules(['scripts/eval-list.ts', 'bin/gstack-thing', 'docs/notes.txt'])['test/c.test.ts'])
-      .toEqual(['names:bin/gstack-thing', 'names:docs/notes.txt', 'names:scripts/eval-list.ts']);
+      .toEqual(['joins:bin/gstack-thing', 'joins:scripts/eval-list.ts', 'names:docs/notes.txt']);
     // Relative to the test's own directory: a fixture beside the test, joined or as one literal.
     const fx = rules(['test/fixtures/pr/one.json', 'test/fixtures/pr/two.json']);
-    expect(fx['test/d.test.ts']).toEqual(['names:test/fixtures/pr/one.json', 'names:test/fixtures/pr/two.json']);
+    expect(fx['test/d.test.ts']).toEqual(['joins:test/fixtures/pr/one.json', 'names:test/fixtures/pr/two.json']);
     // browse/test/e.test.ts names its own browse/test/fixtures/pr/one.json, not test/'s.
     expect(fx['browse/test/e.test.ts']).toBeUndefined();
+  });
+
+  test('joins: from the test\'s own directory, its own file or a const resolved from them, at any depth, and without the extension when the join ends there', () => {
+    const local: Record<string, string> = {
+      'browse/test/cli.test.ts': "const CLI = path.join(import.meta.dir, '..', 'src', 'cli.ts');\nconst S = join(__dirname, '..', 'src', 'server');",
+      'design/test/cli.test.ts': 'const CLI = path.join(import.meta.dir, "..", "src", "cli.ts");',
+      'test/hooks.test.ts': "const HOOK = path.join(ROOT, 'hosts', 'claude', 'hooks', 'question-log-hook');\nconst HOOKS = path.join(ROOT, 'hosts', 'claude', 'hooks');\nconst X = path.resolve(import.meta.dirname, '..', 'lib', 'x.ts');",
+      // Its own file then '..', and a const resolved from its directory that later joins start from.
+      'browse/test/agent.test.ts': "const AGENT_TS = path.resolve(import.meta.path, '..', '..', 'src', 'terminal-agent.ts');\nconst ROOT = path.resolve(__dirname, '..');\nconst SRC = path.join(ROOT, 'src');\nconst W = fs.readFileSync(path.join(SRC, 'welcome.html'), 'utf-8');",
+    };
+    const pick = (changed: string[]) => selectTests({
+      changed, universe: [...universe, ...Object.keys(local)], declared: [], pkgVersionOnly: true, source: f => local[f] ?? src[f] ?? '',
+    });
+    const rules = (changed: string[]) => Object.fromEntries(pick(changed).files.map(f => [f.file, f.rules]));
+    expect(rules(['browse/src/cli.ts'])['browse/test/cli.test.ts']).toEqual(['joins:browse/src/cli.ts']);
+    // The same text in design/test names design/src/cli.ts, never browse's.
+    expect(rules(['browse/src/cli.ts'])['design/test/cli.test.ts']).toBeUndefined();
+    expect(rules(['design/src/cli.ts'])['design/test/cli.test.ts']).toEqual(['joins:design/src/cli.ts']);
+    expect(rules(['browse/src/server.ts'])['browse/test/cli.test.ts']).toEqual(['joins:browse/src/server.ts']);
+    expect(rules(['lib/x.ts'])['test/hooks.test.ts']).toEqual(['joins:lib/x.ts']);
+    // A shim's join that ends at its stem runs the .ts; a join that goes on names a directory.
+    expect(rules(['hosts/claude/hooks/question-log-hook.ts'])['test/hooks.test.ts']).toEqual(['joins:hosts/claude/hooks/question-log-hook.ts']);
+    expect(rules(['hosts/claude.ts'])['test/hooks.test.ts']).toBeUndefined();
+    expect(rules(['browse/src/terminal-agent.ts'])['browse/test/agent.test.ts']).toEqual(['joins:browse/src/terminal-agent.ts']);
+    expect(rules(['browse/src/welcome.html'])['browse/test/agent.test.ts']).toEqual(['joins:browse/src/welcome.html']);
+    expect(rules(['design/src/welcome.html'])['browse/test/agent.test.ts']).toBeUndefined();
+    // A join covers what it names.
+    expect(uncoveredCode(['browse/src/cli.ts'], pick(['browse/src/cli.ts']), f => f === 'browse/test/cli.test.ts')).toEqual([]);
   });
 
   test('coverage: the skill-rendering tests cover a template; code, test and release tripwires never cover', () => {
@@ -458,6 +486,30 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(await red.call(['run'])).toBe(1);
     expect(red.out.find(l => l.startsWith('test/x.test.ts'))).toMatch(/RED: .*\[reaches:lib\/inner\.ts\]$/);
     expect(readStateFor(red.dir, pr)!.validation).toMatchObject({ worst: 1 });
+  });
+
+  test('a CLI test that spawns the changed module through a path.join from its own directory runs, and its failure is red', async () => {
+    const universe = ['test/x.test.ts', 'test/z.test.ts', 'tool/test/args.test.ts', 'tool/test/cli-exit.test.ts'];
+    const base = {
+      'tool/cli.ts': "export const out = 'ok';\nif (import.meta.main) console.log(out);\n",
+      'tool/test/args.test.ts': "import { test, expect } from 'bun:test';\nimport { out } from '../cli';\ntest('args', () => expect(typeof out).toBe('string'));\n",
+      'tool/test/cli-exit.test.ts': [
+        "import { test, expect } from 'bun:test';",
+        "import { spawnSync } from 'node:child_process';",
+        "import path from 'node:path';",
+        "test('cli prints ok', () => {",
+        "  const r = spawnSync(process.execPath, ['run', path.join(import.meta.dir, '..', 'cli.ts')], { encoding: 'utf8', timeout: 60_000 });",
+        "  expect(r.stdout.trim()).toBe('ok');",
+        '});',
+      ].join('\n'),
+    };
+    const f = fixture('cli-join', null, { universe, base, pr: { 'tool/cli.ts': "export const out = 'broken';\nif (import.meta.main) console.log(out);\n" } });
+    expect(await f.call(['select'])).toBe(0);
+    expect(f.out).toContain('SELECT\ttool/test/cli-exit.test.ts\tjoins:tool/cli.ts');
+    f.out.length = 0;
+    expect(await f.call(['run'])).toBe(1);
+    expect(f.out.find(l => l.startsWith('tool/test/cli-exit.test.ts'))).toMatch(/RED: .*\[joins:tool\/cli\.ts\]$/);
+    expect(readStateFor(f.dir, pr)!.validation).toMatchObject({ worst: 1 });
   });
 
   test('changed code that no selected test verified is red, never GREEN 0/0; a docs-only change stays green', async () => {
