@@ -1112,6 +1112,60 @@ describe('run, select and declare against a fixture PR tree', () => {
     }
   });
 
+  test('a test file whose name holds control bytes prints escaped in select, declare, run and the summary gstack-pr-body publishes', async () => {
+    // The universe is a filesystem walk: a committed test file's name arrives raw.
+    const SKIPS = 'test/q\u001b[2K\u009b2J\nRESULT GREEN forged.test.ts';
+    // No whitespace: CI's macOS named list can carry it.
+    const WRITES = 'test/w\u001b]0;title\u0007.test.ts';
+    const HOME_ENTRY = 'x\u001b[2K\nRESULT GREEN home';
+    const body = "import { test } from 'bun:test';\nimport { y } from '../lib/y';\ntest.skip('q', () => {});\n";
+    const universe = ['test/x.test.ts', 'test/z.test.ts', SKIPS, WRITES];
+    let tree = '';
+    let lateDeclare = true;
+    const rec = recorder(() => tree);
+    const tool: ToolRunner = (cmd, args, o) => {
+      if (cmd === 'bun' && args[0] === 'test' && lateDeclare) {
+        // The owner declares while the first run is in flight.
+        lateDeclare = false;
+        void f.call(['declare', SKIPS]);
+      }
+      if (cmd === 'bun' && args[0] === 'test' && args[1].endsWith(SKIPS)) return { status: 0, stdout: '', stderr: ' 0 pass\n 1 skip\n 0 fail\nRan 1 test across 1 file. [1.00ms]\n' };
+      if (cmd === 'bun' && args[0] === 'test' && args[1].endsWith(WRITES)) write(o.env!.HOME!, `.gstack/${HOME_ENTRY}`, '1\n');
+      return rec.tool(cmd, args, o);
+    };
+    const workflow = `jobs:\n  free:\n    steps:\n      - uses: oven-sh/setup-bun@v2\n        with:\n          bun-version: 1.4.2\n  macos-named-regressions:\n    steps:\n      - run: |\n          files=(${WRITES})\n`;
+    const f = fixture('odd-test-names', "test('x', () => expect(y).toBe(2));", { base: { [SKIPS]: body, [WRITES]: body, '.github/workflows/free-tests.yml': workflow }, universe, deps: { tool } });
+    tree = f.tree;
+    const summaries: string[] = [];
+    const runOnce = async () => {
+      expect(await f.call(['run'])).toBe(1);
+      summaries.push(...fs.readFileSync(/ summary=(.+)$/.exec(f.out.filter(l => l.startsWith('RESULT RED')).at(-1)!)![1], 'utf8').split('\n'), readStateFor(f.dir, pr)!.validation!.summary);
+    };
+    expect(await f.call(['select'])).toBe(0);
+    await runOnce();
+    const firstSummary = summaries.at(-1)!;
+    // A verdict is recorded: declaring a new file voids it (NOTE).
+    expect(await f.call(['declare', WRITES])).toBe(0);
+    // The declared file leaves the tree: select and run name it missing.
+    universe.splice(universe.indexOf(SKIPS), 1);
+    expect(await f.call(['select'])).toBe(0);
+    await runOnce();
+    for (const l of [...f.out, ...summaries]) expect(/[\x00-\x08\x0a-\x1f\x7f-\x9f]/.test(l), JSON.stringify(l)).toBe(false);
+    // Each still named, escaped, at every site that prints a test file's name.
+    const shown = (p: string) => JSON.stringify(p).replace(/[\x7f-\x9f]/g, ch => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
+    const has = (prefix: string, part = '') => f.out.some(l => l.startsWith(prefix) && l.includes(part));
+    expect(has(`SELECT\t${shown(SKIPS)}\t`)).toBe(true);
+    expect(has('RESULT DECLARED', shown(SKIPS))).toBe(true);
+    expect(has('NOTE ', shown(WRITES))).toBe(true);
+    expect(has(`DECLARED_MISSING\t${shown(SKIPS)}`)).toBe(true);
+    expect(has(`declared ${shown(SKIPS)} RED`)).toBe(true);
+    expect(has(`declared during the run, never ran: ${shown(SKIPS)}`)).toBe(true);
+    // The home write names what the test created there, escaped too.
+    expect(has(`${shown(WRITES)} rc=`, String.raw`\u001b[2K\u000aRESULT GREEN home`)).toBe(true);
+    expect(has(`${shown(WRITES)} (default temp root)`, String.raw`\u001b[2K\u000aRESULT GREEN home`)).toBe(true);
+    expect(firstSummary).toContain(`1 unverified (every test skipped: ${shown(SKIPS)})`);
+  });
+
   test('tests get a real-path TMPDIR; CI\'s macOS named regressions re-run on the unresolved temp root', async () => {
     const real = path.join(ROOT, 'tmp-real');
     const link = path.join(ROOT, 'tmp-link');
