@@ -91,8 +91,9 @@ a block a test printed cannot stand in). A file in which no test passed
 green.
 Each changed file (anything but release files, *.md and FULL triggers)
 needs a passing selected test that exercises it: the file itself, a test
-importing it, pointing a relative path at it or naming it, or for a
-template, resolver or host the skill-rendering tests. A class
+importing it (directly or through the modules it imports), pointing a
+relative path at it or naming it, or for a template, resolver or host
+the skill-rendering tests. A class
 tripwire's pass (egress wiring, sync-spawn timeouts, ...) is not
 coverage. A file with none is red (NO_TESTS), never "0/0 green": declare
 the tests that cover it (a passing declared test covers the change).
@@ -297,11 +298,59 @@ function namesFromDir(src: string, dir: string, f: string, cache: Map<string, Re
   return res.some(re => re.test(src));
 }
 
-/** The changed path an import specifier resolves to, the way bun resolves it (extension, /index, .js naming a .ts). */
-function importedChange(spec: string, changed: Set<string>): string | undefined {
+/** The files an import specifier can name, in bun's order (as written, an extension, /index, .js naming a .ts). */
+function importCandidates(spec: string): string[] {
   const stem = spec.replace(/\.[mc]?js$/, '');
-  const candidates = [spec, ...IMPORT_EXTS.map(e => stem + e), ...IMPORT_EXTS.map(e => `${spec}/index${e}`)];
-  return candidates.find(c => changed.has(c));
+  return [spec, ...IMPORT_EXTS.map(e => stem + e), ...IMPORT_EXTS.map(e => `${spec}/index${e}`)];
+}
+
+/** The changed path an import specifier resolves to, the way bun resolves it. */
+function importedChange(spec: string, changed: Set<string>): string | undefined {
+  return importCandidates(spec).find(c => changed.has(c));
+}
+
+/**
+ * The tree's import graph through non-test modules, read lazily through
+ * `source` (a missing or empty file imports nothing and is not a module).
+ * `closure(start)` walks it breadth-first from a file's own imports and
+ * calls `visit` with every specifier a reached module imports.
+ */
+function importGraph(source: (f: string) => string) {
+  const text = new Map<string, string>();
+  const read = (f: string) => {
+    let s = text.get(f);
+    if (s === undefined) text.set(f, (s = source(f)));
+    return s;
+  };
+  const specs = new Map<string, string[]>();
+  const importsOf = (f: string) => {
+    let s = specs.get(f);
+    if (!s) specs.set(f, (s = relativeImports(f, read(f)).imports));
+    return s;
+  };
+  const resolved = new Map<string, string | null>();
+  const moduleFor = (spec: string) => {
+    let m = resolved.get(spec);
+    if (m === undefined) resolved.set(spec, (m = importCandidates(spec).find(c => !TEST_FILE_RE.test(c) && read(c) !== '') ?? null));
+    return m;
+  };
+  const closure = (start: string, visit: (spec: string) => void): Set<string> => {
+    const seen = new Set<string>([start]);
+    const queue = [start];
+    while (queue.length) {
+      const f = queue.shift()!;
+      for (const spec of importsOf(f)) {
+        if (f !== start) visit(spec);
+        const m = moduleFor(spec);
+        if (m && !seen.has(m)) {
+          seen.add(m);
+          queue.push(m);
+        }
+      }
+    }
+    return seen;
+  };
+  return { read, closure };
 }
 
 /**
@@ -327,9 +376,10 @@ export function selectTests(x: { changed: string[]; universe: string[]; declared
     if (under(f, TEST_ROOTS) || TEST_FILE_RE.test(f)) CLASS_TEST.forEach(t => add(t, `class:test(${f})`));
     if (RELEASE_FILES.includes(f)) CLASS_RELEASE.forEach(t => add(t, `class:release(${f})`));
   }
-  // A test that imports a changed module (one hop, the way bun resolves the
-  // specifier), points a relative path literal at it, names a changed path,
-  // or names a changed bin's basename, exercises it. Tests import without
+  // A test that imports a changed module (directly, or through the non-test
+  // modules it imports, each specifier resolved the way bun resolves it),
+  // points a relative path literal at it, names a changed path, or names a
+  // changed bin's basename, exercises it. Tests import without
   // the extension ('../lib/foo'), which `git diff --name-only` never
   // prints, so the edge is resolved rather than searched for as text.
   const nonRelease = x.changed.filter(f => !RELEASE_FILES.includes(f));
@@ -347,16 +397,27 @@ export function selectTests(x: { changed: string[]; universe: string[]; declared
       return { f, base, tokens, joined: f.includes('/') ? joinedSegmentsRe(f.split('/')) : null };
     });
   const relRes = new Map<string, RegExp[]>();
+  const graph = importGraph(x.source);
   if (importable.size) {
     for (const t of x.universe) {
-      const src = x.source(t);
+      const src = graph.read(t);
       const rel = relativeImports(t, src);
+      const direct = new Set<string>();
       for (const [kind, specs] of [['imports', rel.imports], ['refs', rel.refs]] as const) {
         for (const spec of specs) {
           const hit = importedChange(spec, importable);
-          if (hit && hit !== t) add(t, `${kind}:${hit}`);
+          if (hit && hit !== t) {
+            add(t, `${kind}:${hit}`);
+            direct.add(hit);
+          }
         }
       }
+      // A module the test reaches through the modules it imports (an index
+      // re-exporting it, a helper importing it) runs when the test does.
+      graph.closure(t, spec => {
+        const hit = importedChange(spec, importable);
+        if (hit && hit !== t && !direct.has(hit)) add(t, `reaches:${hit}`);
+      });
       const dir = `${path.posix.dirname(t)}/`;
       for (const n of named) {
         // Every form below contains the basename: a cheap exact pre-filter.
@@ -599,7 +660,7 @@ export function untestedCode(changed: string[], sel: Selection, exists: (f: stri
 /**
  * The changed files in `code` that no passing selected file exercises. A
  * pick covers the path its rule names (`changed` a test file itself,
- * `imports:`, `refs:`, `names:`), and `class:skill(<f>)` covers its
+ * `imports:`, `reaches:`, `refs:`, `names:`), and `class:skill(<f>)` covers its
  * template, resolver or host, since those tests render every template for
  * every host. The other class picks (code, test, release) are tripwires
  * that scan source for one pattern: they run, but never count as
@@ -613,7 +674,7 @@ export function uncoveredCode(code: string[], sel: Selection, passed: (file: str
     if (s.rules.includes('declared')) return [];
     for (const r of s.rules) {
       if (r === 'changed') covered.add(s.file);
-      const m = /^(?:imports|refs|names):(.+)$/.exec(r) ?? /^class:skill\((.+)\)$/.exec(r);
+      const m = /^(?:imports|reaches|refs|names):(.+)$/.exec(r) ?? /^class:skill\((.+)\)$/.exec(r);
       if (m) covered.add(m[1]);
     }
   }
