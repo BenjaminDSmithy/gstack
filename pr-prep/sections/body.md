@@ -87,9 +87,20 @@ above with the flag added only on that yes.
   render again.
 - Exit 45: another pr-prep run holds this PR's lock. Wait for it, then
   run publish again.
-- `RESULT ERROR ... read-back`: a concurrent edit replaced what was sent.
-  The pre-publish body is saved beside the state. Tell the owner; do not
-  re-publish automatically.
+- `RESULT ERROR the read-back is not the body sent` (exit 1): a
+  concurrent edit (a web save, a bot) replaced what was sent; the
+  difference follows, enveloped, and the pre-publish body is saved beside
+  the state. Tell the owner, and never re-publish on your own.
+- `RESULT ERROR ... but the read-back failed` (exit 1): the edit was sent
+  and what GitHub holds is unknown. Tell the owner and ask again
+  (`<gstack-qid:pr-prep-body-publish>`, naming the same sha256); only on
+  that yes run the same publish again. If GitHub holds exactly this body
+  it is recorded with no second edit (`RESULT PUBLISHED ...
+  already-live=yes`); otherwise it is sent again.
+- `RESULT ERROR gh pr edit failed: ...` (exit 1): the read-back shows the
+  live body unchanged, so nothing was published. Report gh's error; a
+  retry is the same publish and is asked again
+  (`<gstack-qid:pr-prep-body-publish>`) like the first.
 
 Each publish prints a reminder: tell the owner to close any open browser
 edit of the description, because saving it overwrites this body and its
