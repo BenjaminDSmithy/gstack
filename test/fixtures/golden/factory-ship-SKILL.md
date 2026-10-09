@@ -1113,7 +1113,9 @@ stage 4's recovery before publication. Otherwise continue to Step 17.
 `origin` is not (a fork PR to someone else's project) is the owner's to write to.
 The check reads the upstream from origin's URL (its GitHub fork parent, plus every
 other GitHub remote), never from gh's default repo. A GitHub Enterprise host
-counts when gh has a login there; its repos print as `<host>/<owner>/<name>`,
+counts when gh has a login there, even one that cannot answer now (that stops
+below; a gh before 2.81 lacks `auth status --json`, so only its own words for a
+missing login rule a host out); its repos print as `<host>/<owner>/<name>`,
 which /pr-prep's watch poll refuses (exit 2), so the owner handles that PR by hand:
 
 ```bash
@@ -1124,7 +1126,9 @@ _ghrepo() {
   case "$_u" in (*/*/*|*[!a-z0-9._/-]*) return 1 ;; (?*/?*) ;; (*) return 1 ;; esac
   [ "$_a" = 0 ] || case "$_h" in (github.com|*.github.com) ;; (*) _s=$(ssh -G "$_h" 2>/dev/null | sed -n 's/^hostname //p' | tr 'A-Z' 'a-z'); _h=${_s:-$_h} ;; esac
   case "$_h" in (github.com|*.github.com) printf '%s\n' "$_u"; return 0 ;; (""|*[!a-z0-9.-]*) return 1 ;; esac
-  case "$(gh auth status --hostname "$_h" --json hosts --jq '.hosts|length' 2>/dev/null)" in ([1-9]*) ;; (*) gh auth status --hostname "$_h" >/dev/null 2>&1 || return 1 ;; esac
+  case "$(gh auth status --hostname "$_h" --json hosts --jq '.hosts|length' 2>/dev/null)" in ([1-9]*) ;; (0) return 1 ;;
+    (*) command -v gh >/dev/null || return 1
+      case "$(gh auth status --hostname "$_h" 2>&1)" in (*"not logged into any"*|*"not found among authenticated"*) return 1 ;; esac ;; esac
   printf '%s/%s\n' "$_h" "$_u"
 }
 _u=$(git remote get-url --push origin 2>/dev/null); _FORK=$(_ghrepo) || { echo "UPSTREAM_PR: none"; exit 0; }

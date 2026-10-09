@@ -174,8 +174,17 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     renamed?: Record<string, string>;
     /** GitHub Enterprise hosts gh has a login for. */
     hosts?: string[];
-    /** A gh from before `auth status --json` (the flag is unknown). */
-    old?: true;
+    /**
+     * A gh from before `auth status --json` (2.81.0), in the words of its
+     * release line: 2.40-2.80 (multi-account) or one before 2.40. The check
+     * reads those words, so each line's are copied from cli/cli's
+     * pkg/cmd/auth/status/status.go at v2.80.0 and v2.39.2.
+     */
+    old?: '2.80' | '2.39';
+    /** A plain `auth status` that words a missing login in a way the check does not know (a later gh's rewording). */
+    reworded?: true;
+    /** No gh on PATH at all. */
+    absent?: true;
     /** Open PR numbers whose head branch is feat/x, per lowercase repo; a repo left out is one gh cannot find. */
     prs?: Record<string, number[]>;
     /** Lowercase repos whose PR lookup fails with a server error (gh can see them, but not now). */
@@ -212,7 +221,13 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
       // when that login fails (gh 2.102); plain `auth status` fails then.
       'case "$*" in',
       `  "auth status --hostname "*" --json hosts --jq .hosts|length") ${g.old ? 'echo "unknown flag: --json" >&2; exit 1' : '[ -f "$d/host-$4" ] && echo 1 || echo 0; exit 0'} ;;`,
-      '  "auth status --hostname "*) [ -f "$d/host-$4" ] && [ ! -f "$d/down" ]; exit ;;',
+      // Plain `auth status` exits 1 both when the host has no login and when
+      // its login cannot answer; only the words tell them apart.
+      '  "auth status --hostname "*) h=$4',
+      `    [ -f "$d/host-$h" ] || { echo ${g.reworded ? '"No session for $h"' : g.old === '2.39' ? '"Hostname \\"$h\\" not found among authenticated GitHub hosts"' : '"You are not logged into any accounts on $h"'} >&2; exit 1; }`,
+      '    echo "$h"',
+      `    [ -f "$d/down" ] && { echo ${g.old === '2.39' ? '"  X $h: authentication failed"' : '"  X Failed to log in to $h account me (keyring)"'}; exit 1; }`,
+      `    echo ${g.old === '2.39' ? '"  ✓ Logged in to $h as me (oauth_token)"' : '"  ✓ Logged in to $h account me (keyring)"'}; exit 0 ;;`,
       'esac',
       ...(g.down ? ['echo "error connecting to api.github.com" >&2; exit 1'] : []),
       'case "$*" in',
@@ -236,6 +251,12 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
       '',
     ].join('\n'), { mode: 0o755 });
     if (g.down) fs.writeFileSync(path.join(dir, 'down'), '');
+    if (g.absent) {
+      // gh sits beside git in Homebrew, so the check's PATH gets only this
+      // dir and the system dirs, and git is reached through a wrapper.
+      fs.rmSync(path.join(dir, 'gh'));
+      fs.writeFileSync(path.join(dir, 'git'), `#!/bin/sh\nexec '${Bun.which('git')}' "$@"\n`, { mode: 0o755 });
+    }
     return dir;
   }
 
@@ -282,10 +303,18 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     // GitHub Enterprise counts when gh has a login for its host; its repos carry the host, so gh asks the right server.
     { name: 'an Enterprise fork with an open upstream PR is open', remotes: { origin: 'https://ghe.acme.test/me/proj.git', upstream: 'https://ghe.acme.test/acme/proj.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.acme.test/me/proj': 'acme/proj' }, prs: { 'ghe.acme.test/acme/proj': [3066] } }, want: 'UPSTREAM_PR: open 3066 ghe.acme.test/acme/proj', code: 0 },
     { name: 'an ssh alias for an Enterprise host is a new fork PR there', remotes: { origin: 'git@work-ghe:me/proj.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.acme.test/me/proj': 'acme/proj' }, prs: { 'ghe.acme.test/acme/proj': [] } }, want: 'UPSTREAM_PR: new ghe.acme.test/acme/proj', code: 0 },
-    { name: 'a gh without auth status --json still finds an Enterprise fork', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, gh: { old: true, hosts: ['ghe.acme.test'], repos: { 'ghe.acme.test/me/proj': 'acme/proj' }, prs: { 'ghe.acme.test/acme/proj': [3066] } }, want: 'UPSTREAM_PR: open 3066 ghe.acme.test/acme/proj', code: 0 },
+    { name: 'a gh without auth status --json still finds an Enterprise fork', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, gh: { old: '2.80', hosts: ['ghe.acme.test'], repos: { 'ghe.acme.test/me/proj': 'acme/proj' }, prs: { 'ghe.acme.test/acme/proj': [3066] } }, want: 'UPSTREAM_PR: open 3066 ghe.acme.test/acme/proj', code: 0 },
     { name: 'an Enterprise fork with gh down there stops', remotes: { origin: 'git@ghe.acme.test:me/proj.git' }, gh: { hosts: ['ghe.acme.test'], down: true }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', code: 1 },
     // gh answers a renamed repo with its new name; a PR on it is still origin's own, whichever remote names it.
     { name: "a renamed Enterprise origin's new name is still its own repo", remotes: { origin: 'https://ghe.acme.test/me/old.git', other: 'https://ghe.acme.test/me/new.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.acme.test/me/old': null }, renamed: { 'ghe.acme.test/me/old': 'me/new' }, prs: { 'ghe.acme.test/me/new': [12] } }, want: 'UPSTREAM_PR: none', code: 0 },
+    // A gh older than 2.81 fails plain `auth status` for a login that cannot answer too: that host is still GitHub, and stops.
+    { name: 'a gh 2.40-2.80 whose Enterprise login cannot answer stops', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, gh: { old: '2.80', hosts: ['ghe.acme.test'], down: true }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', code: 1 },
+    { name: 'a gh before 2.40 whose Enterprise login cannot answer stops', remotes: { origin: 'git@ghe.acme.test:me/proj.git' }, gh: { old: '2.39', hosts: ['ghe.acme.test'], down: true }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', code: 1 },
+    // Only gh's own words for a missing login make a host not GitHub, so a GitLab origin stays none on every gh.
+    { name: 'a gh 2.40-2.80 with no login for the host is not GitHub', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, gh: { old: '2.80', hosts: ['ghe.acme.test'] }, want: 'UPSTREAM_PR: none', code: 0 },
+    { name: 'a gh before 2.40 with no login for the host is not GitHub', remotes: { origin: 'git@gitlab.example.com:me/proj.git' }, gh: { old: '2.39', hosts: ['ghe.acme.test'] }, want: 'UPSTREAM_PR: none', code: 0 },
+    { name: 'a gh with --json is read from its JSON, not its words', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, gh: { reworded: true, hosts: ['ghe.acme.test'] }, want: 'UPSTREAM_PR: none', code: 0 },
+    { name: 'with no gh installed a GitLab origin is none', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, gh: { absent: true }, want: 'UPSTREAM_PR: none', code: 0 },
     { name: 'a host gh has no login for is not GitHub', remotes: { origin: 'https://ghe.other.test/me/proj.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.other.test/me/proj': 'acme/proj' } }, want: 'UPSTREAM_PR: none', code: 0 },
     // Any other failure on an extra remote still stops, and names the remote to fix or remove.
     { name: 'an extra remote whose lookup errors stops and is named', remotes: { origin: 'https://github.com/me/gstack.git', contributor: 'https://github.com/someone/gstack.git' }, gh: { repos: FORK, prs: { 'garrytan/gstack': [] }, broken: ['someone/gstack'] }, want: 'UPSTREAM_PR: lookup failed remote contributor (someone/gstack) - STOP', code: 1 },
@@ -295,7 +324,8 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     for (const [i, c] of cases.entries()) {
       test(`under ${shell}: ${c.name}`, () => {
         const cwd = clone(`up-${si}-${i}`, c.remotes, c.config);
-        const r = run(shell, CHECK, cwd, {}, gh(c.gh));
+        const stub = gh(c.gh);
+        const r = run(shell, CHECK, cwd, c.gh.absent ? { PATH: [stub, '/usr/bin', '/bin'].join(':') } : {}, stub);
         expect(r.out).not.toContain('unexpected');
         const lines = r.out.split('\n');
         expect(lines.filter((l) => l.startsWith('UPSTREAM_PR:')), r.out).toEqual([c.want]);
