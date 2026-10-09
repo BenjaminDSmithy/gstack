@@ -85,15 +85,17 @@ BODY_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<body
 ~/.claude/skills/gstack/bin/gstack-redact --from-file "$TITLE_FILE" --repo-visibility public --json; echo "TITLE_SCAN: exit $?"
 ```
 
-Exit 0 on both: go on. Exit 2: show the owner each MEDIUM finding and
-continue only on their yes to each. Exit 3 (HIGH), or anything else: never
-send; fix the file and scan again. Never edit a file after its scan.
+Exit 0 on both: go on. Exit 2: show the owner each MEDIUM finding. The
+`<gstack-qid:pr-prep-open-pr>` question below names every one, and only
+its yes sends them; never ask about them under another id. Exit 3 (HIGH),
+or anything else: never send; fix the file and scan again. Never edit a
+file after its scan.
 
 Then, in the turn the owner gives the open instruction, ask with
 AskUserQuestion, with `<gstack-qid:pr-prep-open-pr>` in the question,
 naming the upstream repo, `<github-username>:<branch-name>` at the
-`PR_PREP_OPEN_HEAD` SHA, the base and the title. On yes, send the scanned
-files:
+`PR_PREP_OPEN_HEAD` SHA, the base, the title and every MEDIUM finding the
+scan printed. On yes, send the scanned files:
 
 ```bash
 TITLE_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<title-file-name>"

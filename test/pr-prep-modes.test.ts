@@ -195,7 +195,12 @@ describe('one-way doors', () => {
     expectMentions(safety, [['stored', 'preference', 'never']], 'Write safety');
   });
 
-  test('a stored never-ask cannot auto-decide a registered write; the same question under an ad-hoc id would', () => {
+  /**
+   * `gstack-question-preference --check` for each [id, summary], with every
+   * id stored as never-ask. --write refuses never-ask on a one-way id, so
+   * this plants the file a pre-#2488 write could have left.
+   */
+  function checkWithNeverAsk(cases: [string, string][]): string[] {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-prep-qpref-'));
     try {
       const env = { ...process.env, GSTACK_STATE_ROOT: home, GSTACK_HOME: home };
@@ -203,17 +208,53 @@ describe('one-way doors', () => {
       const q = (args: string[], input?: string) => spawnSync(bin, args, { cwd: ROOT, env, input, encoding: 'utf8', timeout: 60_000 });
       expect(q(['--read']).status).toBe(0);
       const [slug] = fs.readdirSync(path.join(home, 'projects'));
-      // --write refuses never-ask on a one-way id, so plant the file a pre-#2488 write could have left.
-      const adHoc = 'pr-prep-push-confirm';
-      const prefs = Object.fromEntries([...Object.values(WRITE_QIDS), adHoc].map(id => [id, 'never-ask']));
-      fs.writeFileSync(path.join(home, 'projects', slug, 'question-preferences.json'), JSON.stringify(prefs));
-      const summary = 'Push the staged sync to PR 3066 (origin pr/hook-check-gaps, 1a2b3c4 -> 4d5e6f7, version 1.91.35.0)?';
-      for (const id of Object.values(WRITE_QIDS)) {
-        expect(q(['--check', id, '--summary-stdin'], summary).stdout.trim().split('\n')[0], id).toBe('ASK_NORMALLY');
-      }
-      expect(q(['--check', adHoc, '--summary-stdin'], summary).stdout.trim().split('\n')[0]).toBe('AUTO_DECIDE');
+      fs.writeFileSync(path.join(home, 'projects', slug, 'question-preferences.json'), JSON.stringify(Object.fromEntries(cases.map(([id]) => [id, 'never-ask']))));
+      return cases.map(([id, summary]) => q(['--check', id, '--summary-stdin'], summary).stdout.trim().split('\n')[0]);
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
+  }
+
+  test('a stored never-ask cannot auto-decide a registered write; the same question under an ad-hoc id would', () => {
+    const summary = 'Push the staged sync to PR 3066 (origin pr/hook-check-gaps, 1a2b3c4 -> 4d5e6f7, version 1.91.35.0)?';
+    const ids = [...Object.values(WRITE_QIDS), 'pr-prep-push-confirm'];
+    expect(checkWithNeverAsk(ids.map(id => [id, summary]))).toEqual([...Object.values(WRITE_QIDS).map(() => 'ASK_NORMALLY'), 'AUTO_DECIDE']);
+  }, 120_000);
+
+  // Approvals asked after a write's first yes that let it send more than that
+  // yes saw: a flag accepting what the helper refused, or a MEDIUM redaction
+  // finding. Each is found by the token its site uses.
+  const FOLLOW_UPS: [mode: string, token: string, summary: string][] = [
+    ['body', '--accept-live-diff', 'The live body of garrytan/gstack PR 3066 differs from the last publish (a maintainer edit). Accept the live diff and publish the regenerated body over it?'],
+    ['body', '--confirm-redaction', 'The body for PR 3066 has a MEDIUM email finding. Confirm the redaction finding and publish?'],
+    ['body', '--accept-rewritten-stale', 'The stale push 1a2b3c4d5e6f is no longer in the PR head after a rebase. Accept it and publish?'],
+    ['open', 'MEDIUM', 'The draft PR body has a MEDIUM email finding. Send it as is?'],
+  ];
+  /** Paragraphs and list items (a bullet with its wrapped lines) of a section. */
+  const blocks = (text: string) => text.split(/\n\s*\n|\n(?=- )/);
+  const followUpSites = () => FOLLOW_UPS.flatMap(([mode, token, summary]) => {
+    const sites = blocks(section(mode)).filter(b => b.includes(token));
+    expect(sites.length, `the ${mode} section no longer mentions ${token}`).toBeGreaterThan(0);
+    return sites.map(site => ({ mode, token, summary, site, ids: [...site.matchAll(/<gstack-qid:([a-z0-9-]+)>/g)].map(m => m[1]) }));
+  });
+
+  test('every follow-up yes that widens a write is asked again under a registered one-way id, named at its site', () => {
+    // D2: the write's first yes never saw the live diff, the MEDIUM finding
+    // or the rewritten push. Asked under an ad-hoc id, a stored never-ask
+    // answers it, and the flag goes out with no yes from the owner.
+    for (const { mode, token, site, ids } of followUpSites()) {
+      expect(ids, `${mode}: the site naming ${token} carries no <gstack-qid:...>:\n${site}`).not.toEqual([]);
+      for (const id of ids) expect(getQuestion(id), `${mode} ${token}: ${id}`).toMatchObject({ skill: 'pr-prep', door_type: 'one-way' });
+    }
+    const safety = between(SKILL, '## Write safety (every mode)', '\n---\n');
+    expectMentions(safety, [['flag', 'registered id', 'yes']], 'Write safety');
+  });
+
+  test('a stored never-ask cannot auto-decide a follow-up under the id its site names; under an ad-hoc id it would', () => {
+    const named = followUpSites().flatMap(({ summary, ids }) => ids.map((id): [string, string] => [id, summary]));
+    expect(named.length).toBeGreaterThan(0);
+    expect(checkWithNeverAsk(named)).toEqual(named.map(() => 'ASK_NORMALLY'));
+    // The {skill}-{slug} ids an agent makes up otherwise, as round 3 measured them.
+    expect(checkWithNeverAsk([['pr-prep-accept-live-diff', FOLLOW_UPS[0][2]], ['pr-prep-confirm-redaction', FOLLOW_UPS[1][2]]])).toEqual(['AUTO_DECIDE', 'AUTO_DECIDE']);
   }, 120_000);
 });

@@ -44,16 +44,24 @@ the body's sha256 from render's `RESULT` line. On yes, publish that line's
 ~/.claude/skills/gstack/bin/gstack-pr-body publish --pr <pr-number> --repo <upstream-repo> --body "<rendered file>" --body-sha256 <sha256 from render> --yes
 ```
 
+A refusal that a flag can accept (`--accept-live-diff`,
+`--accept-rewritten-stale`, `--confirm-redaction`) asks to send more than
+the owner's yes saw. Ask again under the same
+`<gstack-qid:pr-prep-body-publish>`, never an ad-hoc id, naming the
+sha256 and the exact value the flag will carry, and re-run the publish
+above with the flag added only on that yes.
+
 - Exit 20 naming the body's sha256: the file is not the body the owner
   approved (it was re-rendered). Ask again with the new sha256.
 - Exit 20 naming the facts block: it is not the one render generated for
   this head. Render again; never edit the facts block by hand.
 - Exit 20 with `live-diff=<x>`: the live body is not the one last
   published here (an owner or maintainer edit, or the first publish over a
-  hand-written body). Show the owner the enveloped diff, and only after
-  they accept it re-run with `--accept-live-diff <x>`. `<x>` pairs that
-  live body with this rendered body: if either one changes, publish shows
-  a new diff and a new value.
+  hand-written body). Show the owner the enveloped diff and ask again
+  (`<gstack-qid:pr-prep-body-publish>`, naming `live-diff=<x>`); only on
+  that yes re-run with `--accept-live-diff <x>`. `<x>` pairs that live
+  body with this rendered body: if either one changes, publish shows a new
+  diff and a new value.
 - Exit 30 from the pre-write gate (a latched P0 or unacknowledged P1, an
   UNVERIFIED poll, or a PR that is not open): the watch section says what
   to do. `RESULT PRECONDITION the pre-write gate ran ... before the edit`:
@@ -65,12 +73,15 @@ the body's sha256 from render's `RESULT` line. On yes, publish that line's
 - Exit 30 saying the stale push is not in the PR head's history: the
   branch was rewritten after that push (a force-push, or GitHub's "Update
   branch" rebase), and sync push and retrigger stay refused until a
-  publish. Find out what replaced the push and tell the owner. Only on
-  their yes, re-run publish with `--accept-rewritten-stale <sha>`, the sha
-  the refusal printed.
-- Exit 22: a redaction finding. HIGH blocks. For each MEDIUM, show the
-  owner the finding, and pass its key in `--confirm-redaction` only after
-  their yes. Versions the repo already published are not findings.
+  publish. Find out what replaced the push, tell the owner, and ask again
+  (`<gstack-qid:pr-prep-body-publish>`, naming that sha); only on that yes
+  re-run publish with `--accept-rewritten-stale <sha>`, the sha the
+  refusal printed.
+- Exit 22: a redaction finding. HIGH blocks. Show the owner each MEDIUM
+  finding and ask again (`<gstack-qid:pr-prep-body-publish>`, naming every
+  MEDIUM key); only on that yes re-run with their keys in
+  `--confirm-redaction <key,...>`. Versions the repo already published are
+  not findings.
 - Exit 40 (render or publish): the PR's head or base branch is gone from
   its remote, or kept moving during the fetch. Find out what moved, then
   render again.
