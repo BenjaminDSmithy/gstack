@@ -998,6 +998,16 @@ function cmdRun(c: Ctx): number {
   }
 }
 
+/**
+ * Whether git may fetch a missing object here from a promisor remote: a
+ * partial clone. git 2.56's `clone --filter` sets remote.<name>.promisor
+ * and no extensions.partialClone, which older clones set. A promisor key
+ * set to false counts too; the cost is one more read of blobs already held.
+ */
+function isPartialClone(c: Ctx): boolean {
+  return c.d.git(['config', '--get-regexp', '^(extensions\\.partialclone|remote\\..+\\.promisor)$'], { cwd: c.tree }).status === 0;
+}
+
 /** What CI's secret-scan step diffs: all but the fixtures and baselines that hold credential-shaped strings on purpose. */
 const SECRET_SCAN_PATHSPEC = ['.', ':(exclude)test/fixtures/**', ':(exclude)browse/test/fixtures/**', ':(exclude)docs/evals/**', ':(exclude)test/helpers/security-bench*'];
 
@@ -1021,8 +1031,20 @@ const SECRET_SCAN_PATHSPEC = ['.', ':(exclude)test/fixtures/**', ':(exclude)brow
  * tree's tracked .gitattributes, and no GIT_* variable of the caller's.
  * --no-ext-diff and --no-textconv (diff.external, a driver's command or
  * textconv) stay for a config that reaches it anyway.
+ *
+ * A partial clone holds only the blobs it has fetched, and that git dir has
+ * no promisor remote to fetch the rest: the merge base's side of a changed
+ * file, never checked out, fails the diff with 'unable to read'. So the
+ * caller's repo fetches them first, in one batch. A diff that prints a stat
+ * reads both sides of every path (--quiet stops at the first change, with
+ * the rest unfetched); its output is discarded, and --no-replace-objects
+ * keeps it on the objects the own git dir reads, which has no replace refs.
  */
 function secretScanDiff(c: Ctx, mb: string, sha: string, ciGitConfig: string, tmp: string): { r: GhResult; what: string } {
+  if (isPartialClone(c)) {
+    const r = c.d.git(['--no-replace-objects', 'diff', '--numstat', '--no-renames', '--no-ext-diff', '--no-textconv', mb, sha, '--', ...SECRET_SCAN_PATHSPEC], { cwd: c.tree });
+    if (r.status !== 0 || r.error) return { r, what: 'partial-clone blob fetch' };
+  }
   const objects = path.resolve(c.tree, gitOk(c.d, c.tree, ['rev-parse', '--git-path', 'objects'], 'git rev-parse').trim());
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(c.d.env)) if (!k.startsWith('GIT_') && v !== undefined) env[k] = v;

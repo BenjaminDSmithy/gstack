@@ -1441,6 +1441,55 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(f.out[0]).toStartWith('RESULT RED');
   });
 
+  test('the secret scan in a partial clone fetches the blobs it diffs first; with the promisor remote gone it is red and names the fetch', async () => {
+    // A blob:none clone holds the blobs it checked out, not the merge base's side of a changed file, and
+    // the scan's own git dir has no promisor remote to fetch that blob from.
+    const SHAPES = ['partial clone', 'linked worktree of a partial clone', 'promisor remote gone'];
+    for (const shape of SHAPES) {
+      let tree = '';
+      const rec = recorder(() => tree);
+      const scan = secretScanner(rec);
+      const f = fixture(`scan-partial-${shape.replace(/\W/g, '-')}`, "test('x', () => expect(y).toBe(2));", { ...SCAN_FX, deps: { tool: scan.tool } });
+      const up = path.join(path.dirname(f.tree), 'acme', 'fx.git');
+      git(f.tree, 'push', '-q', 'upstream', 'pr/v');
+      git(up, 'config', 'uploadpack.allowFilter', 'true');
+      git(up, 'config', 'uploadpack.allowAnySHA1InWant', 'true');
+      const clone = path.join(path.dirname(f.tree), 'partial');
+      git(ROOT, 'clone', '-q', '--no-checkout', '--filter=blob:none', `file://${up}`, clone);
+      git(clone, 'checkout', '-q', 'pr/v');
+      tree = clone;
+      if (shape === 'linked worktree of a partial clone') {
+        tree = path.join(path.dirname(f.tree), 'partial-scratch');
+        git(clone, 'worktree', 'add', '-q', '--detach', tree, 'HEAD');
+      }
+      const mbBlob = git(clone, 'rev-parse', 'main:lib/y.ts');
+      const held = () => spawnSync('git', ['cat-file', '-e', mbBlob], { cwd: clone, timeout: 30_000, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_NO_LAZY_FETCH: '1' } }).status === 0;
+      expect(held(), shape).toBe(false);
+      // Staged as pr-sync stages it, so the base needs no fetch of its own.
+      fs.mkdirSync(f.dir, { recursive: true });
+      fs.writeFileSync(path.join(f.dir, 'sync.json'), JSON.stringify({ repo: 'acme/fx', number: 5, scratch: tree, base: git(clone, 'rev-parse', 'main'), h0: git(clone, 'rev-parse', 'HEAD') }));
+      if (shape === 'promisor remote gone') fs.renameSync(up, `${up}.gone`);
+      let rc: number;
+      try {
+        rc = await f.call(['run']);
+      } finally {
+        if (shape === 'promisor remote gone') fs.renameSync(`${up}.gone`, up);
+      }
+      expect(rec.calls.some(c => c.line.startsWith('bun test test/x.test.ts ')), shape).toBe(true);
+      expect(rc, shape).toBe(1);
+      expect(f.out[0], shape).toStartWith('RESULT RED');
+      if (shape === 'promisor remote gone') {
+        expect(f.out.find(l => l.startsWith('mirror secret-scan')), shape).toMatch(/^mirror secret-scan RED: partial-clone blob fetch failed \(exit \d+: .+\); nothing was scanned$/);
+        expect(scan.scanned, shape).toHaveLength(0);
+      } else {
+        expect(scan.scanned, shape).toHaveLength(1);
+        expect(scan.scanned[0], shape).toMatch(/^\+export const y = 2; \/\/ ZZSECRET$/m);
+        expect(f.out, shape).toContain('mirror secret-scan rc=1');
+        expect(held(), shape).toBe(true);
+      }
+    }
+  });
+
   test('gen:skill-docs output that is not committed is red', async () => {
     let tree = '';
     const rec = recorder(() => tree, { onCall: l => { if (l === 'bun run gen:skill-docs --host all') write(tree, 'drift/SKILL.md', 'stale\n'); } });
