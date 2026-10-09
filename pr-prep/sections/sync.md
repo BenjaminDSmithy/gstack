@@ -113,4 +113,17 @@ The push re-polls the watch, requires the green validation of that SHA,
 refuses if the remote head moved, and pushes fast-forward only. Exit 32:
 publish the body first (the body mode). Exit 40: the PR head moved; abort
 and sync again. Exit 41: a hook or the remote refused the push; stop and
-report it. After the push the PR body is stale: run the body mode now.
+report it.
+
+Exit 42 (`RESULT UNVERIFIED`): nothing shows the commit reached the PR, so
+nothing was recorded (the staged sync, its scratch and the local branch
+are as they were). Show the owner the NOTE lines, and check where
+`git remote get-url --push <head remote>` sends a push. Push again only on
+the owner's new yes (`<gstack-qid:pr-prep-sync-push>`, naming the CHANGED
+files or the waived suite again if the first push carried an `--accept-*`
+flag), with the same `--accept-*` flags; the NOTE names that command. Once
+the commit shows up, that run records the push and sends nothing; while
+the head remote still lacks it, it pushes again. If the commit never shows
+up, abort and sync again.
+
+After the push the PR body is stale: run the body mode now.
