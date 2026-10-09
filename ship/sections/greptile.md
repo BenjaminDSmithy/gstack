@@ -20,11 +20,12 @@ Only `PR: exists` dispatches. `PR: skip (<reason>)` → do not dispatch; record
 **Whose PR is it?** Before the dispatch, run Step 17's **Upstream PR check**
 block from this skill's SKILL.md now (it only reads, never pushes) and keep its line:
 
-- `none`: no fork upstream; the replies below apply.
-- `new <repo>` or `open <number> <repo>`: origin is a fork, so the PR may be on
-  someone else's repo, and every write there is the owner's. Triage is
-  report-only: print each classification and post no reply. A fix stays local;
-  Step 17 does not push to an open upstream PR. A reply there posts only after
+- `none`: origin is not a fork and gh's default repo, where this step's `gh`
+  looks, is origin's own; the replies below apply.
+- `new <repo>` or `open <number> <repo>`: origin is a fork, or gh's default repo
+  is another, so the PR may be on someone else's repo, and every write there is
+  the owner's. Triage is report-only: print each classification and post no
+  reply. A fix stays local; Step 17 does not push to an open upstream PR. A reply there posts only after
   AskUserQuestion with `<gstack-qid:ship-upstream-pr-reply>`, asked in the turn
   that posts it, naming the PR URL (`gh pr view --json url -q .url`), the
   comment permalink and the reply text; one yes covers one reply. A Fix-now or
