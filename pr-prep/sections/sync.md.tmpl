@@ -6,7 +6,7 @@ Every step is a helper; the judgement left to you is in the STOP lines.
 ### 1. Signals first
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-pr-watch poll --pr <number> --repo <upstream owner/name>
+~/.claude/skills/gstack/bin/gstack-pr-watch poll --pr <pr-number> --repo <upstream-repo>
 ```
 
 - Exit 0: quiet, go on.
@@ -24,7 +24,7 @@ Every step is a helper; the judgement left to you is in the STOP lines.
 ### 2. Plan, then merge
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-pr-sync plan --pr <number> --repo <upstream owner/name>
+~/.claude/skills/gstack/bin/gstack-pr-sync plan --pr <pr-number> --repo <upstream-repo>
 ```
 
 - Exit 0: only release files or generated files conflict, which the merge
@@ -36,7 +36,7 @@ Every step is a helper; the judgement left to you is in the STOP lines.
   commits): STOP and report its RESULT line.
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-pr-sync merge --pr <number> --repo <upstream owner/name>
+~/.claude/skills/gstack/bin/gstack-pr-sync merge --pr <pr-number> --repo <upstream-repo>
 ```
 
 This merges upstream's base (never a rebase), takes upstream's release
@@ -58,13 +58,13 @@ A staged sync that will not be pushed (a RED you cannot fix, or the owner
 says no in step 4) is removed with:
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-pr-sync abort --pr <number> --repo <upstream owner/name>
+~/.claude/skills/gstack/bin/gstack-pr-sync abort --pr <pr-number> --repo <upstream-repo>
 ```
 
 ### 3. Validate the exact commit
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-pr-validate run --pr <number> --repo <upstream owner/name>
+~/.claude/skills/gstack/bin/gstack-pr-validate run --pr <pr-number> --repo <upstream-repo>
 ```
 
 It validates the staged scratch worktree after CI's own preconditions.
@@ -87,17 +87,18 @@ change, the validation summary (with any `FULL waived`), the code-diff
 proof (with the `CHANGED` files when it is CHANGED), and any `mergeable-*`
 signal from step 1.
 
-On yes, if step 1 showed a `mergeable-*` signal, record that the owner has
-now read it, with the `<id>@P1` tokens from the poll's NEXT line:
+On the owner's yes, and only then, ack each `mergeable-*` signal step 1
+showed (the owner has now read it), with the `<signal id>@P1` tokens from
+the poll's NEXT line:
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-pr-watch ack --pr <number> --repo <upstream owner/name> <signal id>@P1
+~/.claude/skills/gstack/bin/gstack-pr-watch ack --pr <pr-number> --repo <upstream-repo> <signal id>@P1
 ```
 
 Then push:
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-pr-sync push --pr <number> --repo <upstream owner/name> --yes
+~/.claude/skills/gstack/bin/gstack-pr-sync push --pr <pr-number> --repo <upstream-repo> --yes
 ```
 
 Add `--accept-diff-change` only when that yes answered a question naming

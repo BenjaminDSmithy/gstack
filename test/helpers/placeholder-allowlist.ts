@@ -30,6 +30,14 @@ const QUOTED = /^[^'"`$\\\n]+$/;
 const DATE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
 const NUMBER = /^-?[0-9]+(?:\.[0-9]+)?$/;
 const URL = /^https?:\/\/[^'"`$\\\s<>]+$/;
+/** GitHub owner/name: a login, then a repo name that is not `.` or `..`. */
+const GH_REPO = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/;
+/** A full git object id: SHA-1 (40 hex) or SHA-256 (64 hex). */
+const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+/** gstack-pr-watch's P0/P1 signal ids (lib/pr-watch.ts signalsFrom); P2 ids are never acked. */
+const SIGNAL_ID = /^(?:(?:comment|review|xref):[0-9]+|(?:ref|absorbed):[0-9a-f]{12}|mergeable:(?:dirty|behind):[0-9a-f]{0,12}|closed-unmerged(?::[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z)?)$/;
+/** An absolute path inside one PR's state dir (lib/pr-context.ts prStateDir), quoted-only. */
+const prStateFile = (file: string) => new RegExp(`^/[^'"\`$\\\\\\n]*/projects/[A-Za-z0-9._-]+/pr-drafts/[A-Za-z0-9._-]+/${file}$`);
 const oneOf = (...alts: string[]) => new RegExp(`^(?:${alts.map(a => a.replace(/[.*+?^${}()|[\]\\/-]/g, '\\$&')).join('|')})$`);
 
 export const IDENTIFIER_PLACEHOLDERS: Record<string, IdentifierGrammar> = {
@@ -182,4 +190,16 @@ export const IDENTIFIER_PLACEHOLDERS: Record<string, IdentifierGrammar> = {
     what: 'gstack-gbrain-sync flags (space-separated; --sources takes one comma-separated type list)',
     list: true,
   },
+
+  // /pr-prep: the upstream PR and repo, and values the pr-* helpers printed.
+  '<pr-number>': { grammar: NUM, what: 'upstream PR number (the digits of a bare number or a pull URL, never #N)' },
+  '<upstream-repo>': { grammar: GH_REPO, what: 'upstream repo as owner/name' },
+  '<PR_PREP_BASE repo>': { grammar: GH_REPO, what: 'owner/name before the @ on the audit\'s PR_PREP_BASE line' },
+  '<PR_PREP_BASE sha>': { grammar: OBJECT_ID, what: 'base commit on the audit\'s PR_PREP_BASE line' },
+  '<signal id>': { grammar: SIGNAL_ID, what: 'P0/P1 signal id from gstack-pr-watch poll (its SIGNAL and NEXT lines)' },
+  '<level>': { grammar: oneOf('P0', 'P1'), what: 'the level poll showed the owner for that signal' },
+  '<sha256 from render>': { grammar: /^[0-9a-f]{12}$/, what: 'sha256= on gstack-pr-body render\'s RESULT line' },
+  '<rendered file>': { grammar: prStateFile('pr-body-[0-9]{4}-[0-9]{2}-[0-9]{2}\\.md'), what: 'body= path on gstack-pr-body render\'s RESULT line', quoted: true },
+  '<drafted message file>': { grammar: prStateFile('ci-retrigger-[0-9]+\\.txt'), what: 'message= path on gstack-pr-ci-triage\'s RESULT DRAFTED line', quoted: true },
+  '<raw fetches dir>': { grammar: /^\/[^'"`$\\\n]*\/gstack-pr-prep\.[A-Za-z0-9]{6}$/, what: 'directory on the audit\'s `raw fetches:` line (Step 3 mktemp -d)', quoted: true },
 };

@@ -11,7 +11,7 @@ when it is missing), build it from the live body. Read the live body only
 through the envelope:
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-issue-guard pr-body <number> --repo <upstream owner/name>
+~/.claude/skills/gstack/bin/gstack-issue-guard pr-body <pr-number> --repo <upstream-repo>
 ```
 
 Then write the template with the Write tool. Keep the owner's prose and
@@ -22,7 +22,7 @@ any line that states another PR's version claim.
 ### 2. Render
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-pr-body render --pr <number> --repo <upstream owner/name>
+~/.claude/skills/gstack/bin/gstack-pr-body render --pr <pr-number> --repo <upstream-repo>
 ```
 
 `RESULT REFUSED` (exit 20) with `LOST` lines: the new body would drop a
@@ -35,10 +35,11 @@ around a refusal.
 
 Show the owner what changes, then AskUserQuestion, with
 `<gstack-qid:pr-prep-body-publish>` in the question, naming the PR number and
-the body's sha256 from render's `RESULT` line. On yes:
+the body's sha256 from render's `RESULT` line. On yes, publish that line's
+`body=` file with its `sha256=`:
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-pr-body publish --pr <number> --repo <upstream owner/name> --body <rendered file> --body-sha256 <sha256 from render> --yes
+~/.claude/skills/gstack/bin/gstack-pr-body publish --pr <pr-number> --repo <upstream-repo> --body "<rendered file>" --body-sha256 <sha256 from render> --yes
 ```
 
 - Exit 20 naming the body's sha256: the file is not the body the owner

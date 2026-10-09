@@ -1,7 +1,7 @@
 ## Mode: ci (a Windows Free Tests shard failed)
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-pr-ci-triage run --pr <number> --repo <upstream owner/name>
+~/.claude/skills/gstack/bin/gstack-pr-ci-triage run --pr <pr-number> --repo <upstream-repo>
 ```
 
 - `RESULT DRAFTED`: every failed shard is a known runner flake on the
@@ -24,10 +24,11 @@ A fork contributor cannot re-run upstream jobs, so the remedy is one empty
 `ci:` commit. Ask the owner with AskUserQuestion, with
 `<gstack-qid:pr-prep-ci-retrigger-push>` in the question: PR number, run,
 shard, class, and the head the draft is bound to (`head` in the binding
-file the RESULT line names). On yes:
+file the RESULT line names). On yes, push the `message=` file that line
+names:
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-pr-sync retrigger --pr <number> --repo <upstream owner/name> --message <drafted message file> --yes
+~/.claude/skills/gstack/bin/gstack-pr-sync retrigger --pr <pr-number> --repo <upstream-repo> --message "<drafted message file>" --yes
 ```
 
 retrigger refuses (exit 30) a draft that is not bound to the PR's current
@@ -41,5 +42,5 @@ For disclosure (never as clearance), the per-day flake counts across
 upstream runs:
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-pr-ci-triage onset --repo <upstream owner/name>
+~/.claude/skills/gstack/bin/gstack-pr-ci-triage onset --repo <upstream-repo>
 ```

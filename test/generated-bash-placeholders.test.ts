@@ -17,6 +17,9 @@ import * as path from 'path';
 import { IDENTIFIER_PLACEHOLDERS } from './helpers/placeholder-allowlist';
 import { generateTestFailureTriage } from '../scripts/resolvers/preamble';
 import { freeTextFileBash } from '../scripts/resolvers/free-text-file';
+import { parsePrRef, prStateDir, topicFor } from '../lib/pr-context';
+import { SEED_PROXIES, signalsFrom } from '../lib/pr-watch';
+import { writeRetriggerDraft } from '../lib/pr-ci-triage';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-free-text-'));
@@ -147,11 +150,103 @@ describe('identifier grammars (CEO-12, ENG-8)', () => {
   });
 
   test('numeric ids are digits only', () => {
-    for (const key of ['<comment-id>', '<PID>', '<run-id>', '<check-number>']) {
+    for (const key of ['<comment-id>', '<PID>', '<run-id>', '<check-number>', '<pr-number>']) {
       expect(IDENTIFIER_PLACEHOLDERS[key].grammar.test('12345')).toBe(true);
       expect(IDENTIFIER_PLACEHOLDERS[key].grammar.test('123 4')).toBe(false);
       expect(IDENTIFIER_PLACEHOLDERS[key].grammar.test('0x1f')).toBe(false);
     }
+  });
+});
+
+describe('/pr-prep identifiers take what its helpers print, and nothing else', () => {
+  const P = IDENTIFIER_PLACEHOLDERS;
+  const takes = (key: string, values: string[]) => {
+    for (const v of values) expect(P[key].grammar.test(v), `${key} rejected ${JSON.stringify(v)}`).toBe(true);
+  };
+  const refuses = (key: string, values: string[]) => {
+    for (const v of values) expect(P[key].grammar.test(v), `${key} accepted ${JSON.stringify(v)}`).toBe(false);
+  };
+
+  test('a PR number is the digits of a bare number or a pull URL, never #N', () => {
+    takes('<pr-number>', ['3066', String(parsePrRef('https://github.com/garrytan/gstack/pull/3066'))]);
+    refuses('<pr-number>', ['#3066', 'https://github.com/garrytan/gstack/pull/3066', 'garrytan/gstack#3066', 'pr3066', '3066a', '', '-1']);
+  });
+
+  test('a repo is a GitHub owner/name', () => {
+    for (const key of ['<upstream-repo>', '<PR_PREP_BASE repo>']) {
+      takes(key, ['garrytan/gstack', 'BenjaminDSmithy/gstack', 'a-1/x.y_z-w']);
+      refuses(key, ['gstack', 'garrytan/gstack/pull', '-x/gstack', 'garrytan/..', 'garrytan/.', '/gstack', 'garrytan/', `${'a'.repeat(40)}/x`]);
+    }
+  });
+
+  test('the PR_PREP_BASE sha is a full object id as git rev-parse prints it, SHA-1 or SHA-256', () => {
+    const ids = ['sha1', 'sha256'].map(format => {
+      const repo = fs.mkdtempSync(path.join(tmp, `base-${format}-`));
+      for (const args of [['init', '-q', `--object-format=${format}`], ['commit', '-q', '--allow-empty', '-m', 'base']]) {
+        const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { cwd: repo, encoding: 'utf8', timeout: 30_000 });
+        expect(r.status, r.stderr).toBe(0);
+      }
+      return spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8', timeout: 30_000 }).stdout.trim();
+    });
+    expect(ids.map(id => id.length)).toEqual([40, 64]);
+    takes('<PR_PREP_BASE sha>', ids);
+    refuses('<PR_PREP_BASE sha>', [ids[0].slice(0, 12), `${ids[0]}0`, 'HEAD', 'origin/main', `${ids[0].slice(0, 39)}^`]);
+  });
+
+  test('every P0/P1 signal id gstack-pr-watch latches is a <signal id> at a <level>', () => {
+    const fx = (f: string) => JSON.parse(fs.readFileSync(path.join(ROOT, 'test', 'fixtures', 'pr-watch', f), 'utf8'));
+    const proxies = new Set(SEED_PROXIES);
+    const maintainers = new Set(['garrytan']);
+    // Recorded #3032 (superseded, cross-referenced, closed, referenced) and #3066 (dirty) ...
+    const recorded = [3032, 3066].flatMap(n => signalsFrom({
+      number: n, self: 'BenjaminDSmithy', proxies, maintainers, absorbed: [],
+      pull: fx(`pull-${n}.json`), comments: fx(`comments-${n}.json`), reviews: fx(`reviews-${n}.json`), timeline: fx(`timeline-${n}.json`),
+    }));
+    // ... and the branches neither reached: a review, a mention, absorption on the base, a behind branch.
+    const sha = '0123456789abcdef0123456789abcdef01234567';
+    const synthetic = signalsFrom({
+      number: 7, self: 'me', proxies, maintainers,
+      pull: { state: 'open', merged: false, mergeable_state: 'behind', head: { sha } },
+      comments: [{ id: 11, user: { login: 'garrytan' }, author_association: 'OWNER', body: 'Can you rebase?' }],
+      reviews: [{ id: 12, user: { login: 'someone' }, author_association: 'NONE', state: 'CHANGES_REQUESTED', body: '' }],
+      timeline: [{ event: 'cross-referenced', actor: { login: 'garrytan' }, source: { issue: { number: 9, user: { login: 'someone' }, author_association: 'NONE' } } }],
+      absorbed: [{ sha, credit: false, cites: true }, { sha: sha.replace('0', 'f'), credit: false, mentions: true }],
+    });
+    const latched = [...recorded, ...synthetic].filter(s => s.level === 'P0' || s.level === 'P1');
+    expect([...new Set(latched.map(s => /^(mergeable:\w+|[a-z-]+)/.exec(s.id)![1]))].sort())
+      .toEqual(['absorbed', 'closed-unmerged', 'comment', 'mergeable:behind', 'mergeable:dirty', 'ref', 'review', 'xref']);
+    for (const s of latched) {
+      takes('<signal id>', [s.id]);
+      takes('<level>', [s.level]);
+    }
+    refuses('<level>', ['P2', 'p1']);
+    refuses('<signal id>', ['comment:1;id', 'comment:', 'ref:XYZ', 'comment:1@P1', 'renamed:2026-10-06T23:44:13Z']);
+  });
+
+  test("the body sha256 is the 12 hex render prints; the rendered body and the ci: draft are files in the PR's state dir", () => {
+    takes('<sha256 from render>', ['0123456789ab']);
+    refuses('<sha256 from render>', ['0123456789a', '0123456789abc', '0123456789AB', 'sha256=0123456789ab']);
+    // A state root with a space in it, as a home directory can have.
+    const env = { GSTACK_STATE_ROOT: path.join(tmp, 'state root'), GSTACK_PROJECT_SLUG: 'garrytan-gstack' };
+    const dir = prStateDir({ cwd: tmp, topic: topicFor('pr/hook-check-gaps'), env });
+    const rendered = path.join(dir, 'pr-body-2026-10-09.md');
+    takes('<rendered file>', [rendered]);
+    refuses('<rendered file>', ['pr-body-2026-10-09.md', path.join(dir, 'body.tmpl.md'), rendered.replace('state root', "it's"), rendered.replace('state root', '$(id)'), '/etc/passwd']);
+    const draft = writeRetriggerDraft(dir, { repo: 'garrytan/gstack', pr: 3066, run: 18213456789, head: 'a'.repeat(40), tree: null, message: 'ci: re-run\n', shards: [] });
+    takes('<drafted message file>', [draft.message]);
+    refuses('<drafted message file>', [draft.binding, draft.message.replace('state root', 'a`id`b'), path.join(tmp, 'ci-retrigger-1.txt')]);
+  });
+
+  test("the raw fetches dir is what Step 3's own mktemp prints, under any TMPDIR", () => {
+    const line = fs.readFileSync(path.join(ROOT, 'pr-prep', 'SKILL.md'), 'utf8').split('\n').find(l => l.startsWith('_PP=$(mktemp -d '));
+    expect(line).toBeDefined();
+    for (const dir of [`${path.join(tmp, 'tmp dir')}/`, path.join(tmp, 'plain')]) {
+      fs.mkdirSync(dir, { recursive: true });
+      const r = spawnSync('bash', ['-c', `${line}\nprintf '%s' "$_PP"`], { encoding: 'utf8', timeout: 10_000, env: { PATH: process.env.PATH ?? '/usr/bin:/bin', TMPDIR: dir } });
+      expect(r.status, r.stderr).toBe(0);
+      takes('<raw fetches dir>', [r.stdout]);
+    }
+    refuses('<raw fetches dir>', ['gstack-pr-prep.AbC123', '/tmp/gstack-pr-prep.AbC12', '/tmp/x$(id)/gstack-pr-prep.AbC123', '/tmp/other.AbC123']);
   });
 });
 
