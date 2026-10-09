@@ -143,6 +143,14 @@ export const QUESTIONS = {
     options: ['reply', 'fix-anyway', 'ignore'],
     description: "Greptile comment looks like a false positive — reply to explain, fix anyway, or ignore silently?",
   },
+  'ship-upstream-pr-reply': {
+    id: 'ship-upstream-pr-reply',
+    skill: 'ship',
+    category: 'approval',
+    door_type: 'one-way',
+    options: ['approve', 'deny'],
+    description: "Post this Greptile reply on the fork PR on someone else's repo?",
+  },
   'ship-todos-create': {
     id: 'ship-todos-create',
     skill: 'ship',

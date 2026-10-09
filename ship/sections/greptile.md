@@ -17,6 +17,22 @@ fi
 Only `PR: exists` dispatches. `PR: skip (<reason>)` → do not dispatch; record
 "Greptile: not run (<reason>); runs on the PR once it exists" and continue to Step 11.
 
+**Whose PR is it?** Before the dispatch, run Step 17's **Upstream PR check**
+block from this skill's SKILL.md now (it only reads, never pushes) and keep its line:
+
+- `none`: no fork upstream; the replies below apply.
+- `new <repo>` or `open <number> <repo>`: origin is a fork, so the PR may be on
+  someone else's repo, and every write there is the owner's. Triage is
+  report-only: print each classification and post no reply. A fix stays local;
+  Step 17 does not push to an open upstream PR. A reply there posts only after
+  AskUserQuestion with `<gstack-qid:ship-upstream-pr-reply>`, asked in the turn
+  that posts it, naming the PR URL (`gh pr view --json url -q .url`), the
+  comment permalink and the reply text; one yes covers one reply. A Fix-now or
+  false-positive answer, and "no AskUserQuestion needed" below, never approve a
+  post there.
+- `lookup failed`: do not dispatch; record "Greptile: not run (upstream PR lookup
+  failed)" and continue to Step 11. Step 17 stops on the same check.
+
 Dispatch a subagent through Agent with `subagent_type: "general-purpose"` and
 `run_in_background: false`, using Step 7's shared foreground-dispatch rule.
 It fetches and classifies all Greptile comments,
@@ -59,7 +75,7 @@ For each comment in `comments`:
 - If user chooses A: queue the approved fix without editing here. After that fix passes review and tests, use the **Fix reply template** from greptile-triage.md (inline diff + explanation) and save per-project/global greptile-history (type: fix).
 - If user chooses C: reply using the **False Positive reply template** from greptile-triage.md (include evidence + suggested re-rank), save to both per-project and global greptile-history (type: fp).
 
-**VALID BUT ALREADY FIXED:** Reply using the **Already Fixed reply template** from greptile-triage.md — no AskUserQuestion needed:
+**VALID BUT ALREADY FIXED:** Reply using the **Already Fixed reply template** from greptile-triage.md — after `none`, no AskUserQuestion needed:
 - Include what was done and the fixing commit SHA
 - Save to both per-project and global greptile-history (type: already-fixed)
 
@@ -76,7 +92,8 @@ For each comment in `comments`:
 
 **After triage:** If fixes were approved, save their approvals and comment references.
 Run Step 9's full review/fix loop, then return here. Finish the saved replies
-without asking again about completed fixes, and classify new comments.
+without asking again about completed fixes (after `new` or `open`, each reply
+still needs its own yes), and classify new comments.
 With no queued fixes, continue to Step 11.
 
 ---
