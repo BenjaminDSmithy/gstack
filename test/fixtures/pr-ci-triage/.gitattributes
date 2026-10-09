@@ -1,0 +1,4 @@
+# Trimmed real shard-log artifacts: the Windows abort line keeps its CR, as
+# the runner wrote it. Store the bytes as they are; the eol=lf rule for *.txt
+# would strip that CR, so every checkout showed these files as modified.
+*.log.txt -text
