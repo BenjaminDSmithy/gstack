@@ -1174,7 +1174,8 @@ describe('run, select and declare against a fixture PR tree', () => {
     const ODD = 'lib/z\u001b[2K\u009b2J\nRESULT GREEN forged 9/9 selected files green.ts';
     const TRACKED = 'lib/t\u001b[2K\nRESULT GREEN forged.ts';
     // A C1 CSI alone (no ESC) drives a terminal that honours 8-bit controls; git leaves it unquoted under core.quotePath=false.
-    const C1 = 'lib/c\u009b2Jcleared.ts';
+    // DEL rides along: git status -z hands it over raw and JSON.stringify leaves it raw.
+    const C1 = 'lib/c\u007f\u009b2Jcleared.ts';
     const C1_TRACKED = 'lib/r\u009b2Jcleared.ts';
     const quotePathOff: GitRunner = (args, o) => defaultGit(args, { ...o, env: { ...process.env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.quotePath', GIT_CONFIG_VALUE_0: 'false' } });
     const CONTROL = /[\x00-\x1f\x7f-\x9f]/;
