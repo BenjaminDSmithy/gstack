@@ -136,14 +136,15 @@ const GIT_ATTACHED_OPT_RE = /^--(?:git-dir|work-tree|namespace|config-env|attr-s
 const GIT_WRITES = new Set(['push', 'send-pack', 'http-push', 'send-email', 'imap-send', 'cvsexportcommit']);
 /**
  * git commands that send only through one subcommand (`git subtree push`,
- * `git lfs push`), or run any command (`git submodule foreach`). The
+ * `git lfs push`, and `git lfs lock`/`unlock`, which POST to the LFS
+ * server's locks API), or run any command (`git submodule foreach`). The
  * subcommand is matched anywhere after the command, since `git subtree`
  * takes its options before it (`-P sub push`); a path spelled like one of
  * these words fails closed, as a write.
  */
 const GIT_SUBCOMMAND_WRITES: ReadonlyMap<string, readonly string[]> = new Map(Object.entries({
   subtree: ['push'],
-  lfs: ['push', 'pre-push'],
+  lfs: ['push', 'pre-push', 'lock', 'unlock'],
   p4: ['submit'],
   svn: ['dcommit', 'branch', 'tag', 'set-tree', 'commit-diff'],
   submodule: ['foreach'],
