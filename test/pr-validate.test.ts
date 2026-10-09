@@ -1544,6 +1544,46 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(onHead.out[0]).toMatch(/^RESULT PRECONDITION .* has uncommitted changes \(lib\/y\.ts\) against HEAD as CI's checkout holds it, read without this repo's 1 replace ref\(s\) \(git replace -l\); /);
     expect(rec.calls.some(c => c.line.startsWith('bun test'))).toBe(false);
     expect(readStateFor(onHead.dir, pr)?.validation ?? null).toBeNull();
+
+    // On the merge base, where the PR changes a dependency: package.json read through the stand-in
+    // equals the head's, which would make the change version-only and drop the full suite's trigger.
+    let pkgTree = '';
+    const pkgRec = recorder(() => pkgTree);
+    const PKG = { name: 'fx', version: '1.0.0' };
+    const onPkg = fixture('replace-merge-base-pkg', null, { base: { 'package.json': JSON.stringify(PKG) }, pr: { 'package.json': JSON.stringify({ ...PKG, dependencies: { leftpad: '1.0.0' } }) }, deps: { tool: pkgRec.tool } });
+    pkgTree = onPkg.tree;
+    const pb1 = git(onPkg.tree, 'rev-parse', 'main');
+    git(onPkg.tree, 'replace', pb1, git(onPkg.tree, 'commit-tree', 'HEAD^{tree}', '-m', 'stand-in'));
+    expect(git(onPkg.tree, 'show', `${pb1}:package.json`)).toBe(git(onPkg.tree, 'show', 'HEAD:package.json'));
+    expect(await onPkg.call(['run'])).toBe(1);
+    expect(onPkg.out[0]).toStartWith('RESULT RED');
+    expect(onPkg.out.some(l => l.startsWith('selection FULL (package.json)'))).toBe(true);
+
+    // Main moves on after the PR branched, and a graft makes the new main's parent the PR's head: read
+    // through it, the merge base is the head itself and nothing changed. CI's clone has no graft.
+    for (const how of ['replace --graft']) {
+      const g = fixture(`graft-${how.replace(/\W/g, '-')}`, null);
+      const b1 = git(g.tree, 'rev-parse', 'main');
+      const p = git(g.tree, 'rev-parse', 'HEAD');
+      git(g.tree, 'checkout', '-q', 'main');
+      write(g.tree, 'lib/z.ts', 'export const z = 1;\n');
+      git(g.tree, 'add', 'lib/z.ts');
+      git(g.tree, 'commit', '-q', '-m', 'main moves on');
+      const b2 = git(g.tree, 'rev-parse', 'HEAD');
+      git(g.tree, 'checkout', '-q', 'pr/v');
+      git(g.tree, 'replace', '--graft', b2, p);
+      expect(git(g.tree, 'merge-base', 'HEAD', b2), how).toBe(p);
+      // Staged as pr-sync stages it: the new main is the base.
+      fs.mkdirSync(g.dir, { recursive: true });
+      fs.writeFileSync(path.join(g.dir, 'sync.json'), JSON.stringify({ repo: 'acme/fx', number: 5, scratch: g.tree, base: b2, h0: p }));
+      expect(await g.call(['select']), how).toBe(0);
+      expect(g.out[0], how).toContain(` merge-base=${b1.slice(0, 12)}`);
+      expect(g.out.filter(l => l.startsWith('SELECT')), how).toEqual(['SELECT\ttest/x.test.ts\timports:lib/y.ts']);
+      g.out.length = 0;
+      expect(await g.call(['run']), how).toBe(1);
+      expect(g.out[0], how).toStartWith('RESULT RED');
+      expect(g.out.find(l => l.startsWith('test/x.test.ts ')), how).toMatch(/^test\/x\.test\.ts rc=1 .* RED: /);
+    }
   });
 
   test('gen:skill-docs output that is not committed is red', async () => {
