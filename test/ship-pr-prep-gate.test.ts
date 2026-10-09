@@ -198,8 +198,8 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     crashes?: true;
     /** The hosts gh's hosts.yml (in GH_CONFIG_DIR) names; 'unreadable': there, mode 000. Left out: no file. */
     hostsYml?: string[] | 'unreadable';
-    /** A dir locked once hosts.yml is written: gh's config dir, or ~/.config above it. */
-    lock?: 'cfg' | 'home/.config';
+    /** A dir locked once hosts.yml is written: gh's config dir, ~/.config above it, or vault, which links pass through. */
+    lock?: 'cfg' | 'home/.config' | 'vault';
     /** The locked dir's mode, by default 0o000; 0o644 can be read but not searched, 0o311 searched but not read. */
     lockMode?: number;
     /** Open PR numbers whose head branch is feat/x, per lowercase repo; a repo left out is one gh cannot find. */
@@ -295,6 +295,14 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     fs.symlinkSync('../cfg', path.join(dir, 'xdg', 'gh'));
     fs.mkdirSync(path.join(dir, 'home', '.config'), { recursive: true });
     fs.symlinkSync('../../cfg', path.join(dir, 'home', '.config', 'gh'));
+    // A dotfiles manager's layout: cfg-link and home-link/.config/gh are links
+    // through vault (vault/gh -> ../cfg), so they reach the same hosts.yml
+    // until vault is locked.
+    fs.mkdirSync(path.join(dir, 'vault'));
+    fs.symlinkSync('../cfg', path.join(dir, 'vault', 'gh'));
+    fs.symlinkSync('vault/gh', path.join(dir, 'cfg-link'));
+    fs.mkdirSync(path.join(dir, 'home-link', '.config'), { recursive: true });
+    fs.symlinkSync('../../vault/gh', path.join(dir, 'home-link', '.config', 'gh'));
     if (g.hostsYml) {
       const yml = path.join(dir, 'cfg', 'hosts.yml');
       fs.writeFileSync(yml, (g.hostsYml === 'unreadable' ? ['github.com'] : g.hostsYml).map((h) => `${h}:\n    git_protocol: https\n    users:\n        me:\n    user: me\n`).join(''));
@@ -391,6 +399,14 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     // shows that a missing file is missing.
     { name: 'a gh whose config dir can be read but not searched still stops an Enterprise origin', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, gh: { crashes: true, hostsYml: ['github.com', 'ghe.acme.test'], lock: 'cfg', lockMode: 0o644 }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', note: [noteFor('ghe.acme.test')], code: 1 },
     { name: 'a gh whose config dir can be searched but not read, with no hosts.yml, leaves a GitLab origin none', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, gh: { crashes: true, lock: 'cfg', lockMode: 0o311 }, want: 'UPSTREAM_PR: none', note: [noteFor('gitlab.example.com')], code: 0 },
+    // A link on the path whose target is behind a dir this user cannot search
+    // hides hosts.yml as surely as the dir itself (gh 2.102 fails `--version`
+    // through such a link): the search for the nearest dir stops at the link.
+    { name: 'a gh whose config dir is a link into a dir that cannot be searched still stops an Enterprise origin', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, env: { GH_CONFIG_DIR: '{stub}/cfg-link' }, gh: { crashes: true, hostsYml: ['github.com', 'ghe.acme.test'], lock: 'vault' }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', note: [noteFor('ghe.acme.test')], code: 1 },
+    { name: 'a gh whose config dir is a link into a dir that cannot be searched stops even a GitLab origin', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, env: { GH_CONFIG_DIR: '{stub}/cfg-link' }, gh: { crashes: true, hostsYml: ['github.com'], lock: 'vault' }, want: 'UPSTREAM_PR: lookup failed origin (gitlab.example.com/me/proj) - STOP', note: [noteFor('gitlab.example.com')], code: 1 },
+    { name: 'a gh whose ~/.config/gh is a link into a dir that cannot be searched still stops an Enterprise origin', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, env: { GH_CONFIG_DIR: '', XDG_CONFIG_HOME: '', HOME: '{stub}/home-link' }, gh: { crashes: true, hostsYml: ['github.com', 'ghe.acme.test'], lock: 'vault' }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', note: [noteFor('ghe.acme.test')], code: 1 },
+    // The same links, open: a missing hosts.yml through them still means no login.
+    { name: 'a gh whose config dir is a link that resolves, with no hosts.yml, leaves a GitLab origin none', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, env: { GH_CONFIG_DIR: '{stub}/cfg-link' }, gh: { crashes: true }, want: 'UPSTREAM_PR: none', note: [noteFor('gitlab.example.com')], code: 0 },
     { name: 'a gh whose config dir does not exist leaves a GitLab origin none', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, env: { GH_CONFIG_DIR: '{stub}/gone/gh' }, gh: { crashes: true }, want: 'UPSTREAM_PR: none', note: [noteFor('gitlab.example.com')], code: 0 },
     { name: 'a relative config dir that does not exist is looked for from the working dir, and the search ends', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, env: { GH_CONFIG_DIR: 'gone/gh' }, gh: { crashes: true }, want: 'UPSTREAM_PR: none', note: [noteFor('gitlab.example.com')], code: 0 },
     { name: 'a host gh has no login for is not GitHub', remotes: { origin: 'https://ghe.other.test/me/proj.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.other.test/me/proj': 'acme/proj' } }, want: 'UPSTREAM_PR: none', code: 0 },
