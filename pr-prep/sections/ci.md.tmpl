@@ -33,9 +33,10 @@ names:
 
 retrigger refuses (exit 30) a draft that is not bound to the PR's current
 head and newest Windows run, or whose bytes changed since triage. Never
-edit or hand-write the draft: re-run triage and ask again. It also refuses
-while the body is stale from an earlier push (exit 32: run the body mode
-first) or a sync is staged (exit 50: push or abort it). The new head makes
+edit or hand-write the draft: re-run triage and ask again
+(`<gstack-qid:pr-prep-ci-retrigger-push>`). It also refuses while the
+body is stale from an earlier push (exit 32: run the body mode first) or
+a sync is staged (exit 50: push or abort it). The new head makes
 the PR body's facts stale, so run the body mode next.
 
 For disclosure (never as clearance), the per-day flake counts across
