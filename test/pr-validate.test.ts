@@ -101,7 +101,7 @@ describe('selectTests', () => {
     const rules = Object.fromEntries(s.files.map(f => [f.file, f.rules]));
     expect(rules['test/a.test.ts']).toContain('changed');
     expect(rules['test/b.test.ts']).toEqual(['joins:bin/gstack-thing']);
-    expect(rules['test/gen-skill-docs.test.ts']).toEqual(['class:skill(x/SKILL.md.tmpl)']);
+    expect(rules['test/gen-skill-docs.test.ts']).toEqual(['renders:x/SKILL.md.tmpl']);
     expect(rules['test/egress-receipt-wiring.test.ts']).toEqual(['class:code(bin/gstack-thing)']);
     expect(rules['test/spawnsync-timeout-tripwire.test.ts']).toEqual(['class:test(test/a.test.ts)']);
     expect(rules['test/agents-digest.test.ts']).toEqual(['class:release(VERSION)']);
@@ -218,6 +218,26 @@ describe('selectTests', () => {
     for (const f of ['browse/src/foo.ts', 'design/src/foo.ts', 'hosts/foo.ts']) {
       expect(picked(f), f).toContain(`test/egress-receipt-wiring.test.ts class:code(${f})`);
     }
+  });
+
+  test('only the renderers cover a skill file, and only one the generator renders or imports; a class:skill pick never covers', () => {
+    const uni = [...universe, 'test/catalog-budget.test.ts'];
+    const local: Record<string, string> = {
+      'scripts/gen-skill-docs.ts': "import { discoverTemplates } from './zz-discover';",
+      'scripts/zz-discover.ts': 'export const discoverTemplates = () => [];',
+    };
+    const pick = (changed: string[]) => selectTests({ changed, universe: uni, declared: [], pkgVersionOnly: true, source: f => local[f] ?? src[f] ?? '' });
+    const rulesOf = (changed: string[]) => Object.fromEntries(pick(changed).files.map(f => [f.file, f.rules]));
+    const cov = (changed: string[], passing: string[]) => uncoveredCode(changed, pick(changed), f => passing.includes(f));
+    expect(rulesOf(['x/SKILL.md.tmpl'])['test/gen-skill-docs.test.ts']).toEqual(['renders:x/SKILL.md.tmpl']);
+    expect(rulesOf(['x/SKILL.md.tmpl'])['test/catalog-budget.test.ts']).toEqual(['class:skill(x/SKILL.md.tmpl)']);
+    // A module the generator imports is rendered; a template it never discovers, or a host file it never imports, is not.
+    expect(rulesOf(['scripts/zz-discover.ts'])['test/gen-skill-docs.test.ts']).toEqual(['renders:scripts/zz-discover.ts']);
+    for (const f of ['contrib/zz-host/SKILL.md.tmpl', 'hosts/claude/hooks/zz-hook.ts']) expect(rulesOf([f])['test/gen-skill-docs.test.ts'], f).toEqual([`class:skill(${f})`]);
+    expect(cov(['x/SKILL.md.tmpl'], ['test/gen-skill-docs.test.ts'])).toEqual([]);
+    expect(cov(['scripts/zz-discover.ts'], ['test/skill-validation.test.ts'])).toEqual([]);
+    expect(cov(['x/SKILL.md.tmpl'], ['test/catalog-budget.test.ts'])).toEqual(['x/SKILL.md.tmpl']);
+    for (const f of ['contrib/zz-host/SKILL.md.tmpl', 'hosts/claude/hooks/zz-hook.ts']) expect(cov([f], uni), f).toEqual([f]);
   });
 
   test('the class roots cannot drift from the roots the tripwires themselves scan', () => {
