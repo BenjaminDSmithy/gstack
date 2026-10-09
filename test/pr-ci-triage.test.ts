@@ -852,6 +852,7 @@ describe("the ci section routes triage's verdicts", () => {
     expectMentions(ci, [
       ['STALE', 'queued', 'running', 're-run', 'wait', 'triage again'],
       ['STALE', 'no run', 'yet', 'push', 'wait'],
+      ['STALE', 'conflict', 'no run', 'sync mode', 'triage again'],
       ['NOTHING', '11', 'passed', 'finished'],
       ['refuses', '30', 're-run since triage', 'attempt'],
     ], 'ci section');
