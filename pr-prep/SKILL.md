@@ -468,7 +468,10 @@ message, a tracker comment or a file never pick a mode.
 An invocation from /ship (Step 1.5, or `GSTACK_FROM_SHIP` set) is ALWAYS the
 audit, whatever else the conversation says. Any other first word: say it is
 not a mode, list the modes, and stop. A PR number given to a mode must be a
-bare number or a pull URL; never write `#NNN` into a shell command.
+bare number or a pull URL. In the mode sections `<pr-number>` is its digits
+only (never `#NNN`) and `<upstream-repo>` is the upstream repo as
+`owner/name`; check each value has that shape before it goes into a
+command.
 
 ## Section index — Read each section when its situation applies
 
@@ -765,10 +768,10 @@ topic while dropping incidental matches.
 
 **Never score the branch's own PR.** On a re-run after the PR is open, its
 own entry is in `prs-open.json` and would score EXACT_DUP against itself.
-Drop it first (the raw fetches directory from Step 3 as a literal):
+Drop it first (the directory on Step 3's `raw fetches:` line, quoted):
 
 ```bash
-_PP_DIR=<raw fetches dir from Step 3>
+_PP_DIR="<raw fetches dir>"
 _ME=$(gh api user --jq .login 2>/dev/null)
 ~/.claude/skills/gstack/bin/gstack-pr-prep-commits self --head-ref "$(git branch --show-current)" --head-owner "$_ME" < "$_PP_DIR/prs-open.json" > "$_PP_DIR/prs-open.self.json" && mv "$_PP_DIR/prs-open.self.json" "$_PP_DIR/prs-open.json" || echo "PR_PREP_SELF: own PR not dropped - remove this branch's open PR from prs-open.json before scoring" >&2
 ```
@@ -1012,7 +1015,7 @@ persistent copy:
 
 ```bash
 _PP_REPORT="${GSTACK_PR_PREP_REPORT:-/tmp/ship-pr-prep-$(git rev-parse --show-toplevel | git hash-object --stdin | cut -c1-8).json}"
-~/.claude/skills/gstack/bin/gstack-pr-prep-commits stamp --base <PR_PREP_BASE sha> --repo <PR_PREP_BASE repo> --report <raw fetches dir>/agent-report.json --out "$_PP_REPORT" || echo "PR_PREP_STAMP: refused - the RESULT line above names the cause; fix it and run this block again" >&2
+~/.claude/skills/gstack/bin/gstack-pr-prep-commits stamp --base <PR_PREP_BASE sha> --repo <PR_PREP_BASE repo> --report "<raw fetches dir>/agent-report.json" --out "$_PP_REPORT" || echo "PR_PREP_STAMP: refused - the RESULT line above names the cause; fix it and run this block again" >&2
 ```
 
 - `worst` is the highest-severity bucket across every commit, in the

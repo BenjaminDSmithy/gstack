@@ -15,7 +15,7 @@ report's `head` is not `git rev-parse HEAD`. Do not open over EXACT_DUP.
 ### 2. Size against what upstream merges
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-pr-watch size --repo <upstream owner/name>
+~/.claude/skills/gstack/bin/gstack-pr-watch size --repo <upstream-repo>
 ```
 
 `RESULT GREEN|AMBER|RED` compares churn and files, release files
@@ -99,7 +99,7 @@ files:
 TITLE_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<title-file-name>"
 BODY_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<body-file-name>"
 ~/.claude/skills/gstack/bin/gstack-egress-receipt write --sink pr-prep --host github.com --class pr-create --payload-file "$BODY_FILE" --consent "user ran /pr-prep"
-gh pr create --draft --repo <upstream owner/name> --head <github-username>:<branch-name> --base <base> --title "$(cat "$TITLE_FILE")" --body-file "$BODY_FILE"
+gh pr create --draft --repo <upstream-repo> --head <github-username>:<branch-name> --base <base> --title "$(cat "$TITLE_FILE")" --body-file "$BODY_FILE"
 ```
 
 ### 5. Hand the liveness step to the owner
@@ -117,6 +117,6 @@ uploads a screenshot and never runs `gh pr ready`.
 
 ### 6. Keep watching
 
-Offer the owner `gstack-pr-watch enable --pr <number> --repo <upstream
-owner/name>` for this PR and the opt-in LaunchAgent in
+Offer the owner `gstack-pr-watch enable --pr <pr-number> --repo
+<upstream-repo>` for this PR and the opt-in LaunchAgent in
 `contrib/pr-watch/README.md` (the owner installs it).
