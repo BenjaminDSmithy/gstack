@@ -3,5 +3,10 @@ import { bodyMain } from '../lib/pr-body';
 
 // process.exit() discards stdout still buffered in a pipe: past 64 KiB (a
 // large live-vs-new diff) a slow reader lost the envelope's END marker. Set
-// the code and let the runtime drain stdout, as bin/gstack-redact does.
+// the code and let the runtime drain stdout, as bin/gstack-redact does. A
+// reader that closes the pipe early then raised EPIPE as an unhandled stdout
+// error and the process exited 1: drop EPIPE, as bin/gstack-pr-watch does.
+process.stdout.on('error', (error: NodeJS.ErrnoException) => {
+  if (error.code !== 'EPIPE') throw error;
+});
 process.exitCode = await bodyMain(process.argv.slice(2));
