@@ -61,9 +61,10 @@ exact commit.
   merge    builds and commits the sync in a scratch worktree
            (<worktree-root>/<topic>-sync); nothing is pushed
   push     publishes the staged sync commit (needs --yes); once the PR
-           reports it, fast-forwards the local PR branch and removes the
-           scratch worktree. Run again after an UNVERIFIED push once the
-           PR reports the commit: it records the push, sending nothing
+           or the head remote reports it, fast-forwards the local PR
+           branch and removes the scratch worktree. Run again after an
+           UNVERIFIED push: once the head remote holds the commit, it
+           records the push, sending nothing
   abort    removes the staged sync, or the scratch worktree an interrupted
            merge left; only a worktree gstack-pr-sync made is removed.
            Runs for a closed or merged PR too, to clear the sync it left
@@ -100,9 +101,10 @@ also a draft not bound to this PR's current head and newest run), 31
 validation missing, red, or a waived full suite without --accept-full-risk
 for the staged commit, 32 PR body still stale from an earlier push, 40 remote moved
 or not fast-forward, 41 a pre-push hook or the remote refused the push
-(stop and report; never --no-verify), 42 git push exited 0 but the PR
-still reports the head from before it (UNVERIFIED: nothing recorded;
-check the push URL), 45 lock busy, 50 a sync is already
+(stop and report; never --no-verify), 42 git push exited 0 but neither
+the PR nor the head remote shows the commit, or the head remote could not
+be read back (UNVERIFIED: nothing recorded; check the push URL, then push
+--yes again), 45 lock busy, 50 a sync is already
 staged, the scratch path holds something gstack-pr-sync did not make, or
 the local branch has unpushed commits, 60 the version queue could not be
 read (never guessed).`;
@@ -1165,22 +1167,48 @@ function cmdPush(c: Ctx): number {
     const parent = gitOk(d, staged.scratch, ['rev-parse', `${staged.sha}^1`], 'git rev-parse').trim();
     if (parent !== staged.h0) throw new PrContextError('the staged commit is not one commit on top of the PR head', SYNC_EXIT.PRECONDITION);
     const now = pinBranch(d.git, c.cwd, c.headRemote, c.pr.headRef).sha;
+    // The head remote already holds the staged commit while the PR lags behind
+    // it: an earlier push of this sync landed and its bookkeeping never ran (its
+    // read-back of the head remote failed, or the run was killed after the
+    // send). Record it and send nothing; "abort and re-sync" would lose it.
+    if (now === staged.sha) return recordLanded(c, staged, `pending (${c.pr.headOid.slice(0, 12)})`);
     if (now !== staged.h0) throw new PrContextError(`${c.headRemote}/${c.pr.headRef} moved to ${now.slice(0, 12)}; abort and re-sync`, SYNC_EXIT.REMOTE_MOVED);
     pushOrThrow(c, staged.scratch, staged.sha, 'pr-sync-push', gateAt);
-    // git exit 0. A PR that still reports H0 after every read-back did not get
-    // the commit, as far as anyone can show: nothing is recorded. A failed read
-    // is not that evidence, so it still records (the push most likely landed).
+    // git exit 0. A PR still at H0 after every read-back is either GitHub lagging
+    // its own refs or a push that went somewhere else; the head remote (its fetch
+    // URL is the repository the PR names) tells them apart. Nothing is recorded
+    // only when that remote does not hold the commit, or cannot be read. A failed
+    // gh read is no evidence either way, so it still records.
     const rb = readback(c, staged.sha, staged.h0);
     if (rb.stillH0) {
-      d.out(`RESULT UNVERIFIED sha=${staged.sha.slice(0, 12)} pr=${c.pr.number} readback=${staged.h0.slice(0, 12)} (the head before the push)`);
-      d.out(`NOTE git push exited 0 but the PR still reports ${staged.h0.slice(0, 12)}: nothing was recorded (the staged sync, its scratch and the local branch are as they were). Check where \`git remote get-url --push ${c.headRemote}\` sends it. Once the PR reports ${staged.sha.slice(0, 12)}, \`gstack-pr-sync push --yes\` records the push without sending anything; if it never does, \`gstack-pr-sync abort\` and re-sync`);
-      return SYNC_EXIT.UNVERIFIED;
+      const at = headRemoteAt(c);
+      if (at.sha !== staged.sha) {
+        d.out(`RESULT UNVERIFIED sha=${staged.sha.slice(0, 12)} pr=${c.pr.number} readback=${staged.h0.slice(0, 12)} (the head before the push)`);
+        const kept = 'nothing was recorded (the staged sync, its scratch and the local branch are as they were)';
+        if (at.error !== null) {
+          d.out(`NOTE git push exited 0 but the PR still reports ${staged.h0.slice(0, 12)} and ${c.headRemote}/${c.pr.headRef} could not be read back: ${kept}. Run \`gstack-pr-sync push --yes\` again: once ${c.headRemote} answers with ${staged.sha.slice(0, 12)} it records the push without sending anything`);
+          d.out(envelope(at.error, `git fetch ${c.headRemote}`));
+        } else {
+          d.out(`NOTE git push exited 0 but neither the PR nor ${c.headRemote}/${c.pr.headRef} (${at.sha.slice(0, 12)}) shows ${staged.sha.slice(0, 12)}: ${kept}. Check where \`git remote get-url --push ${c.headRemote}\` sends it. Once ${c.headRemote} holds ${staged.sha.slice(0, 12)}, \`gstack-pr-sync push --yes\` records the push without sending anything; if it never does, \`gstack-pr-sync abort\` and re-sync`);
+        }
+        return SYNC_EXIT.UNVERIFIED;
+      }
+      rb.detail.push(`NOTE the PR still reports ${staged.h0.slice(0, 12)} after the read-backs, but ${c.headRemote}/${c.pr.headRef} holds ${staged.sha.slice(0, 12)}: GitHub has not caught up; check it with gstack-pr-watch poll`);
     }
     const done = recordPush(c, staged);
     d.out(`RESULT PUSHED sha=${staged.sha.slice(0, 12)} pr=${c.pr.number} readback=${rb.word}`);
     for (const line of [...done, ...rb.detail]) d.out(line);
     return SYNC_EXIT.SYNCED;
   });
+}
+
+/** The head remote's PR branch now (a read-only fetch), or why it could not be read. */
+function headRemoteAt(c: Ctx): { sha: string; error: string | null } {
+  try {
+    return { sha: pinBranch(c.d.git, c.cwd, c.headRemote, c.pr.headRef).sha, error: null };
+  } catch (error) {
+    return { sha: '', error: (error as Error).message };
+  }
 }
 
 /**
@@ -1210,8 +1238,8 @@ function recordPush(c: Ctx, staged: StagedSync): string[] {
 
 /**
  * The PR reports the staged commit as its head: an earlier push of it ended
- * UNVERIFIED (GitHub lagged past the read-backs) and has since shown up.
- * Records it once the head remote holds it too. Nothing is sent, so no gate.
+ * UNVERIFIED and has since shown up. Records it once the head remote holds
+ * it too. Nothing is sent, so no gate.
  */
 function recordLatePush(c: Ctx, pending: StagedSync): number {
   return withPrLock(c.stateDir, () => {
@@ -1219,18 +1247,23 @@ function recordLatePush(c: Ctx, pending: StagedSync): number {
     if (!staged || staged.sha !== pending.sha) throw new PrContextError('the staged sync changed; re-run push', SYNC_EXIT.PRECONDITION);
     const now = pinBranch(c.d.git, c.cwd, c.headRemote, c.pr.headRef).sha;
     if (now !== staged.sha) throw new PrContextError(`the PR reports ${staged.sha.slice(0, 12)} but ${c.headRemote}/${c.pr.headRef} is ${now.slice(0, 12)}: re-run push`, SYNC_EXIT.REMOTE_MOVED);
-    const done = recordPush(c, staged);
-    c.d.out(`RESULT PUSHED sha=${staged.sha.slice(0, 12)} pr=${c.pr.number} readback=ok (an earlier push landed; nothing sent now)`);
-    for (const line of done) c.d.out(line);
-    return SYNC_EXIT.SYNCED;
+    return recordLanded(c, staged, 'ok');
   });
+}
+
+/** Records an earlier push of the staged sync that the head remote holds; nothing is sent now. Call under the PR lock. */
+function recordLanded(c: Ctx, staged: StagedSync, readbackWord: string): number {
+  const done = recordPush(c, staged);
+  c.d.out(`RESULT PUSHED sha=${staged.sha.slice(0, 12)} pr=${c.pr.number} readback=${readbackWord} (an earlier push landed; nothing sent now)`);
+  for (const line of done) c.d.out(line);
+  return SYNC_EXIT.SYNCED;
 }
 
 /**
  * After git exit 0: does the PR report the new head? GitHub can lag a few
  * seconds, so it reads up to 5 times. `stillH0` when the last read still
- * shows the head from before the push. A failed read is reported, never
- * thrown.
+ * shows the head from before the push (the caller then asks the head
+ * remote). A failed read is reported, never thrown.
  */
 function readback(c: Ctx, sha: string, h0: string): { word: string; detail: string[]; stillH0: boolean } {
   let seen = '';
