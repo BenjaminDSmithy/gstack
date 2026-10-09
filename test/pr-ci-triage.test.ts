@@ -20,6 +20,7 @@ import path from 'node:path';
 import { classifyShard, inFlightFile, draftable, triageMain, SHARD_JOB_RE } from '../lib/pr-ci-triage';
 import { PrContextError, isRemoteWrite, prStateDir, topicFor, type GhRunner } from '../lib/pr-context';
 import { TRACKER_ENVELOPE_BEGIN, TRACKER_ENVELOPE_END } from '../lib/tracker-guard';
+import { expectMentions, expectTokens } from './helpers/prompt-structure';
 
 setDefaultTimeout(120_000);
 
@@ -767,5 +768,20 @@ describe('scratch cleanup', () => {
     }
     await triageMain(['--help'], { out: () => {}, scratchParent: tmp });
     expect(leftovers(tmp)).toEqual(['gstack-ci-triage-live']);
+  });
+});
+
+describe("the ci section routes triage's verdicts", () => {
+  const ci = fs.readFileSync(path.join(import.meta.dir, '..', 'pr-prep', 'sections', 'ci.md'), 'utf8');
+
+  test('an unfinished run (a re-run included) is waited for, NOTHING is only a passed or fully finished head, and retrigger refuses a run re-run since triage', () => {
+    // Read as "no Windows shard failed", a re-run still going would be reported
+    // as clean; triage prints STALE for it, and NOTHING only once every run finished.
+    expectTokens(ci, ['`RESULT NOTHING`', '`STALE`'], 'ci section');
+    expectMentions(ci, [
+      ['STALE', 'queued', 'running', 're-run', 'wait', 'triage again'],
+      ['NOTHING', '11', 'passed', 'finished'],
+      ['refuses', '30', 're-run since triage', 'attempt'],
+    ], 'ci section');
   });
 });
