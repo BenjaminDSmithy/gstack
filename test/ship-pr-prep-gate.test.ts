@@ -170,6 +170,8 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
   interface Gh {
     /** Repos gh can see, as GitHub spells them (an Enterprise one as host/owner/name), each with its fork parent (null: not a fork). */
     repos?: Record<string, string | null>;
+    /** The nameWithOwner gh answers for a repo it knows by a newer name (a rename redirects); by default the key's owner/name. */
+    renamed?: Record<string, string>;
     /** GitHub Enterprise hosts gh has a login for. */
     hosts?: string[];
     /** A gh from before `auth status --json` (the flag is unknown). */
@@ -198,7 +200,7 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     // nameWithOwner never carries an Enterprise host.
     for (const [repo, parent] of Object.entries(g.repos ?? {})) {
       const [login, name] = (parent ?? '/').split('/');
-      fs.writeFileSync(file('repo', repo.toLowerCase()), JSON.stringify({ nameWithOwner: repo.split('/').slice(-2).join('/'), parent: parent === null ? null : { id: 'R_1', name, owner: { id: 'U_1', login } } }));
+      fs.writeFileSync(file('repo', repo.toLowerCase()), JSON.stringify({ nameWithOwner: g.renamed?.[repo] ?? repo.split('/').slice(-2).join('/'), parent: parent === null ? null : { id: 'R_1', name, owner: { id: 'U_1', login } } }));
     }
     for (const host of g.hosts ?? []) fs.writeFileSync(path.join(dir, `host-${host}`), '');
     for (const [repo, nums] of Object.entries(g.prs ?? {})) fs.writeFileSync(file('prs', repo), JSON.stringify(nums.map((number) => ({ number }))));
@@ -282,6 +284,8 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     { name: 'an ssh alias for an Enterprise host is a new fork PR there', remotes: { origin: 'git@work-ghe:me/proj.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.acme.test/me/proj': 'acme/proj' }, prs: { 'ghe.acme.test/acme/proj': [] } }, want: 'UPSTREAM_PR: new ghe.acme.test/acme/proj', code: 0 },
     { name: 'a gh without auth status --json still finds an Enterprise fork', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, gh: { old: true, hosts: ['ghe.acme.test'], repos: { 'ghe.acme.test/me/proj': 'acme/proj' }, prs: { 'ghe.acme.test/acme/proj': [3066] } }, want: 'UPSTREAM_PR: open 3066 ghe.acme.test/acme/proj', code: 0 },
     { name: 'an Enterprise fork with gh down there stops', remotes: { origin: 'git@ghe.acme.test:me/proj.git' }, gh: { hosts: ['ghe.acme.test'], down: true }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', code: 1 },
+    // gh answers a renamed repo with its new name; a PR on it is still origin's own, whichever remote names it.
+    { name: "a renamed Enterprise origin's new name is still its own repo", remotes: { origin: 'https://ghe.acme.test/me/old.git', other: 'https://ghe.acme.test/me/new.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.acme.test/me/old': null }, renamed: { 'ghe.acme.test/me/old': 'me/new' }, prs: { 'ghe.acme.test/me/new': [12] } }, want: 'UPSTREAM_PR: none', code: 0 },
     { name: 'a host gh has no login for is not GitHub', remotes: { origin: 'https://ghe.other.test/me/proj.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.other.test/me/proj': 'acme/proj' } }, want: 'UPSTREAM_PR: none', code: 0 },
     // Any other failure on an extra remote still stops, and names the remote to fix or remove.
     { name: 'an extra remote whose lookup errors stops and is named', remotes: { origin: 'https://github.com/me/gstack.git', contributor: 'https://github.com/someone/gstack.git' }, gh: { repos: FORK, prs: { 'garrytan/gstack': [] }, broken: ['someone/gstack'] }, want: 'UPSTREAM_PR: lookup failed remote contributor (someone/gstack) - STOP', code: 1 },
