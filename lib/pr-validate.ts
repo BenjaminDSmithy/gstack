@@ -95,10 +95,11 @@ importing it (directly or through the modules it imports), pointing a
 relative path at it, joining its path segments (from the repo root, the
 test's own directory or file, or a const resolved from them; a code
 file's extension may be left off when the join ends there) or naming it,
-or for a template, resolver or host the skill-rendering tests. A class
-tripwire's pass (egress wiring, sync-spawn timeouts, ...) is not
-coverage. A file with none is red (NO_TESTS), never "0/0 green": declare
-the tests that cover it (a passing declared test covers the change).
+or, for a template gen-skill-docs renders or a module it imports, the
+skill-rendering tests. A class tripwire's pass (egress wiring,
+sync-spawn timeouts, skill budgets, ...) is not coverage. A file with
+none is red (NO_TESTS), never "0/0 green": declare the tests that cover
+it (a passing declared test covers the change).
 A change to package.json beyond .version, bun.lock, tsconfig,
 bunfig.toml or its preload files, .github/workflows/free-tests.yml, or
 the free-suite runner and the modules it imports needs the full suite:
@@ -235,6 +236,10 @@ export function testFileEnv(base: NodeJS.ProcessEnv, stateDir: string, file: str
 // walks the runner's imports and pins this list.
 const FULL_RE = /^(bun\.lock|bun\.lockb|bunfig\.toml|test-setup\.ts|patches\/.*|tsconfig[^/]*\.json|\.github\/workflows\/free-tests\.yml|scripts\/test-free-shards\.ts|scripts\/lib\/(shard-engine|windows-curation|free-[^/]*)\.ts|lib\/state-root\.ts|test\/helpers\/(paid-test-set|touchfiles|test-selection)\.ts)$/;
 const SKILL_SURFACE_RE = /(^|\/)SKILL\.md\.tmpl$|^scripts\/resolvers\/|^scripts\/gen-skill-docs\.ts$|^hosts\//;
+// The templates scripts/gen-skill-docs.ts renders (scripts/discover-skills.ts):
+// the root's and each top-level skill's SKILL.md.tmpl, and its sections/*.md.tmpl.
+const RENDERED_TMPL_RE = /^(?:[^/]+\/)?SKILL\.md\.tmpl$|^[^/]+\/sections\/[^/]+\.md\.tmpl$/;
+const GENERATOR = 'scripts/gen-skill-docs.ts';
 // The roots test/egress-receipt-wiring.test.ts's NEW-SINK SCANNER sweeps
 // (its SWEEP list; pinned by test/pr-validate.test.ts). The class:test
 // roots are the free runner's TEST_ROOTS, which the sync-spawn tripwire
@@ -242,7 +247,12 @@ const SKILL_SURFACE_RE = /(^|\/)SKILL\.md\.tmpl$|^scripts\/resolvers\/|^scripts\
 const CODE_ROOTS = ['bin', 'lib', 'scripts', 'design/src', 'browse/src', 'hosts'];
 const TEST_FILE_RE = /\.test\.[cm]?[jt]sx?$/;
 const under = (f: string, roots: readonly string[]) => roots.some(r => f.startsWith(`${r}/`));
-const CLASS_SKILL = ['test/gen-skill-docs.test.ts', 'test/skill-validation.test.ts', 'test/catalog-budget.test.ts', 'test/context-budget-ratchet.test.ts'];
+// They run the generator over every template for every host: a rendered
+// template, and every module the generator imports, runs in them (`renders:`).
+const RENDER_TESTS = ['test/gen-skill-docs.test.ts', 'test/skill-validation.test.ts'];
+// Tripwires over the generated skill files' size budgets: like every class
+// pick, they run but never cover.
+const CLASS_SKILL = ['test/catalog-budget.test.ts', 'test/context-budget-ratchet.test.ts'];
 const CLASS_CODE = ['test/egress-receipt-wiring.test.ts'];
 const CLASS_TEST = ['test/spawnsync-timeout-tripwire.test.ts', 'test/test-of-test-ratchet.test.ts', 'test/paid-orphan-tripwire.test.ts', 'test/test-free-shards.test.ts'];
 const CLASS_RELEASE = ['test/agents-digest.test.ts', 'test/gstack-version-bump.test.ts', 'test/gstack-next-version.test.ts', 'test/ship-version-sync.test.ts', 'test/version-source.test.ts'];
@@ -422,7 +432,9 @@ function importGraph(source: (f: string) => string) {
  * Pure. `changed` is `git diff --name-only <merge base with the pinned
  * upstream> HEAD`; `pkgVersionOnly` says package.json changed only in
  * .version (a release, not a dependency change); `source(f)` returns a
- * test file's text; `preload` lists the tree's bunfig.toml preload files.
+ * file's text, '' when it is missing (tests, the modules they import and
+ * the skill generator's imports are read); `preload` lists the tree's
+ * bunfig.toml preload files.
  */
 export function selectTests(x: { changed: string[]; universe: string[]; declared: string[]; pkgVersionOnly: boolean; source: (f: string) => string; preload?: string[] }): Selection {
   const universe = new Set(x.universe);
@@ -433,9 +445,13 @@ export function selectTests(x: { changed: string[]; universe: string[]; declared
     picks.get(f)!.add(rule);
   };
   const full: string[] = [];
+  const graph = importGraph(x.source);
+  let generator: Set<string> | null = null;
   for (const f of x.changed) {
     if (FULL_RE.test(f) || (x.preload ?? []).includes(f) || (f === 'package.json' && !x.pkgVersionOnly)) full.push(f);
     if (universe.has(f)) add(f, 'changed');
+    const rendered = RENDERED_TMPL_RE.test(f) || (generator ??= graph.closure(GENERATOR, () => {})).has(f);
+    if (rendered || SKILL_SURFACE_RE.test(f)) RENDER_TESTS.forEach(t => add(t, rendered ? `renders:${f}` : `class:skill(${f})`));
     if (SKILL_SURFACE_RE.test(f)) CLASS_SKILL.forEach(t => add(t, `class:skill(${f})`));
     if (under(f, CODE_ROOTS) && !TEST_FILE_RE.test(f)) CLASS_CODE.forEach(t => add(t, `class:code(${f})`));
     if (under(f, TEST_ROOTS) || TEST_FILE_RE.test(f)) CLASS_TEST.forEach(t => add(t, `class:test(${f})`));
@@ -464,7 +480,6 @@ export function selectTests(x: { changed: string[]; universe: string[]; declared
       return { f, stem: base.replace(CODE_EXT_RE, '') || base, tokens, joins: f.includes('/') ? joinsOf(f.split('/')) : [] };
     });
   const joinCache: JoinCache = new Map();
-  const graph = importGraph(x.source);
   if (importable.size) {
     for (const t of x.universe) {
       const src = graph.read(t);
@@ -728,13 +743,13 @@ export function untestedCode(changed: string[], sel: Selection, exists: (f: stri
 
 /**
  * The changed files in `code` that no passing selected file exercises. A
- * pick covers the path its rule names (`changed` a test file itself,
- * `imports:`, `reaches:`, `refs:`, `joins:`, `names:`), and `class:skill(<f>)` covers its
- * template, resolver or host, since those tests render every template for
- * every host. The other class picks (code, test, release) are tripwires
- * that scan source for one pattern: they run, but never count as
- * coverage. A passing declared test covers everything: the owner
- * declared it for the change.
+ * pick covers the path its rule names: `changed` (a test file itself),
+ * `imports:`, `reaches:`, `refs:`, `joins:`, `names:`, and `renders:` (the
+ * skill-rendering tests run a rendered template and every module the
+ * generator imports). A `class:*` pick never covers: those tests are
+ * tripwires that scan source or generated files for one pattern, and they
+ * run without exercising the change. A passing declared test covers
+ * everything: the owner declared it for the change.
  */
 export function uncoveredCode(code: string[], sel: Selection, passed: (file: string) => boolean): string[] {
   const covered = new Set<string>();
@@ -743,7 +758,7 @@ export function uncoveredCode(code: string[], sel: Selection, passed: (file: str
     if (s.rules.includes('declared')) return [];
     for (const r of s.rules) {
       if (r === 'changed') covered.add(s.file);
-      const m = /^(?:imports|reaches|refs|joins|names):(.+)$/.exec(r) ?? /^class:skill\((.+)\)$/.exec(r);
+      const m = /^(?:imports|reaches|refs|joins|names|renders):(.+)$/.exec(r);
       if (m) covered.add(m[1]);
     }
   }
