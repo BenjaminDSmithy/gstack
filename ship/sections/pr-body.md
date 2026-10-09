@@ -188,7 +188,7 @@ or `glab mr update -d "$(cat "$PR_BODY_FILE")"` (GitLab).
 
 Update the title with the same scanned `NEW_TITLE`: `gh pr edit --title "$NEW_TITLE"` (or `glab mr update -t "$NEW_TITLE"`).
 
-**REST fallback:** if `gh pr edit` fails with the `repository.pullRequest.projectCards` GraphQL deprecation, do not re-ask for auth. Use the SAME scanned file: `PR_NUMBER=$(gh pr view --json number -q .number)`, then `gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" -X PATCH -F body=@"$PR_BODY_FILE"`; for the title use `gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" -X PATCH -f title="$NEW_TITLE"`.
+**REST fallback:** if `gh pr edit` fails with the `repository.pullRequest.projectCards` GraphQL deprecation, do not re-ask for auth. Use the SAME scanned file: `PR_NUMBER=$(gh pr view --json number -q .number)`, then `gh api --hostname <host> "repos/{owner}/{repo}/pulls/$PR_NUMBER" -X PATCH -F body=@"$PR_BODY_FILE"`; for the title use `gh api --hostname <host> "repos/{owner}/{repo}/pulls/$PR_NUMBER" -X PATCH -f title="$NEW_TITLE"`. `<host>` is origin's host (github.com unless origin is on GitHub Enterprise): `gh api` fills `{owner}/{repo}` from gh's default repo but takes its host from `GH_HOST`, else gh's only login, else github.com.
 
 **Self-check:** re-fetch the title and assert it equals `NEW_TITLE`. Retry once if wrong, then surface any failure. Print the existing URL and continue to Step 20; do not run the create commands below.
 

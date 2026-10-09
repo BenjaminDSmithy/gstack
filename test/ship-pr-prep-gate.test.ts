@@ -414,3 +414,19 @@ describe('/ship Step 10: Greptile triage on a fork PR to someone else\'s repo', 
     expect(getQuestion('ship-upstream-pr-reply')).toMatchObject({ skill: 'ship', door_type: 'one-way' });
   });
 });
+
+// Step 19's REST fallback fills {owner}/{repo} from gh's default repo, which a
+// `none` makes origin's, but `gh api` takes its host from GH_HOST, else gh's
+// only login, else github.com, never from that repo (cli/cli pkg/cmd/api/api.go
+// and go-gh auth.DefaultHost, read at v2.102.0). With logins on github.com and
+// an Enterprise host, an Enterprise origin's PATCH would reach the same-named
+// repo on github.com.
+describe("/ship Step 19: the REST fallback writes to origin's host", () => {
+  test('both gh api calls name the host, and the prose says which', () => {
+    const fallback = between(PR_BODY_MD, '**REST fallback:**', '**Self-check:**');
+    const calls = [...fallback.matchAll(/`gh api [^`]*`/g)].map((m) => m[0]);
+    expect(calls).toHaveLength(2);
+    for (const c of calls) expect(c).toContain('--hostname <host>');
+    expectMentions(fallback.replace(/([^\n])\n(?=[^\n])/g, '$1 '), [['<host>', "origin's host", 'enterprise', 'github.com']], 'ship Step 19 REST fallback');
+  });
+});
