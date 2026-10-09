@@ -17,7 +17,9 @@
   included, a newer run, a moved head, or no run on the head yet, as
   right after a push) or missing evidence: wait for that run to finish,
   or for GitHub to start one, and triage again, or report what is
-  missing.
+  missing. A `STALE` line that names a merge conflict means no run will
+  start: GitHub runs no pull_request workflow while the PR conflicts with
+  its base, so run the sync mode first, then triage again.
 - `RESULT AGGREGATE` (exit 10): the aggregate job failed with no failed
   shard; report the enveloped job log tail. `RESULT NOTHING` (exit 11):
   nothing to triage, because the head's newest run passed or every run on
