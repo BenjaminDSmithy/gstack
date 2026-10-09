@@ -69,8 +69,9 @@ above with the flag added only on that yes.
   run publish again.
 - Exit 30 naming the PR head: a push landed after the render, so the
   facts describe an older head. Render again, show the owner, and ask
-  again (`<gstack-qid:pr-prep-body-publish>`) with the new sha256. A sync or `ci:` push marks the body stale
-  (`body-stale-since=` on each RESULT line) until this publish clears it.
+  again (`<gstack-qid:pr-prep-body-publish>`) with the new sha256. A sync
+  or `ci:` push marks the body stale (`body-stale-since=` on each RESULT
+  line) until this publish clears it.
 - Exit 30 saying the stale push is not in the PR head's history: the
   branch was rewritten after that push (a force-push, or GitHub's "Update
   branch" rebase), and sync push and retrigger stay refused until a
