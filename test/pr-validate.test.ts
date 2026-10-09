@@ -342,6 +342,7 @@ describe('selectTests', () => {
         "const O = readFileSync(path.join(import.meta.dir, '../zz-scanner.toml'), 'utf8');",
         "const P = readFileSync(path.join(import.meta.dir, '../extension/manifest.json.js'), 'utf8');",
         "const Q = JSON.parse(readFileSync(path.join(import.meta.dir, '..', 'scripts', 'zz-words.json'), 'utf8'));",
+        "const R = readFileSync(path.join(import.meta.dir, '..', 'browse', 'scripts', 'zz-build.sh'), 'utf8');",
       ].join('\n'),
       'test/tracker-guard-wiring.test.ts': "const S = readFileSync(path.join(import.meta.dir, '../lib/zz-scanned.ts'), 'utf8');",
     };
@@ -359,9 +360,10 @@ describe('selectTests', () => {
       // A script under a code root, or code outside one, is still code.
       ['bin/gstack-zz-read', budget, 'joins', false],
       ['make-pdf/src/zz-read.ts', budget, 'refs', false],
-      // So is a script without a .ts or .sh name outside a code root: the extensionless setup, a .py tool.
+      // So is a script outside a code root, whatever its name: the extensionless setup, a .py tool, a .sh one.
       ['setup', budget, 'refs', false],
       ['contrib/zz/tool.py', budget, 'joins', false],
+      ['browse/scripts/zz-build.sh', budget, 'joins', false],
       ['extension/manifest.json.js', budget, 'refs', false],
       // A code root's data ships with the code that loads it, which the tripwire never runs.
       ['scripts/zz-words.json', budget, 'joins', false],
