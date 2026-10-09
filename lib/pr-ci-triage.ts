@@ -45,7 +45,8 @@ export const TRIAGE_EXIT = { DRAFTED: 0, ERROR: 1, USAGE: 2, NO_DRAFT: 10, NOTHI
 export const TRIAGE_USAGE = `gstack-pr-ci-triage <run|onset> [options]
 
   run     triage the newest failed Windows Free Tests run on the PR's head
-          (or --run <id>): per failed shard, read windows-result-<n>, and
+          (or --run <id>; without it, a newest run that finished green is
+          nothing to triage): per failed shard, read windows-result-<n>, and
           for a no-failing-test exit the shard-log artifact; classify REAL,
           CRASH (an IOCP or GLib signature as the log's last line), HANG,
           INFRA, AGGREGATE or UNKNOWN.
@@ -66,9 +67,9 @@ remote when this checkout has one) and has no newer run; a stale run's
 artifacts are never downloaded.
 
 Exit codes: 0 drafted, 1 error, 2 usage, 10 triaged without a draft
-(REAL, UNKNOWN, a stale run, or evidence missing), 11 nothing failed,
-40 the PR head branch is gone from the head remote or keeps moving
-(re-run once it settles).`;
+(REAL, UNKNOWN, a stale run, or evidence missing), 11 nothing failed or
+the head's newest run passed, 40 the PR head branch is gone from the
+head remote or keeps moving (re-run once it settles).`;
 
 export const SHARD_JOB_RE = /^windows-free-shard \((\d+)(?:, \d+)?\)$/;
 /**
@@ -543,6 +544,14 @@ async function cmdRun(d: TriageDeps, f: Flags): Promise<number> {
     if (pin.sha !== pr.headOid) stale.push(`${headRemote}/${pr.headRef} is at ${pin.sha.slice(0, 12)}, but the PR reports ${pr.headOid.slice(0, 12)}: the head moved`);
   }
   const onHead = ghJson<RunInfo[]>(d, ['run', 'list', '-R', repo, '--workflow', 'windows-free-tests.yml', '--commit', pr.headOid, '--limit', '20', '--json', RUN_FIELDS], 'gh run list');
+  // Without --run, the head's verdict is its newest run: once that finished
+  // green, an older failure is history, and calling it stale ("wait for the
+  // newer run") repeated on every re-triage of a run that already finished.
+  const newest = onHead.reduce<RunInfo | null>((a, r) => (!a || r.databaseId > a.databaseId ? r : a), null);
+  if (f.run === null && !stale.length && newest?.status === 'completed' && newest.conclusion === 'success') {
+    d.out(`RESULT NOTHING run=${newest.databaseId} the newest Windows Free Tests run on ${pr.headOid.slice(0, 12)} passed`);
+    return TRIAGE_EXIT.NOTHING;
+  }
   const runId = f.run ?? onHead.find(r => r.conclusion === 'failure')?.databaseId ?? null;
   if (runId === null) {
     d.out(`RESULT NOTHING no failed Windows Free Tests run on ${pr.headOid.slice(0, 12)}`);
