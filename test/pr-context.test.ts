@@ -1134,6 +1134,8 @@ describe('writes only through receiptedSend', () => {
       // git commands that send only through a subcommand (options may precede it), or run any command.
       ['git', ['subtree', 'push', '--prefix=sub', 'origin', 'side']], ['git', ['subtree', '-P', 'sub', 'push', 'origin', 'side']],
       ['git', ['lfs', 'push', 'origin', 'main']], ['git', ['lfs', 'pre-push', 'origin']], ['git', ['p4', 'submit']],
+      // git-lfs 3.8: lock and unlock POST to the LFS server's locks API.
+      ['git', ['lfs', 'lock', 'f.bin']], ['git', ['lfs', 'unlock', '--id', '1', '--force']],
       ['git', ['svn', 'dcommit']], ['git', ['cvsexportcommit', '-c', 'abc']], ['git', ['submodule', 'foreach', 'git push']],
       ['git', ['-c', 'alias.sp=subtree push', 'sp', '--prefix=x', 'origin', 'b']],
     ];
@@ -1150,7 +1152,7 @@ describe('writes only through receiptedSend', () => {
       ['gh', ['discussion', 'list']], ['gh', ['discussion', 'view', '5']], ['gh', ['agent-task', 'list']], ['gh', ['agent', 'view', '1']],
       ['gh', ['skill', 'list']], ['gh', ['skill', 'search', 'x']], ['gh', ['cs', 'list']], ['gh', ['codespace', 'ports']],
       ['gh', ['gist', 'view', 'abc']], ['gh', ['repo', 'autolink', 'view', '1']],
-      ['git', ['subtree', 'split', '--prefix=sub']], ['git', ['lfs', 'fetch']], ['git', ['lfs', 'ls-files']],
+      ['git', ['subtree', 'split', '--prefix=sub']], ['git', ['lfs', 'fetch']], ['git', ['lfs', 'ls-files']], ['git', ['lfs', 'locks']],
       ['git', ['submodule', 'update', '--init']], ['git', ['p4', 'sync']], ['git', ['svn', 'fetch']],
     ];
     for (const [tool, args] of writes) expect(isRemoteWrite(tool, args), `${tool} ${args.join(' ')}`).toBe(true);
