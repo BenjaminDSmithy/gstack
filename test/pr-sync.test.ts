@@ -1091,6 +1091,42 @@ describe('push', () => {
     expect(git(t.fork, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.h0);
   });
 
+  test('bin/gstack-pr-sync delivers all of a refusal past 64 KiB to a slow reader, the envelope\'s END included', async () => {
+    const t = topology('p26', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    recordValidation(t, s.sha, 0);
+    // A hook that says more than a pipe holds; the wrapper must not exit before the reader drains it.
+    write(t.clone, '.git/hooks/pre-push', '#!/bin/sh\nhead -c 70001 /dev/zero | tr "\\0" x >&2\necho >&2\nexit 1\n', 0o755);
+    // The real gh is replaced on PATH: a quiet open PR whose head is the fork's, as fakeGh answers in-process.
+    const fakebin = path.join(t.base, 'fakebin');
+    write(fakebin, 'gh', [
+      '#!/bin/bash',
+      'case "$1 $2" in',
+      '  "pr view") printf \'{"number":7,"state":"OPEN","isDraft":false,"headRefOid":"%s","url":"https://github.com/acme/gstack/pull/7","headRepositoryOwner":{"login":"me"},"headRepository":{"name":"gstack"},"headRefName":"pr/feat","baseRefName":"main"}\' "$(git -C "$FAKE_FORK" rev-parse refs/heads/pr/feat)";;',
+      '  "api user") echo me;;',
+      '  "pr list") echo "[]";;',
+      '  "api repos/acme/gstack/pulls/7") echo \'{"state":"open","merged":false,"mergeable_state":"clean","head":{"sha":"x"}}\';;',
+      '  "api "*) echo "[]";;',
+      '  *) echo "unexpected gh $*" >&2; exit 1;;',
+      'esac',
+      '',
+    ].join('\n'), 0o755);
+    const outFile = path.join(t.base, 'wrapper.out');
+    const cmd = '"$BUN" "$WRAPPER" push --pr 7 --repo acme/gstack --cwd "$CLONE" --worktree-root "$WT" --yes | (sleep 1; cat > "$OUT"); echo "${PIPESTATUS[0]}"';
+    const r = spawnSync('/bin/bash', ['-c', cmd], {
+      encoding: 'utf8', timeout: 120_000,
+      env: { ...envFor(t), PATH: `${fakebin}:${process.env.PATH}`, BUN: process.execPath, WRAPPER: path.join(REPO_ROOT, 'bin', 'gstack-pr-sync'), CLONE: t.clone, WT: t.wt, OUT: outFile, FAKE_FORK: t.fork },
+    });
+    const got = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf8') : '';
+    expect(r.stdout.trim(), `${r.stderr}\n${got.slice(0, 600)}`).toBe('41');
+    expect(got.split('\n')[0]).toStartWith('RESULT HOOK_REFUSED');
+    expect(Buffer.byteLength(got)).toBeGreaterThan(70_001);
+    expect(got.trimEnd().endsWith(TRACKER_ENVELOPE_END)).toBe(true);
+    expect(forkHead(t)).toBe(s.h0);
+  });
+
   test('retrigger pushes one empty ci: commit on the head, with approval, and marks the body stale', async () => {
     const t = topology('p5', { pr: ourFeature });
     const notCi = ciDraft(t, { message: 'feat: not a ci message\n' });
