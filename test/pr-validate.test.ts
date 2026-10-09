@@ -74,6 +74,25 @@ describe('validationEnv', () => {
     expect(env.GIT_CONFIG_NOSYSTEM).toBe('1');
   });
 
+  // OpenSSH finds its config and keys from the passwd entry's home, which a private HOME does not move.
+  const HAS_SSH = process.platform !== 'win32' && spawnSync('ssh', ['-V'], { timeout: 10_000 }).status === 0;
+  test.skipIf(!HAS_SSH)('git\'s ssh reads nothing from the caller\'s ssh directory: no config, key, agent or known hosts, as in CI\'s keyless free lane', () => {
+    const sshDir = path.join(os.userInfo().homedir, '.ssh');
+    const env = validationEnv({ PATH: process.env.PATH, HOME: path.join(ROOT, 'ssh-home'), GIT_SSH: '/x/ssh', GIT_SSH_VARIANT: 'plink', GIT_SSH_COMMAND: 'ssh -i /x/id' }, ROOT, null);
+    expect(env.GIT_SSH).toBeUndefined();
+    expect(env.GIT_SSH_VARIANT).toBeUndefined();
+    // `ssh -G` prints the configuration ssh would use, offline. The caller's HOME is already private here.
+    const resolved = (cmd: string) => spawnSync('/bin/sh', ['-c', `${cmd} -G github.com`], { env, encoding: 'utf8', timeout: 30_000 });
+    const control = resolved('ssh');
+    expect(control.status).toBe(0);
+    expect(control.stdout).toContain(sshDir);
+    const r = resolved(env.GIT_SSH_COMMAND!);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/^identityfile \/dev\/null$/m);
+    expect(r.stdout).toMatch(/^batchmode yes$/m);
+    expect(r.stdout).not.toContain(sshDir);
+  });
+
   test('drops every bun agent-mode trigger and every credential-shaped name; keeps look-alike metadata', () => {
     const gone = ['AGENT', 'REPL_ID', 'ANTHROPIC_AUTH_TOKEN', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'GITHUB_TOKEN_1', 'GH_PAT',
       'GOOGLE_APPLICATION_CREDENTIALS', 'NPM_TOKEN', 'HF_TOKEN', 'SSH_AUTH_SOCK', 'HOMEBREW_GITHUB_API_TOKEN', 'DB_PASSWORD'];

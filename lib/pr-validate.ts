@@ -65,11 +65,13 @@ own TMPDIR, Chromium profile and browse state; a write to the private
 HOME's ~/.gstack, ~/.claude, ~/.codex, ~/.agents or ~/.config/gstack is
 red, as CI's home guard makes it, and never reaches yours). Agent
 markers (CLAUDECODE, AI_AGENT, AGENT, REPL_ID, CLAUDE*) are stripped,
-every credential-shaped variable is unset, git reads no system config
-and gh an empty config dir (your gh login and keychain helper stay out
-of reach), CI=true (as GitHub Actions sets it: a committed test.only
-fails) and TMPDIR is a real path; git reads CI's global config
-(identity, init.defaultBranch main, safe.directory) instead of yours.
+every credential-shaped variable is unset, git reads no system config,
+git's ssh no ~/.ssh and gh an empty config dir (your gh login, keychain
+helper and ssh keys stay out of git's and gh's reach; a test that runs
+ssh itself still reads ~/.ssh), CI=true (as GitHub Actions sets it: a
+committed test.only fails) and TMPDIR is a real path; git reads CI's
+global config (identity, init.defaultBranch main, safe.directory)
+instead of yours.
 Records the verdict for the exact commit in the PR state; red if HEAD
 or a tracked file changed after the preconditions, while the tests ran.
 
@@ -149,8 +151,19 @@ const CREDENTIAL_SEGMENTS = new Set([
 const credentialShaped = (name: string) => name.toUpperCase().split('_').some(seg => CREDENTIAL_SEGMENTS.has(seg));
 
 // The caller's own git config overrides: CI has none, and GIT_CONFIG_COUNT
-// entries outrank a test's GIT_CONFIG_GLOBAL isolation.
-const GIT_CONFIG_ENV_RE = /^GIT_CONFIG(_COUNT|_KEY_\d+|_VALUE_\d+|_PARAMETERS|_GLOBAL|_SYSTEM|_NOSYSTEM)?$/;
+// entries outrank a test's GIT_CONFIG_GLOBAL isolation. GIT_SSH and
+// GIT_SSH_VARIANT name the caller's ssh; validationEnv sets its own.
+const GIT_CONFIG_ENV_RE = /^GIT_CONFIG(_COUNT|_KEY_\d+|_VALUE_\d+|_PARAMETERS|_GLOBAL|_SYSTEM|_NOSYSTEM)?$|^GIT_SSH(_COMMAND|_VARIANT)?$/;
+
+/**
+ * The ssh git runs for a test: OpenSSH reads ~/.ssh (config, keys, known
+ * hosts) from the passwd entry's home, not $HOME, so a private HOME does
+ * not hide the owner's GitHub key. This one reads no config file, offers
+ * no key and no agent, keeps no known hosts and never prompts, like CI's
+ * keyless free lane. A test that sets its own GIT_SSH_COMMAND, or runs
+ * ssh directly, is not covered.
+ */
+export const KEYLESS_SSH = 'ssh -F /dev/null -o IdentitiesOnly=yes -o IdentityFile=/dev/null -o IdentityAgent=none -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o BatchMode=yes';
 
 /** The global git config free-tests.yml writes with `git config --global` before the suite. */
 export const CI_GITCONFIG = '[user]\n\temail = free-tests-ci@gstack.test\n\tname = Free Tests CI\n[init]\n\tdefaultBranch = main\n[safe]\n\tdirectory = *\n';
@@ -176,11 +189,12 @@ export function validationEnv(base: NodeJS.ProcessEnv, tmpdir: string, seedBase:
   }
   if (gitConfig) env.GIT_CONFIG_GLOBAL = gitConfig;
   // CI's free lane holds no credentials (persist-credentials: false, no
-  // GH_TOKEN): no system git config (Homebrew's names the osxkeychain
-  // credential helper) and an empty gh config dir, so neither git over
-  // https nor gh can act as the owner.
+  // GH_TOKEN, no ssh key): no system git config (Homebrew's names the
+  // osxkeychain credential helper), an empty gh config dir and a keyless
+  // ssh, so git over https or ssh and gh cannot act as the owner.
   env.GIT_CONFIG_NOSYSTEM = '1';
   env.GH_CONFIG_DIR = path.join(tmpdir, 'gh-config');
+  env.GIT_SSH_COMMAND = KEYLESS_SSH;
   // GitHub Actions sets CI=true for every step. Bun then refuses a committed
   // test.only (without it, bun runs only that test and skips its failing
   // siblings), and tests that branch on CI take CI's branch.
