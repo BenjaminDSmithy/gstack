@@ -1211,6 +1211,46 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(rec.calls.some(c => c.line.includes('gate-secret-scan.mjs'))).toBe(false);
   });
 
+  test('the secret scan reads git\'s own diff, as CI does: a caller\'s external diff, diff driver or textconv never hides an added line', async () => {
+    // A caller's config can hand `git diff` to another program (diff.external, difftastic's documented
+    // setup) or, through core.attributesFile, to a driver's command or a lossy textconv. CI runs none.
+    const attrs = path.join(ROOT, 'scan-zz.gitattributes');
+    fs.writeFileSync(attrs, '*.ts diff=zz\n');
+    const CONFIGS: [string, [string, string][]][] = [
+      ['default', []],
+      ['diff.external', [['diff.external', '/usr/bin/true']]],
+      ['driver command', [['core.attributesFile', attrs], ['diff.zz.command', '/usr/bin/true']]],
+      ['driver textconv', [['core.attributesFile', attrs], ['diff.zz.textconv', 'sed /ZZSECRET/d']]],
+    ];
+    for (const [label, keys] of CONFIGS) {
+      const cfg: NodeJS.ProcessEnv = { GIT_CONFIG_COUNT: String(keys.length) };
+      keys.forEach(([k, v], i) => { cfg[`GIT_CONFIG_KEY_${i}`] = k; cfg[`GIT_CONFIG_VALUE_${i}`] = v; });
+      const git: GitRunner = (args, o) => defaultGit(args, { ...o, env: { ...process.env, ...cfg } });
+      let tree = '';
+      const rec = recorder(() => tree);
+      const scanned: string[] = [];
+      // Stands in for gate-secret-scan.mjs: red on an added line holding the secret.
+      const tool: ToolRunner = (cmd, args, o) => {
+        if (args[0]?.endsWith('/.github/scripts/gate-secret-scan.mjs')) {
+          scanned.push(o.input ?? '');
+          return { status: /^\+.*ZZSECRET/m.test(o.input ?? '') ? 1 : 0, stdout: '', stderr: '' };
+        }
+        return rec.tool(cmd, args, o);
+      };
+      const f = fixture(`scan-own-diff-${label.replace(/\W/g, '-')}`, "test('x', () => expect(y).toBe(2));", {
+        base: { '.github/scripts/gate-secret-scan.mjs': 'process.exit(0);\n' },
+        pr: { 'lib/y.ts': 'export const y = 2; // ZZSECRET\n' },
+        deps: { tool, git },
+      });
+      tree = f.tree;
+      expect(await f.call(['run']), label).toBe(1);
+      expect(scanned, label).toHaveLength(1);
+      expect(scanned[0], label).toMatch(/^\+export const y = 2; \/\/ ZZSECRET$/m);
+      expect(f.out, label).toContain('mirror secret-scan rc=1');
+      expect(f.out[0], label).toStartWith('RESULT RED');
+    }
+  });
+
   test('gen:skill-docs output that is not committed is red', async () => {
     let tree = '';
     const rec = recorder(() => tree, { onCall: l => { if (l === 'bun run gen:skill-docs --host all') write(tree, 'drift/SKILL.md', 'stale\n'); } });
