@@ -904,11 +904,13 @@ function headerPath(header: string): string {
  * diff.noprefix, diff.mnemonicPrefix, diff.srcPrefix or diff.dstPrefix
  * would move the header off `a/<f> b/<f>`, headerPath would key the file
  * by the whole header, and a precondition's own rebuilt output would read
- * as a tree change.
+ * as a tree change. The content is git's own too: a caller's textconv
+ * (a diff driver named through core.attributesFile) can convert HEAD and
+ * an edited file alike, and the edit would drop out of the fingerprint.
  */
 function treeState(c: Ctx): { head: string; diff: string; files: Map<string, string> } {
   const head = gitOk(c.d, c.tree, ['rev-parse', 'HEAD'], 'git rev-parse').trim();
-  const r = c.d.git(['diff', 'HEAD', '--no-color', '--binary', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/'], { cwd: c.tree });
+  const r = c.d.git(['diff', 'HEAD', '--no-color', '--binary', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/'], { cwd: c.tree });
   if (r.status !== 0) throw new PrContextError(`git diff HEAD failed: ${(r.error ?? r.stderr).trim().split('\n').at(-1)}`, 1);
   const files = new Map<string, string>();
   for (const part of r.stdout.split(/^(?=diff --git )/m).filter(p => p.startsWith('diff --git '))) {

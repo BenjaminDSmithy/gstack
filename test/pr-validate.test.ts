@@ -1160,6 +1160,24 @@ describe('run, select and declare against a fixture PR tree', () => {
     }
   });
 
+  test('a caller\'s textconv never hides an edit from the fingerprint: an edit made while the tests ran that the conversion drops is red', async () => {
+    // A lossy textconv (gitattributes(5)'s own example runs exif on a jpg) named through a caller-only
+    // core.attributesFile: here it drops the lines holding ZZHIDE, so HEAD and the edited file convert alike.
+    const attrs = path.join(ROOT, 'fp-zz.gitattributes');
+    fs.writeFileSync(attrs, '*.ts diff=zz\n');
+    const git: GitRunner = (args, o) => defaultGit(args, { ...o, env: { ...process.env, GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'core.attributesFile', GIT_CONFIG_VALUE_0: attrs, GIT_CONFIG_KEY_1: 'diff.zz.textconv', GIT_CONFIG_VALUE_1: 'sed /ZZHIDE/d' } });
+    let tree = '';
+    const rec = recorder(() => tree, {
+      onCall: l => {
+        if (l.startsWith('bun test test/x.test.ts')) write(tree, 'lib/y.ts', 'export const y = 2;\n// ZZHIDE edited while the tests ran\n');
+      },
+    });
+    const f = fixture('fp-textconv', "test('x', () => expect(y).toBe(2));", { base: CI_TREE, deps: { tool: rec.tool, git } });
+    tree = f.tree;
+    expect(await f.call(['run'])).toBe(1);
+    expect(f.out.find(l => l.startsWith('tree changed during the run'))).toContain('tracked files lib/y.ts differ');
+  });
+
   test('the tree gains a file while the preconditions run: an untracked module the commit lacks, or an edit before the first precondition, is red; ignored build output is not', async () => {
     const BUILT = 'lib/diagram-render/dist/BUILD_INFO.json';
     const runWith = async (name: string, at: string, act: (tree: string) => void, o: { scripts?: Record<string, string>; pr?: Record<string, string> } = {}) => {
