@@ -1,4 +1,8 @@
 #!/usr/bin/env bun
 import { syncMain } from '../lib/pr-sync';
 
-process.exit(await syncMain(process.argv.slice(2)));
+// process.exit() discards stdout still buffered in a pipe: past 64 KiB a
+// slow reader loses the tail (a long hook or server message, the envelope's
+// END marker). Set the code and let the runtime drain stdout, as
+// bin/gstack-pr-body and bin/gstack-redact do.
+process.exitCode = await syncMain(process.argv.slice(2));
