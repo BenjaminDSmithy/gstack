@@ -917,3 +917,14 @@ describe('LaunchAgent runner', () => {
     expect(notified().filter(l => l.includes('#20'))).toHaveLength(1);
   });
 });
+
+describe('bin', () => {
+  test('a reader that closes the pipe early (`| head -1`) leaves the exit code as computed, never 1', () => {
+    const bin = path.join(import.meta.dir, '..', 'bin', 'gstack-pr-watch');
+    for (const [args, want] of [[[], 2], [['--help'], 0]] as const) {
+      // `true` exits long before bun starts writing, so every write meets a closed pipe (EPIPE).
+      const r = spawnSync('/bin/bash', ['-c', '"$0" "$@" 2>/dev/null | true; echo "rc=${PIPESTATUS[0]}"', bin, ...args], { encoding: 'utf8', timeout: 60_000 });
+      expect(r.stdout.trim(), `${bin} ${args.join(' ')}`).toBe(`rc=${want}`);
+    }
+  });
+});
