@@ -353,6 +353,14 @@ describe('pure helpers', () => {
     expect(classifyPush(res(128, '', "fatal: '/nonexistent/x.git' does not appear to be a git repository\nfatal: Could not read from remote repository.\n"), ref)).toMatchObject({ landed: false, code: 1 });
     // A rejection whose text says "rejected" is not a non-fast-forward unless git's status line says so.
     expect(classifyPush(res(1, '', "push rejected: secret scan found a token\nerror: failed to push some refs to 'x'\n"), ref).code).toBe(41);
+    // git 2.56: a remote helper (the https transport) dying mid-push is exit 1, no status line,
+    // its "fatal:" and "failed to push some refs": the same shape a hook printing "fatal:" makes.
+    // Never a hook refusal on that evidence; the message names both causes.
+    const helperDied = classifyPush(res(1, '', "fatal: the remote end hung up unexpectedly\nerror: failed to push some refs to 'https://github.com/me/gstack.git'\n"), ref);
+    expect(helperDied).toMatchObject({ landed: false, code: 1 });
+    expect(helperDied.why).toContain('pre-push hook');
+    // A local remote that hangs up mid-push: git dies (128).
+    expect(classifyPush(res(128, '', 'send-pack: unexpected disconnect while reading sideband packet\nfatal: the remote end hung up unexpectedly\n'), ref).code).toBe(1);
   });
 
   test('pickVersion keeps ours only when it is above main and unclaimed', () => {

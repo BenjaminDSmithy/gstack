@@ -268,6 +268,10 @@ export interface PushOutcome { landed: boolean; code: number; why: string }
  * a ruleset, a hidden ref: 41, stop and report). A failure with no status
  * line, no fatal transport error and git's "failed to push some refs" never
  * left the machine: a pre-push hook refused it (41, never --no-verify).
+ * Exit status alone cannot separate the two: git 2.56 exits 1 with no
+ * status line and "failed to push some refs" both for a hook and for a
+ * remote helper (the https transport) that dies mid-push with "fatal:".
+ * So a "fatal:" line keeps it an error (1), and the message names both.
  */
 export function classifyPush(r: GhResult, ref: string): PushOutcome {
   const row = r.stdout.replace(/\r/g, '').split('\n').map(l => l.split('\t')).find(f => f.length >= 3 && f[1].endsWith(`:${ref}`));
@@ -276,8 +280,12 @@ export function classifyPush(r: GhResult, ref: string): PushOutcome {
   if (r.status === 0 && flag !== '!') return { landed: true, code: SYNC_EXIT.SYNCED, why: summary };
   if (flag === '!' && summary.startsWith('[rejected]')) return { landed: false, code: SYNC_EXIT.REMOTE_MOVED, why: 'git refused the push as not a fast-forward: abort and re-sync' };
   if (flag === '!' && summary.startsWith('[remote rejected]')) return { landed: false, code: SYNC_EXIT.HOOK_REFUSED, why: 'the remote refused the push (its reason is in the git output below): stop and report it (never --no-verify, never force)' };
-  if (!row && r.status !== null && !/^fatal:/m.test(r.stderr) && /failed to push some refs/.test(r.stderr)) {
+  const unsent = !row && r.status !== null && /failed to push some refs/.test(r.stderr);
+  if (unsent && !/^fatal:/m.test(r.stderr)) {
     return { landed: false, code: SYNC_EXIT.HOOK_REFUSED, why: 'the local pre-push hook refused the push (its words are below): stop and report it (never --no-verify)' };
+  }
+  if (unsent) {
+    return { landed: false, code: SYNC_EXIT.ERROR, why: `git push failed before the remote took the ref (exit ${r.status}, a "fatal:" line): the connection or the remote helper failed, or a pre-push hook printed "fatal:"; git's output is below (stop and report it; never --no-verify)` };
   }
   return { landed: false, code: SYNC_EXIT.ERROR, why: `git push failed (exit ${r.status ?? 'none'}${r.error ? `, ${r.error}` : ''}); git's output is below` };
 }
