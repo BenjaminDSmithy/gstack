@@ -48,7 +48,9 @@ export const TRIAGE_USAGE = `gstack-pr-ci-triage <run|onset> [options]
           (or --run <id>; without it, a newest run that finished green is
           nothing to triage, and one still queued or running, a re-run
           included, or no run listed on the head yet (right after a
-          push), is no verdict yet): per failed shard, read
+          push; a PR in merge conflict with its base gets no run until
+          the conflict is resolved, read-only gh pr view), is no verdict
+          yet): per failed shard, read
           windows-result-<n>, and for a no-failing-test exit the shard-log
           artifact; classify REAL, CRASH (an IOCP or GLib signature as the
           log's last line), HANG, INFRA, AGGREGATE or UNKNOWN.
@@ -70,7 +72,7 @@ artifacts are never downloaded.
 
 Exit codes: 0 drafted, 1 error, 2 usage, 10 triaged without a draft
 (REAL, UNKNOWN, a stale or unfinished run, no run on the head yet, or
-evidence missing), 11 the head's newest run passed, or it has runs and
+on a PR in merge conflict, or evidence missing), 11 the head's newest run passed, or it has runs and
 every one finished and none failed,
 40 the PR head branch is gone from the head remote or keeps moving
 (re-run once it settles).`;
@@ -533,6 +535,24 @@ async function sameTreeGreen(d: TriageDeps, repo: string, pr: PrInfo, run: RunIn
   return { green: null, why: 'no earlier run that tested the same tree and files passed the shard' };
 }
 
+/**
+ * GitHub's mergeability of the PR (`MERGEABLE`, `CONFLICTING`, `UNKNOWN`
+ * while it computes), by a read-only gh pr view, or null when the read
+ * fails. Workflows do not run on pull_request activity while the PR has a
+ * merge conflict (GitHub docs, events that trigger workflows), and Windows
+ * Free Tests runs on pull_request.
+ */
+function prMergeable(d: TriageDeps, repo: string, n: number): string | null {
+  const r = d.gh(['pr', 'view', String(n), '--repo', repo, '--json', 'mergeable']);
+  if (r.status !== 0) return null;
+  try {
+    const v = (JSON.parse(r.stdout) as { mergeable?: unknown }).mergeable;
+    return typeof v === 'string' && /^[A-Z_]{1,32}$/.test(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 /** No finished verdict for the head (`runId` null: no run on it yet): no draft, each reason on a STALE line. */
 function staleNoDraft(d: TriageDeps, runId: number | null, stale: string[]): number {
   d.out(`RESULT NO_DRAFT run=${runId ?? 'none'} stale: triage the newest finished run on the current head`);
@@ -569,11 +589,15 @@ async function cmdRun(d: TriageDeps, f: Flags): Promise<number> {
     // since: gh lists it with no conclusion) has no verdict yet. NOTHING would
     // read as "nothing failed" while a maintainer's re-run is still going.
     // Nor does a head with no run listed: right after a sync or ci: push,
-    // GitHub has not created the new head's pull_request run yet.
-    if (!newest || newest.status !== 'completed') {
-      stale.push(newest
-        ? `run ${newest.databaseId} is still ${word(newest.status) || 'queued'}: wait for every shard to finish, then triage again`
-        : `no Windows Free Tests run on ${pr.headOid.slice(0, 12)} yet: wait for GitHub to start one, then triage again`);
+    // GitHub has not created the new head's pull_request run yet. While the
+    // PR conflicts with its base GitHub never creates one, so waiting would
+    // not clear it: the conflict has to be resolved first.
+    if (newest) {
+      if (newest.status !== 'completed') stale.push(`run ${newest.databaseId} is still ${word(newest.status) || 'queued'}: wait for every shard to finish, then triage again`);
+    } else if (prMergeable(d, repo, pr.number) === 'CONFLICTING') {
+      stale.push(`no Windows Free Tests run on ${pr.headOid.slice(0, 12)}, and GitHub starts none while the PR has a merge conflict with its base: resolve it in the sync mode first, then triage again`);
+    } else {
+      stale.push(`no Windows Free Tests run on ${pr.headOid.slice(0, 12)} yet: wait for GitHub to start one, then triage again`);
     }
     // A head remote holding another commit (the STALE above) leaves no
     // verdict either: as with a green run, runs of the head gh reports that
