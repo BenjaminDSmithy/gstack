@@ -322,7 +322,7 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
   // A remote gh cannot find: a contributor's deleted fork, or a private repo this login lost.
   const DEAD = 'https://github.com/someone/deleted-fork.git';
   const DEAD_SKIP = 'UPSTREAM_PR_SKIP: remote contributor (someone/deleted-fork) not found on GitHub; not checked';
-  const noteFor = (host: string) => `UPSTREAM_PR_NOTE: gh does not run; ${host} counts only if its hosts.yml or GH_HOST names it`;
+  const noteFor = (host: string) => `UPSTREAM_PR_NOTE: gh does not run; ${host} counts if hosts.yml or GH_HOST names it, or that file cannot be checked`;
   /** `env` values may name the row's stub dir as {stub}. */
   const cases: { name: string; remotes: Record<string, string>; config?: [string, string][]; env?: Record<string, string>; gh: Gh; want: string; skip?: string[]; dflt?: string[]; note?: string[]; code: number }[] = [
     { name: 'a fork branch with no PR yet is new (a GitLab mirror is not asked)', remotes: { origin: 'https://github.com/me/gstack.git', mirror: 'git@gitlab.example.com:me/gstack.git' }, gh: { repos: { 'Me/gstack': 'Garrytan/gstack' }, prs: { 'garrytan/gstack': [] } }, want: 'UPSTREAM_PR: new garrytan/gstack', code: 0 },
@@ -455,8 +455,9 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
       ['handoff', 'unset gh_repo'],
       // An Enterprise repo is named with its host, and its PR is the owner's to handle.
       ['enterprise', 'login', '<host>/<owner>/<name>', 'by hand'],
-      // A gh that does not run cannot list its logins: its hosts.yml or GH_HOST decides, and the owner hears of it.
-      ['does not run', 'hosts.yml', 'gh_host'],
+      // A gh that does not run cannot list its logins: its hosts.yml or GH_HOST decides, a hosts.yml it cannot
+      // check counts every host (fail closed), and the owner hears of it.
+      ['does not run', 'hosts.yml', 'gh_host', 'cannot be checked'],
       ['upstream_pr_note', 'does not run', 'hosts file'],
       ['report', 'repair gh'],
       // An open PR: no push, no body or title edit.
