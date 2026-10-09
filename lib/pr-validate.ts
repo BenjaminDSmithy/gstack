@@ -97,9 +97,9 @@ test's own directory or file, or a const resolved from them; a code
 file's extension may be left off when the join ends there) or naming it,
 or, for a template gen-skill-docs renders or a module it imports, the
 skill-rendering tests. A class tripwire's pass (egress wiring,
-sync-spawn timeouts, skill budgets, ...) is not coverage. A file with
-none is red (NO_TESTS), never "0/0 green": declare the tests that cover
-it (a passing declared test covers the change).
+sync-spawn timeouts, skill budgets, tracker-text wiring, ...) is not
+coverage. A file with none is red (NO_TESTS), never "0/0 green": declare
+the tests that cover it (a passing declared test covers the change).
 A change to package.json beyond .version, bun.lock, tsconfig,
 bunfig.toml or its preload files, .github/workflows/free-tests.yml, or
 the free-suite runner and the modules it imports needs the full suite:
@@ -235,7 +235,11 @@ export function testFileEnv(base: NodeJS.ProcessEnv, stateDir: string, file: str
 // pure E2E data in that closure, is left out. test/pr-validate.test.ts
 // walks the runner's imports and pins this list.
 const FULL_RE = /^(bun\.lock|bun\.lockb|bunfig\.toml|test-setup\.ts|patches\/.*|tsconfig[^/]*\.json|\.github\/workflows\/free-tests\.yml|scripts\/test-free-shards\.ts|scripts\/lib\/(shard-engine|windows-curation|free-[^/]*)\.ts|lib\/state-root\.ts|test\/helpers\/(paid-test-set|touchfiles|test-selection)\.ts)$/;
-const SKILL_SURFACE_RE = /(^|\/)SKILL\.md\.tmpl$|^scripts\/resolvers\/|^scripts\/gen-skill-docs\.ts$|^hosts\//;
+// The skill surface: the roots test/tracker-guard-wiring.test.ts scans (its
+// trackedFiles filter: every *.md.tmpl, section templates included,
+// scripts/resolvers/ and review/*.md; test/pr-validate.test.ts reads that
+// filter and pins this), the generator, and the hosts it renders for.
+const SKILL_SURFACE_RE = /\.md\.tmpl$|^scripts\/resolvers\/|^review\/[^/]+\.md$|^scripts\/gen-skill-docs\.ts$|^hosts\//;
 // The templates scripts/gen-skill-docs.ts renders (scripts/discover-skills.ts):
 // the root's and each top-level skill's SKILL.md.tmpl, and its sections/*.md.tmpl.
 const RENDERED_TMPL_RE = /^(?:[^/]+\/)?SKILL\.md\.tmpl$|^[^/]+\/sections\/[^/]+\.md\.tmpl$/;
@@ -250,9 +254,10 @@ const under = (f: string, roots: readonly string[]) => roots.some(r => f.startsW
 // They run the generator over every template for every host: a rendered
 // template, and every module the generator imports, runs in them (`renders:`).
 const RENDER_TESTS = ['test/gen-skill-docs.test.ts', 'test/skill-validation.test.ts'];
-// Tripwires over the generated skill files' size budgets: like every class
-// pick, they run but never cover.
-const CLASS_SKILL = ['test/catalog-budget.test.ts', 'test/context-budget-ratchet.test.ts'];
+// Tripwires over the skill surface: the generated files' size budgets and the
+// tracker-text wiring scan. Like every class pick they run but never cover,
+// and they cover nothing through any other rule either.
+const CLASS_SKILL = ['test/catalog-budget.test.ts', 'test/context-budget-ratchet.test.ts', 'test/tracker-guard-wiring.test.ts'];
 const CLASS_CODE = ['test/egress-receipt-wiring.test.ts'];
 const CLASS_TEST = ['test/spawnsync-timeout-tripwire.test.ts', 'test/test-of-test-ratchet.test.ts', 'test/paid-orphan-tripwire.test.ts', 'test/test-free-shards.test.ts'];
 const CLASS_RELEASE = ['test/agents-digest.test.ts', 'test/gstack-version-bump.test.ts', 'test/gstack-next-version.test.ts', 'test/ship-version-sync.test.ts', 'test/version-source.test.ts'];
@@ -748,17 +753,20 @@ export function untestedCode(changed: string[], sel: Selection, exists: (f: stri
  * skill-rendering tests run a rendered template and every module the
  * generator imports). A `class:*` pick never covers: those tests are
  * tripwires that scan source or generated files for one pattern, and they
- * run without exercising the change. A passing declared test covers
- * everything: the owner declared it for the change.
+ * run without exercising the change. A skill-surface tripwire covers
+ * nothing but itself, whatever picked it (test/tracker-guard-wiring.test.ts
+ * names the files its exemption list reasons about). A passing declared
+ * test covers everything: the owner declared it for the change.
  */
 export function uncoveredCode(code: string[], sel: Selection, passed: (file: string) => boolean): string[] {
   const covered = new Set<string>();
   for (const s of sel.files) {
     if (!passed(s.file)) continue;
     if (s.rules.includes('declared')) return [];
+    const tripwire = CLASS_SKILL.includes(s.file);
     for (const r of s.rules) {
       if (r === 'changed') covered.add(s.file);
-      const m = /^(?:imports|reaches|refs|joins|names|renders):(.+)$/.exec(r);
+      const m = tripwire ? null : /^(?:imports|reaches|refs|joins|names|renders):(.+)$/.exec(r);
       if (m) covered.add(m[1]);
     }
   }
