@@ -1020,6 +1020,27 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(readStateFor(f.dir, pr)).toBeNull();
   });
 
+  test('the dirty-tree refusal names a renamed file once, by its new path, whether the rename is staged or only in the worktree', async () => {
+    // `git status -z` writes a rename as `XY <new>\0<old>\0`: X is R for a staged rename (git mv), Y is R
+    // for a worktree one (git add -N on the new name). The source is no entry of its own.
+    const renames: GitRunner = (args, o) => defaultGit(args, { ...o, env: { ...process.env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'status.renames', GIT_CONFIG_VALUE_0: 'true' } });
+    const cases: [string, (tree: string) => void][] = [
+      ['staged', tree => git(tree, 'mv', 'lib/y.ts', 'lib/w.ts')],
+      ['worktree', tree => {
+        fs.renameSync(path.join(tree, 'lib/y.ts'), path.join(tree, 'lib/w.ts'));
+        git(tree, 'add', '-N', 'lib/w.ts');
+      }],
+    ];
+    for (const [label, rename] of cases) {
+      const f = fixture(`dirty-rename-${label}`, null, { deps: { git: renames } });
+      rename(f.tree);
+      expect(await f.call(['run']), label).toBe(30);
+      expect(f.out, label).toHaveLength(1);
+      expect(f.out[0], label).toMatch(/^RESULT PRECONDITION .* has uncommitted changes \(lib\/w\.ts\); /);
+      expect(readStateFor(f.dir, pr), label).toBeNull();
+    }
+  });
+
   const freeTests = (pin: string) =>
     `jobs:\n  free:\n    steps:\n      - uses: oven-sh/setup-bun@v2\n        with:\n          bun-version: ${pin}\n  macos-named-regressions:\n    steps:\n      - run: |\n          files=(test/x.test.ts)\n`;
 
