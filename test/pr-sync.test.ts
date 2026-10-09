@@ -996,7 +996,7 @@ describe('push', () => {
     expect(git(t.clone, 'rev-parse', 'HEAD')).toBe(s.sha);
   });
 
-  test('a head remote off the PR host holding the commit is no proof the PR has it: 42 with nothing recorded, again on a re-run, recorded once the PR reports it', async () => {
+  test('a head remote off the PR host holding the commit is no proof the PR has it: 42 with nothing recorded, again on a re-run, recorded once the PR reports it; each 42 NOTE names the push with its --accept-* flag', async () => {
     const t = topology('p28', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
     // origin is a mirror of the fork: the same OWNER/NAME on another server. Pushes land
     // there (push URL = fetch URL), and the PR, which reads the fork, never moves.
@@ -1006,7 +1006,11 @@ describe('push', () => {
     queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
     expect((await run(t, ['merge'])).code).toBe(0);
     const s = readStagedSync(stateDir(t), pr)!;
-    recordValidation(t, s.sha, 0);
+    // The validation waived the full suite: every push needs --accept-full-risk, and so does the one a 42 NOTE names.
+    recordValidation(t, s.sha, 0, '3/3 selected files green; FULL waived (bunfig.toml): the full suite did not run');
+    const push = ['push', '--yes', '--accept-full-risk'];
+    /** Every push command the NOTE lines name, without the binary's name. */
+    const namedPushes = (out: string[]) => [...out.filter(l => l.startsWith('NOTE ')).join('\n').matchAll(/`gstack-pr-sync (push [^`]*)`/g)].map(m => m[1]);
     const local = git(t.clone, 'rev-parse', 'HEAD');
     const sent = () => listReceipts(path.join(t.base, 'home')).filter(x => x.payload_class === 'pr-sync-push').length;
     // No onPrHost injected: the production default must call the mirror, a local path, off the PR's host.
@@ -1018,21 +1022,26 @@ describe('push', () => {
       expect(fs.existsSync(s.scratch)).toBe(true);
       expect(git(t.clone, 'rev-parse', 'HEAD')).toBe(local);
     };
-    const r = await run(t, ['push', '--yes']);
+    const r = await run(t, push);
     expect(r.code, r.out.join('\n')).toBe(42);
     expect(r.out[0]).toStartWith('RESULT UNVERIFIED');
     expect(r.out.join('\n')).not.toContain('RESULT PUSHED');
+    // After the send, with the mirror readable: the NOTE's push keeps the waiver flag (a bare `push --yes` is refused 31).
+    expect(namedPushes(r.out), r.out.join('\n')).toEqual([push.join(' ')]);
     expect(sent()).toBe(1);
     nothingRecorded();
     // Push again: the mirror already holds the commit before any send. Still no proof: 42, nothing sent.
-    const again = await run(t, ['push', '--yes']);
+    const again = await run(t, push);
     expect(again.code, again.out.join('\n')).toBe(42);
     expect(again.out[0]).toStartWith('RESULT UNVERIFIED');
+    // Before any send ("nothing sent now"): the same.
+    expect(namedPushes(again.out), again.out.join('\n')).toEqual([push.join(' ')]);
     expect(sent()).toBe(1);
     nothingRecorded();
     // The commit reaches the PR's repository and the PR reports it: push records it, sending nothing.
     git(t.clone, 'push', '-q', t.fork, `${s.sha}:refs/heads/pr/feat`);
-    const late = await run(t, ['push', '--yes']);
+    // The push the NOTE names, as written.
+    const late = await run(t, namedPushes(again.out)[0].split(' '));
     expect(late.code, late.out.join('\n')).toBe(0);
     expect(late.out[0]).toStartWith('RESULT PUSHED');
     expect(sent()).toBe(1);
