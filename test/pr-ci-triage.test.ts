@@ -496,6 +496,31 @@ describe('run', () => {
     expect(draftFiles(r)).toEqual([]);
   });
 
+  test('without --run, a head whose newest run awaits a maintainer\'s approval is no verdict: stale (10), never NOTHING', async () => {
+    // A fork PR that needs approval: GitHub lists the head's run as completed with
+    // conclusion action_required (upstream run 37887677077, 2026-10-09) and runs no
+    // job until a maintainer approves it. NOTHING would report a head no test ran on as clean.
+    const r = await triage([{ id: 100, sha: B, status: 'completed', conclusion: 'action_required', jobs: [] }]);
+    expect(r.code, r.out.join('\n')).toBe(10);
+    expect(r.out[0]).toStartWith('RESULT NO_DRAFT run=100 stale');
+    const line = r.out.find(l => l.startsWith('STALE')) ?? '';
+    expect(line, r.out.join('\n')).toStartWith('STALE run 100 ');
+    expect(line).toContain('approval');
+    expect(line).toContain(B.slice(0, 12));
+    expect(line).toContain('triage again');
+    expect(r.out.some(l => l.startsWith('RESULT NOTHING'))).toBe(false);
+    expect(r.calls.some(c => c[0] === 'run' && c[1] === 'view')).toBe(false);
+    expect(downloads(r.calls)).toBe(0);
+    expect(draftFiles(r)).toEqual([]);
+    // The approval wait is the head's newest run: an older run on the head that passed is not its verdict.
+    const afterGreen = await triage([
+      { id: 99, sha: B, conclusion: 'success', jobs: [{ name: 'windows-free-shard (4)', conclusion: 'success' }] },
+      { id: 100, sha: B, conclusion: 'action_required', jobs: [] },
+    ]);
+    expect(afterGreen.code, afterGreen.out.join('\n')).toBe(10);
+    expect(afterGreen.out.some(l => l.startsWith('STALE run 100 ') && l.includes('approval'))).toBe(true);
+  });
+
   test('without --run, a head with no run on a PR that conflicts with its base says sync first, not wait: GitHub starts no pull_request run while it conflicts', async () => {
     // GitHub docs (events that trigger workflows, pull_request): workflows do not run on
     // pull_request activity while the PR has a merge conflict. Waiting never clears that.

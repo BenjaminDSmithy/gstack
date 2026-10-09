@@ -71,8 +71,9 @@ remote when this checkout has one) and has no newer run; a stale run's
 artifacts are never downloaded.
 
 Exit codes: 0 drafted, 1 error, 2 usage, 10 triaged without a draft
-(REAL, UNKNOWN, a stale or unfinished run, no run on the head yet, or
-on a PR in merge conflict, or evidence missing), 11 the head's newest run passed, or it has runs and
+(REAL, UNKNOWN, a stale or unfinished run, a run awaiting a maintainer's
+approval, no run on the head yet, or on a PR in merge conflict, or
+evidence missing), 11 the head's newest run passed, or it has runs and
 every one finished and none failed,
 40 the PR head branch is gone from the head remote or keeps moving
 (re-run once it settles).`;
@@ -591,9 +592,12 @@ async function cmdRun(d: TriageDeps, f: Flags): Promise<number> {
     // Nor does a head with no run listed: right after a sync or ci: push,
     // GitHub has not created the new head's pull_request run yet. While the
     // PR conflicts with its base GitHub never creates one, so waiting would
-    // not clear it: the conflict has to be resolved first.
+    // not clear it: the conflict has to be resolved first. A run that awaits a
+    // maintainer's approval (a fork PR that needs it: gh lists it completed,
+    // conclusion action_required) ran no job, so it is no verdict either.
     if (newest) {
       if (newest.status !== 'completed') stale.push(`run ${newest.databaseId} is still ${word(newest.status) || 'queued'}: wait for every shard to finish, then triage again`);
+      else if (newest.conclusion === 'action_required') stale.push(`run ${newest.databaseId} awaits a maintainer's approval to run: no test has run on ${pr.headOid.slice(0, 12)}; triage again once a maintainer approves it and it finishes`);
     } else if (prMergeable(d, repo, pr.number) === 'CONFLICTING') {
       stale.push(`no Windows Free Tests run on ${pr.headOid.slice(0, 12)}, and GitHub starts none while the PR has a merge conflict with its base: resolve it in the sync mode first, then triage again`);
     } else {
