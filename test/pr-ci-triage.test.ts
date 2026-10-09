@@ -194,7 +194,8 @@ function resultJson(fx: ShardFx): string {
   return JSON.stringify(j);
 }
 
-function fakeGh(runs: FakeRun[], calls: string[][], headOid = B, trees: Record<string, string> = TREES): GhRunner {
+/** `mergeable`: what `gh pr view --json mergeable` reports (GitHub: MERGEABLE, CONFLICTING or UNKNOWN), or 'FAIL' for a failed read. */
+function fakeGh(runs: FakeRun[], calls: string[][], headOid = B, trees: Record<string, string> = TREES, mergeable = 'MERGEABLE'): GhRunner {
   const view = (r: FakeRun) => ({
     databaseId: r.id, headSha: r.sha, headBranch: 'pr/t', event: 'pull_request', conclusion: r.conclusion ?? 'failure', status: r.status ?? 'completed', createdAt: r.createdAt ?? '2026-10-06T00:00:00Z',
     jobs: r.jobs ?? [
@@ -205,6 +206,9 @@ function fakeGh(runs: FakeRun[], calls: string[][], headOid = B, trees: Record<s
   return (args => {
     calls.push(args);
     const ok = (v: unknown) => ({ status: 0, stdout: JSON.stringify(v), stderr: '' });
+    if (args[0] === 'pr' && args[1] === 'view' && args[args.indexOf('--json') + 1] === 'mergeable') {
+      return mergeable === 'FAIL' ? { status: 1, stdout: '', stderr: 'HTTP 502' } : ok({ mergeable });
+    }
     if (args[0] === 'pr' && args[1] === 'view') {
       return ok({ number: 3, state: 'OPEN', isDraft: false, headRefOid: headOid, url: 'https://github.com/acme/gt/pull/3', headRepositoryOwner: { login: 'me' }, headRepository: { name: 'gt' }, headRefName: 'pr/t', baseRefName: 'main' });
     }
@@ -250,11 +254,11 @@ function fakeGh(runs: FakeRun[], calls: string[][], headOid = B, trees: Record<s
 }
 
 let homes = 0;
-async function triage(runs: FakeRun[], extra: string[] = [], opts: { headOid?: string; cwd?: string; stateRoot?: string; trees?: Record<string, string> } = {}) {
+async function triage(runs: FakeRun[], extra: string[] = [], opts: { headOid?: string; cwd?: string; stateRoot?: string; trees?: Record<string, string>; mergeable?: string } = {}) {
   const calls: string[][] = [];
   const out: string[] = [];
   const env = { ...process.env, GSTACK_STATE_ROOT: opts.stateRoot ?? path.join(ROOT, `home-${++homes}`) };
-  const code = await triageMain(['run', '--pr', '3', '--repo', 'acme/gt', '--cwd', opts.cwd ?? repoDir, ...extra], { gh: fakeGh(runs, calls, opts.headOid ?? B, opts.trees), env, out: l => out.push(l) });
+  const code = await triageMain(['run', '--pr', '3', '--repo', 'acme/gt', '--cwd', opts.cwd ?? repoDir, ...extra], { gh: fakeGh(runs, calls, opts.headOid ?? B, opts.trees, opts.mergeable), env, out: l => out.push(l) });
   return { code, out, calls, env };
 }
 const downloads = (calls: string[][]) => calls.filter(c => c[0] === 'run' && c[1] === 'download').length;
@@ -490,6 +494,36 @@ describe('run', () => {
     expect(r.calls.some(c => c[0] === 'run' && c[1] === 'view')).toBe(false);
     expect(downloads(r.calls)).toBe(0);
     expect(draftFiles(r)).toEqual([]);
+  });
+
+  test('without --run, a head with no run on a PR that conflicts with its base says sync first, not wait: GitHub starts no pull_request run while it conflicts', async () => {
+    // GitHub docs (events that trigger workflows, pull_request): workflows do not run on
+    // pull_request activity while the PR has a merge conflict. Waiting never clears that.
+    const wait = (out: string[]) => out.some(l => l.startsWith('STALE') && l.includes('wait for GitHub to start one'));
+    const conflict = await triage([{ id: 100, sha: A, shard: 4, fixture: '37346036310' }], [], { mergeable: 'CONFLICTING' });
+    expect(conflict.code, conflict.out.join('\n')).toBe(10);
+    expect(conflict.out[0]).toStartWith('RESULT NO_DRAFT');
+    const line = conflict.out.find(l => l.startsWith('STALE')) ?? '';
+    expect(line, conflict.out.join('\n')).toContain(B.slice(0, 12));
+    expect(line).toContain('conflict');
+    expect(line).toContain('sync');
+    expect(wait(conflict.out)).toBe(false);
+    // the mergeability read is a read-only gh pr view; nothing is viewed, downloaded or drafted
+    expect(conflict.calls.filter(c => c[0] === 'pr' && c[1] === 'view' && c.includes('mergeable'))).toHaveLength(1);
+    expect(conflict.calls.some(c => c[0] === 'run' && c[1] === 'view')).toBe(false);
+    expect(downloads(conflict.calls)).toBe(0);
+    expect(draftFiles(conflict)).toEqual([]);
+    // A mergeable PR, one GitHub has not computed yet (UNKNOWN), or a failed read keeps the wait line.
+    for (const mergeable of ['MERGEABLE', 'UNKNOWN', 'FAIL']) {
+      const r = await triage([{ id: 100, sha: A, shard: 4, fixture: '37346036310' }], [], { mergeable });
+      expect(r.code, `${mergeable}: ${r.out.join('\n')}`).toBe(10);
+      expect(wait(r.out), mergeable).toBe(true);
+      expect(r.out.some(l => l.includes('conflict')), mergeable).toBe(false);
+    }
+    // A head that already has a run never asks: GitHub started one, so the PR did not block it.
+    const queued = await triage([{ id: 101, sha: B, status: 'queued', conclusion: '' }], [], { mergeable: 'CONFLICTING' });
+    expect(queued.code).toBe(10);
+    expect(queued.calls.some(c => c[0] === 'pr' && c.includes('mergeable'))).toBe(false);
   });
 
   test('without --run, a moved head is no verdict even when no run of the head gh reports failed: stale (10), never NOTHING', async () => {
