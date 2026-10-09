@@ -138,6 +138,13 @@ describe('mode sections', () => {
     expectMentions(watch, [['trailer', 'P2'], ['conflict', 'ack', 'sync']], 'watch section');
   });
 
+  test('sync and watch stop on every poll exit they do not handle, and never read one as quiet', () => {
+    // Since 9833d9581 poll exits 30 when this topic's state belongs to another
+    // PR; a Step 1 that named only 0, 10, 11, 12 and 45 went on to plan and merge.
+    expectMentions(between(section('sync'), '### 1.', '### 2.'), [['any other exit', '30', 'STOP']], 'sync Step 1');
+    expectMentions(section('watch'), [['any other exit', '30', 'not write']], 'watch section');
+  });
+
   test('sync merges, never rebases, and stops on a code conflict', () => {
     expectMentions(section('sync'), [['never', 'rebase'], ['code', 'conflict', 'STOP']], 'sync section');
   });
