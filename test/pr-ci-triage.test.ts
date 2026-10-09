@@ -810,12 +810,14 @@ describe('scratch cleanup', () => {
 describe("the ci section routes triage's verdicts", () => {
   const ci = fs.readFileSync(path.join(import.meta.dir, '..', 'pr-prep', 'sections', 'ci.md'), 'utf8');
 
-  test('an unfinished run (a re-run included) is waited for, NOTHING is only a passed or fully finished head, and retrigger refuses a run re-run since triage', () => {
-    // Read as "no Windows shard failed", a re-run still going would be reported
-    // as clean; triage prints STALE for it, and NOTHING only once every run finished.
+  test('an unfinished run (a re-run included) or a head with no run yet is waited for, NOTHING is only a passed or fully finished head, and retrigger refuses a run re-run since triage', () => {
+    // Read as "no Windows shard failed", a re-run still going, or a new head
+    // GitHub has not started a run on, would be reported as clean; triage
+    // prints STALE for both, and NOTHING only once every run finished.
     expectTokens(ci, ['`RESULT NOTHING`', '`STALE`'], 'ci section');
     expectMentions(ci, [
       ['STALE', 'queued', 'running', 're-run', 'wait', 'triage again'],
+      ['STALE', 'no run', 'yet', 'push', 'wait'],
       ['NOTHING', '11', 'passed', 'finished'],
       ['refuses', '30', 're-run since triage', 'attempt'],
     ], 'ci section');

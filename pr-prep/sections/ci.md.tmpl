@@ -14,8 +14,10 @@
   until the same file also fails on the base: run it on both with
   gstack-pr-validate (declare it first) before saying otherwise.
 - `NO_DRAFT` with `STALE` lines (a run still queued or running, a re-run
-  included, a newer run, or a moved head) or missing evidence: wait for
-  that run to finish and triage again, or report what is missing.
+  included, a newer run, a moved head, or no run on the head yet, as
+  right after a push) or missing evidence: wait for that run to finish,
+  or for GitHub to start one, and triage again, or report what is
+  missing.
 - `RESULT AGGREGATE` (exit 10): the aggregate job failed with no failed
   shard; report the enveloped job log tail. `RESULT NOTHING` (exit 11):
   nothing to triage, because the head's newest run passed or every run on
