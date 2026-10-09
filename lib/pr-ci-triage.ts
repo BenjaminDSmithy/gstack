@@ -25,8 +25,9 @@
  * at a background rate, so "it also happened elsewhere" never clears a run.
  * This helper never commits or pushes; with the owner's yes,
  * `gstack-pr-sync retrigger` builds and pushes the commit from the drafted
- * message, and only while the draft's binding (repo, PR, run, head and the
- * message's sha256) still matches the PR's current head and newest run.
+ * message, and only while the draft's binding (repo, PR, run and its
+ * attempt, head and the message's sha256) still matches the PR's current
+ * head and newest run.
  */
 
 import { createHash } from 'node:crypto';
@@ -303,7 +304,7 @@ const realDeps = (): Omit<TriageDeps, 'tmp'> => ({
   gh: defaultGh, git: defaultGit, env: process.env, out: l => process.stdout.write(l + '\n'), err: l => process.stderr.write(l + '\n'),
 });
 
-interface RunInfo { databaseId: number; headSha: string; headBranch?: string; event?: string; conclusion?: string; createdAt?: string; status?: string; jobs?: { databaseId: number; name: string; conclusion: string }[] }
+interface RunInfo { databaseId: number; attempt?: number; headSha: string; headBranch?: string; event?: string; conclusion?: string; createdAt?: string; status?: string; jobs?: { databaseId: number; name: string; conclusion: string }[] }
 
 function ghJson<T>(d: TriageDeps, args: string[], what: string): T {
   const r = d.gh(args);
@@ -340,7 +341,7 @@ async function download(d: TriageDeps, repo: string, run: number, name: string):
   return files.length ? files.sort()[0] : null;
 }
 
-const RUN_FIELDS = 'databaseId,headSha,headBranch,event,conclusion,createdAt,status';
+const RUN_FIELDS = 'databaseId,attempt,headSha,headBranch,event,conclusion,createdAt,status';
 
 /** Lines kept from the end of a job log: the failing step's error is printed last. */
 const JOB_LOG_TAIL = 30;
@@ -420,9 +421,12 @@ export function pruneDrafts(dir: string): void {
  * the repo, PR, run and head it was triaged on, and the sha256 of the exact
  * message bytes. `gstack-pr-sync retrigger` pushes a draft only through
  * readRetriggerDraft, so none of triage's gates can be skipped at the push.
+ * `attempt` is the run's attempt triage read (null when gh gave none): a
+ * maintainer's re-run keeps the run id and bumps it, and the push refuses a
+ * run whose attempt moved, even one that failed again.
  */
 export interface RetriggerBinding {
-  v: 1; repo: string; pr: number; run: number; head: string; tree: string | null; messageSha256: string; triagedAt: string;
+  v: 1; repo: string; pr: number; run: number; attempt: number | null; head: string; tree: string | null; messageSha256: string; triagedAt: string;
   shards: { shard: number; klass: ShardClass; signature: 'IOCP' | 'GLib' | null; sameTreeGreen: string | null }[];
 }
 
@@ -430,12 +434,12 @@ const MESSAGE_FILE_RE = /^ci-retrigger-(\d+)\.txt$/;
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex');
 
 /** Write a draft pair (message, then its binding) into the PR state dir; returns both paths. */
-export function writeRetriggerDraft(dir: string, x: { repo: string; pr: number; run: number; head: string; tree: string | null; message: string; shards: ShardTriage[] }): { message: string; binding: string } {
+export function writeRetriggerDraft(dir: string, x: { repo: string; pr: number; run: number; attempt: number | null; head: string; tree: string | null; message: string; shards: ShardTriage[] }): { message: string; binding: string } {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const message = path.join(dir, `ci-retrigger-${x.run}.txt`);
   fs.writeFileSync(message, x.message, { mode: 0o600 });
   const b: RetriggerBinding = {
-    v: 1, repo: x.repo, pr: x.pr, run: x.run, head: x.head, tree: x.tree, messageSha256: sha256(x.message), triagedAt: new Date().toISOString(),
+    v: 1, repo: x.repo, pr: x.pr, run: x.run, attempt: x.attempt, head: x.head, tree: x.tree, messageSha256: sha256(x.message), triagedAt: new Date().toISOString(),
     shards: x.shards.map(t => ({ shard: t.shard, klass: t.klass, signature: t.signature, sameTreeGreen: t.sameTreeGreen })),
   };
   const binding = path.join(dir, `ci-retrigger-${x.run}.json`);
@@ -603,7 +607,7 @@ async function cmdRun(d: TriageDeps, f: Flags): Promise<number> {
   await yieldToSignals();
   // The message and its binding: the head, run and bytes the push will be checked against.
   const { message: file, binding } = writeRetriggerDraft(dir, {
-    repo, pr: pr.number, run: runId, head: pr.headOid, tree: treeOf(d, f.cwd, pr.headOid),
+    repo, pr: pr.number, run: runId, attempt: typeof run.attempt === 'number' && Number.isInteger(run.attempt) ? run.attempt : null, head: pr.headOid, tree: treeOf(d, f.cwd, pr.headOid),
     message: draftMessage({ run: runId, head: pr.headOid, shards: triaged }), shards: triaged,
   });
   d.out(`RESULT DRAFTED run=${runId} message=${file} binding=${binding}`);
