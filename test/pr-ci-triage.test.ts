@@ -419,6 +419,36 @@ describe('run', () => {
     expect(downloads(old.calls) + downloads(newer.calls)).toBe(0);
   });
 
+  test('without --run, a finished green run newer than the failure is NOTHING; a newer run still going, or an explicit --run, stays stale', async () => {
+    const failed = { id: 100, sha: B, shard: 4, fixture: '37346036310' };
+    const green = { id: 200, sha: B, conclusion: 'success', jobs: [{ name: 'windows-free-shard (4)', conclusion: 'success' }] };
+    const r = await triage([failed, green]);
+    expect(r.code).toBe(11);
+    expect(r.out[0]).toBe(`RESULT NOTHING run=200 the newest Windows Free Tests run on ${B.slice(0, 12)} passed`);
+    expect(r.out.some(l => l.startsWith('STALE'))).toBe(false);
+    expect(downloads(r.calls)).toBe(0);
+    // the owner named the old failure: it is still a stale run, not the head's verdict
+    const named = await triage([failed, green], ['--run', '100']);
+    expect(named.code).toBe(10);
+    expect(named.out.some(l => l.includes('a newer run on the head exists (200 completed/success)'))).toBe(true);
+    // the newest run has not finished: wait for it
+    const pending = await triage([failed, green, { id: 300, sha: B, conclusion: '', status: 'in_progress' }]);
+    expect(pending.code).toBe(10);
+    expect(pending.out[0]).toBe('RESULT NO_DRAFT run=100 stale: triage the newest finished run on the current head');
+    // the head remote holds another commit: a green run of the head gh reports says nothing about it
+    const bare = path.join(ROOT, 'green-moved', 'me', 'gt.git');
+    fs.mkdirSync(bare, { recursive: true });
+    gitIn(bare, 'init', '-q', '--bare');
+    const clone = path.join(ROOT, 'clone-green-moved');
+    gitIn(ROOT, 'clone', '-q', repoDir, clone);
+    gitIn(clone, 'remote', 'add', 'fork', bare);
+    gitIn(clone, 'push', '-q', 'fork', `${A}:refs/heads/pr/t`);
+    const moved = await triage([failed, green], [], { cwd: clone });
+    expect(moved.code).toBe(10);
+    expect(moved.out.some(l => l.startsWith('STALE') && l.includes('the head moved'))).toBe(true);
+    expect(downloads(named.calls) + downloads(pending.calls) + downloads(moved.calls)).toBe(0);
+  });
+
   test('a run still in progress (one shard failed, others running) gets no draft and no download', async () => {
     const r = await triage([{
       id: 700, sha: B, shard: 4, fixture: '37346036310', status: 'in_progress', conclusion: '',
