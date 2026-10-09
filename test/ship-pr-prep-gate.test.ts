@@ -205,6 +205,8 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
      * lookup fails. Left out, the check must not ask (the stub refuses).
      */
     ghDefault?: string | null;
+    /** The URL `gh repo view <repo>` prints for a repo named on the command line (GH_REPO's); a repo left out is one gh cannot find. */
+    urls?: Record<string, string>;
   }
 
   /**
@@ -226,6 +228,7 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     for (const host of g.hosts ?? []) fs.writeFileSync(path.join(dir, `host-${host}`), '');
     for (const [repo, nums] of Object.entries(g.prs ?? {})) fs.writeFileSync(file('prs', repo), JSON.stringify(nums.map((number) => ({ number }))));
     for (const repo of g.broken ?? []) fs.writeFileSync(file('broken', repo), '');
+    for (const [repo, url] of Object.entries(g.urls ?? {})) fs.writeFileSync(path.join(dir, `url-${repo.replaceAll('/', '_')}`), `${url}\n`);
     fs.writeFileSync(path.join(dir, 'gh'), [
       '#!/bin/sh',
       'd=$(dirname "$0")',
@@ -246,6 +249,7 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
       ...(g.down ? ['echo "error connecting to api.github.com" >&2; exit 1'] : []),
       'case "$*" in',
       ...(g.ghDefault === undefined ? [] : [`  "repo view --json url -q .url") ${g.ghDefault === null ? 'echo "HTTP 502: Bad Gateway (https://api.github.com/graphql)" >&2; exit 1' : `echo '${g.ghDefault}'; exit 0`} ;;`]),
+      `  "repo view "*" --json url -q .url") f="$d/url-$(printf %s "$3" | tr / _)"; [ -f "$f" ] && { cat "$f"; exit 0; }; echo "GraphQL: Could not resolve to a Repository with the name '$3'. (repository)" >&2; exit 1 ;;`,
       '  "repo view "*" --json nameWithOwner,parent -q "*) f="$d/repo-$(printf %s "$3" | tr / _).json"; q=$7 ;;',
       '  "pr list --repo "*" --head feat/x --state open --json number -q "*) r=$(printf %s "$4" | tr / _); f="$d/prs-$r.json"; q=${12}',
       '    [ -f "$d/broken-$r.json" ] && { echo "HTTP 502: Bad Gateway (https://api.github.com/graphql)" >&2; exit 1; } ;;',
@@ -369,6 +373,13 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     { name: "gh's default on another repo with no PR is new, so Steps 18-19 never publish there", remotes: { origin: 'https://github.com/me/gstack.git', upstream: 'git@github.com:someone/gstack.git' }, gh: { repos: { 'me/gstack': null }, prs: { 'someone/gstack': [] }, ghDefault: 'https://github.com/someone/gstack' }, want: 'UPSTREAM_PR: new someone/gstack', dflt: ["UPSTREAM_PR_DEFAULT: gh's default repo is someone/gstack, not origin's me/gstack"], code: 0 },
     { name: "a gh default that cannot be read stops", remotes: { origin: 'https://github.com/me/gstack.git' }, gh: { repos: { 'me/gstack': null }, ghDefault: null }, want: "UPSTREAM_PR: lookup failed gh's default repo - STOP", code: 1 },
     { name: "a gh default whose PR lookup errors stops and is named", remotes: { origin: 'https://github.com/me/gstack.git', upstream: 'https://ghe.acme.test/acme/proj.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'me/gstack': null }, broken: ['ghe.acme.test/acme/proj'], ghDefault: 'https://ghe.acme.test/acme/proj' }, want: "UPSTREAM_PR: lookup failed gh's default repo (ghe.acme.test/acme/proj) - STOP", dflt: ["UPSTREAM_PR_DEFAULT: gh's default repo is ghe.acme.test/acme/proj, not origin's me/gstack"], code: 1 },
+    // GH_REPO is gh's default for `gh pr` and `gh api` (cmdutil.EnableRepoOverride,
+    // api.go), which Steps 10, 18 and 19 run, but not for `gh repo view`, which
+    // Step 10's triage reads its repo from (gh 2.102, measured). So both are asked.
+    { name: 'a GH_REPO naming another repo is asked even when gh\'s default is origin', remotes: { origin: 'https://github.com/me/gstack.git' }, env: { GH_REPO: 'someone/gstack' }, gh: { repos: { 'me/gstack': null }, ghDefault: 'https://github.com/me/gstack', urls: { 'someone/gstack': 'https://github.com/someone/gstack' }, prs: { 'someone/gstack': [5] } }, want: 'UPSTREAM_PR: open 5 someone/gstack', dflt: ["UPSTREAM_PR_DEFAULT: GH_REPO is someone/gstack, not origin's me/gstack"], code: 0 },
+    { name: "a GH_REPO naming origin's own Enterprise repo is none", remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, env: { GH_REPO: 'ghe.acme.test/Me/Proj' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.acme.test/me/proj': null }, ghDefault: 'https://ghe.acme.test/me/proj', urls: { 'ghe.acme.test/Me/Proj': 'https://ghe.acme.test/me/proj' } }, want: 'UPSTREAM_PR: none', code: 0 },
+    { name: "gh's default repo is still asked when GH_REPO is origin's", remotes: { origin: 'https://github.com/me/gstack.git', upstream: 'https://github.com/someone/gstack.git' }, env: { GH_REPO: 'me/gstack' }, gh: { repos: { 'me/gstack': null }, ghDefault: 'https://github.com/someone/gstack', urls: { 'me/gstack': 'https://github.com/me/gstack' }, prs: { 'someone/gstack': [] } }, want: 'UPSTREAM_PR: new someone/gstack', dflt: ["UPSTREAM_PR_DEFAULT: gh's default repo is someone/gstack, not origin's me/gstack"], code: 0 },
+    { name: 'a GH_REPO gh cannot find stops', remotes: { origin: 'https://github.com/me/gstack.git' }, env: { GH_REPO: 'someone/gone' }, gh: { repos: { 'me/gstack': null }, ghDefault: 'https://github.com/me/gstack' }, want: 'UPSTREAM_PR: lookup failed GH_REPO - STOP', code: 1 },
     // Any other failure on an extra remote still stops, and names the remote to fix or remove.
     { name: 'an extra remote whose lookup errors stops and is named', remotes: { origin: 'https://github.com/me/gstack.git', contributor: 'https://github.com/someone/gstack.git' }, gh: { repos: FORK, prs: { 'garrytan/gstack': [] }, broken: ['someone/gstack'] }, want: 'UPSTREAM_PR: lookup failed remote contributor (someone/gstack) - STOP', code: 1 },
   ];
@@ -401,6 +412,9 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
       // ...but the later steps' bare gh acts on gh's default repo, so `none` needs it to be origin's.
       ['steps 10, 18 and 19', "gh's default repo", 'not a fork', '`none`', "origin's own"],
       ['handoff', "gh repo set-default <origin's repo>", "owner's to run"],
+      // GH_REPO steers `gh pr` and `gh api` but not `gh repo view`, so both are asked, and the handoff can unset it.
+      ['gh_repo', 'gh repo view', 'both', '`none`', "origin's own"],
+      ['handoff', 'unset gh_repo'],
       // An Enterprise repo is named with its host, and its PR is the owner's to handle.
       ['enterprise', 'login', '<host>/<owner>/<name>', 'by hand'],
       // A gh that does not run cannot list its logins: its hosts.yml or GH_HOST decides, and the owner hears of it.
@@ -435,6 +449,7 @@ describe('/ship Step 10: Greptile triage on a fork PR to someone else\'s repo', 
     const prose = GREPTILE_MD.replace(/([^\n])\n[ \t]*(?=[^\n])/g, '$1 ');
     expectMentions(prose, [
       ['`none`', "gh's default repo", "origin's own"],
+      ['`none`', 'gh_repo', "origin's own"],
       ['new <repo>', 'open <number> <repo>', "gh's default repo", "someone else's repo"],
       ['report-only', 'print each classification', 'no reply'],
       // A reply there waits for a same-turn yes under a registered id.

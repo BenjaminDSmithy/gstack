@@ -1133,8 +1133,9 @@ stage 4's recovery before publication. Otherwise continue to Step 17.
 The check reads the upstream from origin's URL (its GitHub fork parent, plus every
 other remote on origin's GitHub host, the only host where the branch this step
 pushes can head a PR), never from gh's default repo. Steps 10, 18 and 19 run bare
-`gh`, which acts on gh's default repo on any host, so when origin is not a fork
-the check asks gh for it: `none` needs it to be origin's own, and any other is
+`gh`, which acts on gh's default repo on any host (`gh pr` and `gh api` take
+`GH_REPO` first, `gh repo view` ignores it), so when origin is not a fork the
+check asks gh for both: `none` needs each to be origin's own, and any other is
 asked like an upstream and named on an `UPSTREAM_PR_DEFAULT` line. A GitHub
 Enterprise host counts when gh has a login there, even one that cannot answer
 now (that stops below; a gh before 2.81 lacks `auth status --json`, so only its
@@ -1172,8 +1173,8 @@ _ask() {
 _L="fork parent"; _R=""; _C=$_NEW; [ -z "$_C" ] || _ask
 for _R in $(git remote); do [ "$_R" = origin ] || { _C=$(_u=$(git remote get-url "$_R" 2>/dev/null); _ghrepo) && case "$_C" in (*/*/*) [ "${_C%%/*}/" = "$_P" ] ;; (*) [ -z "$_P" ] ;; esac && _ask; }; done
 _L="gh's default repo"; _R=""
-[ -n "$_OPEN$_NEW" ] || { _C=$(_u=$(gh repo view --json url -q .url 2>/dev/null); _ghrepo) || { echo "UPSTREAM_PR: lookup failed $_L - STOP"; exit 1; }
-  [ "$_C" = "$_O" ] || { echo "UPSTREAM_PR_DEFAULT: $_L is $_C, not origin's $_O"; _NEW=$_C; _ask; }; }
+for _D in "" ${GH_REPO:+"$GH_REPO"}; do [ -n "$_OPEN$_NEW" ] || { _C=$(_u=$(gh repo view ${_D:+"$_D"} --json url -q .url 2>/dev/null); _ghrepo) || { echo "UPSTREAM_PR: lookup failed $_L - STOP"; exit 1; }
+  [ "$_C" = "$_O" ] || { echo "UPSTREAM_PR_DEFAULT: $_L is $_C, not origin's $_O"; _NEW=$_C; _ask; }; }; _L=GH_REPO; done
 if [ -n "$_OPEN" ]; then echo "UPSTREAM_PR: open ${_OPEN% }"; elif [ -n "$_NEW" ]; then echo "UPSTREAM_PR: new $_NEW"; else echo "UPSTREAM_PR: none"; fi
 ```
 
@@ -1199,8 +1200,9 @@ if [ -n "$_OPEN" ]; then echo "UPSTREAM_PR: open ${_OPEN% }"; elif [ -n "$_NEW" 
   it so the owner can fix or remove the remote.
 - An `UPSTREAM_PR_DEFAULT` line: origin is not a fork, but Steps 10, 18 and 19
   would act on the other repo it names, so the verdict is that repo's. Add to the
-  handoff `gh repo set-default <origin's repo>` (the line names it), which points
-  them at origin for a rerun; that is the owner's to run.
+  handoff `gh repo set-default <origin's repo>` (the line names it), or
+  `unset GH_REPO` when the line names GH_REPO, which points them at origin for a
+  rerun; that is the owner's to run.
 
 **Credential pre-push guard — run before the push:**
 

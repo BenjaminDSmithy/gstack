@@ -19,7 +19,7 @@ Only `PR: exists` dispatches. `PR: skip (<reason>)` → do not dispatch; record
 block from this skill's SKILL.md now (it only reads, never pushes) and keep its line:
 
 - `none`: origin is not a fork and gh's default repo, where this step's `gh`
-  looks, is origin's own; the replies below apply.
+  looks, is origin's own, as is `GH_REPO` when set; the replies below apply.
 - `new <repo>` or `open <number> <repo>`: origin is a fork, or gh's default repo
   is another, so the PR may be on someone else's repo, and every write there is
   the owner's. Triage is report-only: print each classification and post no
