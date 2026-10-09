@@ -492,6 +492,29 @@ describe('run', () => {
     expect(draftFiles(r)).toEqual([]);
   });
 
+  test('without --run, a moved head is no verdict even when no run of the head gh reports failed: stale (10), never NOTHING', async () => {
+    // The head remote holds A while gh still reports B. As with a green run of B,
+    // a run of B that finished without a failed shard says nothing about A.
+    const bare = path.join(ROOT, 'nofail-moved', 'me', 'gt.git');
+    fs.mkdirSync(bare, { recursive: true });
+    gitIn(bare, 'init', '-q', '--bare');
+    const clone = path.join(ROOT, 'clone-nofail-moved');
+    gitIn(ROOT, 'clone', '-q', repoDir, clone);
+    gitIn(clone, 'remote', 'add', 'fork', bare);
+    gitIn(clone, 'push', '-q', 'fork', `${A}:refs/heads/pr/t`);
+    const cancelled = { id: 100, sha: B, conclusion: 'cancelled', jobs: [{ name: 'windows-free-shard (4)', conclusion: 'cancelled' }] };
+    const moved = await triage([cancelled], [], { cwd: clone });
+    expect(moved.code, moved.out.join('\n')).toBe(10);
+    expect(moved.out[0]).toStartWith('RESULT NO_DRAFT');
+    expect(moved.out.some(l => l.startsWith('STALE') && l.includes('the head moved'))).toBe(true);
+    expect(downloads(moved.calls)).toBe(0);
+    // Once the head remote holds B again, the same finished run is the head's verdict: nothing to triage.
+    gitIn(clone, 'push', '-q', '-f', 'fork', `${B}:refs/heads/pr/t`);
+    const settled = await triage([cancelled], [], { cwd: clone });
+    expect(settled.code, settled.out.join('\n')).toBe(11);
+    expect(settled.out[0]).toStartWith('RESULT NOTHING');
+  });
+
   test('the head remote must hold the head gh reports: a pinned mismatch gets no draft', async () => {
     const bare = path.join(ROOT, 'me', 'gt.git');
     fs.mkdirSync(bare, { recursive: true });
