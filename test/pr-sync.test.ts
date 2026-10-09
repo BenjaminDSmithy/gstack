@@ -204,8 +204,8 @@ function fakeGh(t: Topo, opts: { state?: string } = {}): GhRunner & { calls: str
     }
     if (args[0] === 'api' && args[1] === 'user') return ok('me\n');
     if (args[0] === 'pr' && args[1] === 'list') return ok('[]');
-    // retrigger's check for a newer Windows run on the head: none by default
-    if (args[0] === 'run' && args[1] === 'list') return ok('[]');
+    // retrigger's run check: ciDraft's default run 100 is the newest Windows run on the head, a finished failure
+    if (args[0] === 'run' && args[1] === 'list') return ok(JSON.stringify([{ databaseId: 100, status: 'completed', conclusion: 'failure' }]));
     // gstack-pr-watch's poll, run by the default pre-write gate: a quiet PR.
     if (args[0] === 'api' && args[1] === 'repos/acme/gstack/pulls/7') return ok(JSON.stringify({ state: 'open', merged: false, mergeable_state: 'clean', head: { sha: 'x' } }));
     if (args[0] === 'api' && (args[1]?.startsWith('repos/acme/gstack/issues/7/comments') || args[1]?.startsWith('repos/acme/gstack/pulls/7/reviews'))) return ok('[]');
@@ -1081,11 +1081,16 @@ describe('push', () => {
       const quiet = fakeGh(t);
       return ((args: string[]) => (args[0] === 'run' && args[1] === 'list' ? { status: st, stdout, stderr: st ? 'HTTP 502' : '' } : quiet(args))) as GhRunner;
     };
-    expect(await refusal(fresh, { gh: runsOnHead(JSON.stringify([{ databaseId: 106 }, { databaseId: 105 }])) })).toEqual({ code: 30, first: expect.stringContaining('106') });
+    const failed = { databaseId: 105, status: 'completed', conclusion: 'failure' };
+    expect(await refusal(fresh, { gh: runsOnHead(JSON.stringify([{ databaseId: 106 }, failed])) })).toEqual({ code: 30, first: expect.stringContaining('106') });
     expect((await refusal(fresh, { gh: runsOnHead('', 1) })).code).toBe(1);
+    // a maintainer re-ran the bound run after triage (same id): in progress, or green; or the run is gone
+    expect(await refusal(fresh, { gh: runsOnHead(JSON.stringify([{ ...failed, status: 'in_progress', conclusion: '' }])) })).toEqual({ code: 30, first: expect.stringContaining('in_progress') });
+    expect(await refusal(fresh, { gh: runsOnHead(JSON.stringify([{ ...failed, conclusion: 'success' }])) })).toEqual({ code: 30, first: expect.stringContaining('success') });
+    expect(await refusal(fresh, { gh: runsOnHead('[]') })).toEqual({ code: 30, first: expect.stringContaining('not listed') });
     expect(retriggerReceipts(t)).toBe(0);
     // the same draft, with the head, run and bytes it was bound to, goes through
-    const ok = await run(t, ['retrigger', '--message', fresh, '--yes'], { gh: runsOnHead(JSON.stringify([{ databaseId: 105 }])) });
+    const ok = await run(t, ['retrigger', '--message', fresh, '--yes'], { gh: runsOnHead(JSON.stringify([failed])) });
     expect(ok.code, ok.out.join('\n')).toBe(0);
     expect(retriggerReceipts(t)).toBe(1);
   });
