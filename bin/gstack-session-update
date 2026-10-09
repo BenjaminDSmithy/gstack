@@ -64,6 +64,32 @@ hook_incoming_hold() {
   [ -n "$_hc_fail" ] || return 1
   printf 'hook-does-not-parse: %s\n' "${_hc_fail#"$_hc_dir"/}" | head -c 300
 }
+# autostash_recover — after `merge --autostash` popped local edits onto
+# $INCOMING with conflicts (git 2.56 still exits 0 for that), put $INCOMING
+# back and KEEP the edits. Never `stash drop`: refs/stash is shared with every
+# worktree, and its top entry may not be the autostash. The id is git's own
+# ("cannot store <id>" when refs/stash.lock is held, else "Created autostash:
+# <id>"); a moved refs/stash is only the fallback. An id that is not a stash
+# entry is anchored under refs/gstack-autostash/. Prints "<id> <ref>"; returns
+# 1, resetting nothing, when the autostash commit cannot be found or anchored.
+autostash_recover() {
+  [ "$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)" = "$INCOMING" ] || return 1
+  _as=$(sed -n 's/^error: cannot store \([0-9a-f]\{4,\}\).*/\1/p' "${PULL_ERR_FILE:-/dev/null}" 2>/dev/null | head -1)
+  [ -n "$_as" ] || _as=$(sed -n 's/^Created autostash: \([0-9a-f]\{4,\}\).*/\1/p' "${MERGE_OUT:-/dev/null}" 2>/dev/null | head -1)
+  if [ -z "$_as" ]; then
+    _as=$(git -C "$GSTACK_DIR" rev-parse -q --verify refs/stash 2>/dev/null)
+    [ "$_as" != "$STASH_BEFORE" ] || _as=""
+  fi
+  [ -n "$_as" ] || return 1
+  _as=$(git -C "$GSTACK_DIR" rev-parse -q --verify "$_as^{commit}" 2>/dev/null) || return 1
+  _as_ref=refs/stash
+  if ! git -C "$GSTACK_DIR" stash list --format=%H 2>/dev/null | grep -qx "$_as"; then
+    _as_ref="refs/gstack-autostash/$(date -u +%Y%m%dT%H%M%SZ)"
+    git -C "$GSTACK_DIR" update-ref "$_as_ref" "$_as" 2>/dev/null || return 1
+  fi
+  git -C "$GSTACK_DIR" reset -q --hard "$INCOMING" 2>/dev/null || return 1
+  printf '%s %s\n' "$_as" "$_as_ref"
+}
 pending_get() { sed -n "s/^$1=//p" "$PENDING_FILE" 2>/dev/null | head -1; }
 # pending_save — persist the P_* stage state; nothing pending removes the file.
 pending_save() {
@@ -222,8 +248,31 @@ fi
     HELD=$(hook_incoming_hold "$INCOMING") || HELD=""
   fi
   if [ "$PULL_EXIT" -eq 0 ] && [ -z "$HELD" ]; then
-    git -C "$GSTACK_DIR" merge --ff-only --autostash -q "$INCOMING" >/dev/null 2>"${PULL_ERR_FILE:-/dev/null}"
-    PULL_EXIT=$?
+    if [ -n "$(git -C "$GSTACK_DIR" ls-files -u 2>/dev/null | head -1)" ]; then
+      # Someone's own merge, rebase or stash pop left conflicts here. Moving
+      # the checkout would bury them, and the recovery below would take them
+      # for its own and reset them away.
+      echo "unmerged files in $GSTACK_DIR; resolve or reset them, then gstack retries" > "${PULL_ERR_FILE:-/dev/null}"
+      PULL_EXIT=1
+    else
+      STASH_BEFORE=$(git -C "$GSTACK_DIR" rev-parse -q --verify refs/stash 2>/dev/null)
+      MERGE_OUT="${PULL_ERR_FILE:+$PULL_ERR_FILE.out}"
+      # The C locale and core.abbrev=40 (not "no", which git before 2.31
+      # rejects) fix the wording and length of the autostash id git prints.
+      LC_ALL=C git -C "$GSTACK_DIR" -c core.abbrev=40 merge --ff-only --autostash -q "$INCOMING" >"${MERGE_OUT:-/dev/null}" 2>"${PULL_ERR_FILE:-/dev/null}"
+      PULL_EXIT=$?
+      # A conflicting pop is judged by its unmerged files, whatever the exit.
+      if [ -n "$(git -C "$GSTACK_DIR" ls-files -u 2>/dev/null | head -1)" ]; then
+        if KEPT=$(autostash_recover); then
+          log_entry "AUTOSTASH_CONFLICT_RECOVERED tree_reset=1 kept_stash=${KEPT% *} kept_ref=${KEPT#* }"
+          PULL_EXIT=0
+        else
+          echo "local edits conflicted with $INCOMING and the autostash commit could not be found; the conflict markers are left for you to resolve" > "${PULL_ERR_FILE:-/dev/null}"
+          PULL_EXIT=1
+        fi
+      fi
+      rm -f "$MERGE_OUT" 2>/dev/null
+    fi
   fi
   NEW_HEAD=$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)
 
@@ -250,18 +299,6 @@ fi
     log_entry "PULL_FAILED exit=$PULL_EXIT reason=${PULL_REASON:-unknown}"
     P_PULL="exit $PULL_EXIT: $(printf '%s' "${PULL_REASON:-no error output}" | head -c 160)"
     pending_save
-    # Autostash pop conflict leaves the stash behind and the tree half-merged.
-    # The local patches are REGENERABLE (prefix renames, gbrain blocks), so
-    # recover to a clean upstream tree and re-render them below rather than
-    # leaving conflict markers in a live install.
-    if grep -qi "autostash" "$PULL_ERR_FILE" 2>/dev/null; then
-      git -C "$GSTACK_DIR" checkout -q -- . 2>/dev/null
-      git -C "$GSTACK_DIR" stash drop -q 2>/dev/null
-      log_entry "AUTOSTASH_CONFLICT_RECOVERED tree_reset=1"
-      _PREFIX_CFG=$("$GSTACK_DIR/bin/gstack-config" get skill_prefix 2>/dev/null || echo false)
-      "$GSTACK_DIR/bin/gstack-patch-names" "$GSTACK_DIR" "$_PREFIX_CFG" >/dev/null 2>&1 || true  # best-effort: regenerable prefix rewrite
-      "$GSTACK_DIR/bin/gstack-config" gbrain-refresh >/dev/null 2>&1 || true  # best-effort: regenerable gbrain blocks
-    fi
     rm -f "$PULL_ERR_FILE" 2>/dev/null
     exit 0
   fi
