@@ -277,9 +277,14 @@ const RENDER_TESTS = ['test/gen-skill-docs.test.ts', 'test/skill-validation.test
 // point at or join (refs:, joins:) is a file they read, which is covered only
 // when it is data (tripwireData), never a template or code they scan as text.
 const CLASS_SKILL = ['test/catalog-budget.test.ts', 'test/context-budget-ratchet.test.ts', 'test/tracker-guard-wiring.test.ts'];
-// Data a skill tripwire reads and checks: a test fixture, or a file that is
-// neither on the skill surface, under a code root, nor a script.
-const tripwireData = (f: string) => /(?:^|\/)test\/fixtures\//.test(f) || (!SKILL_SURFACE_RE.test(f) && !under(f, CODE_ROOTS) && !/\.(?:[cm]?[jt]sx?|sh)$/.test(f));
+// Data a skill tripwire reads and checks: a test fixture, or a file outside
+// the code roots with a data extension (the formats tracked there: JSON,
+// YAML, TOML, text). It names what data is rather than what a script is,
+// since setup, browse/bin/remote-slug or a .py tool has no .ts or .sh name.
+// The skill surface is never data: templates, review prose, or files under
+// scripts/ and hosts/.
+const DATA_EXT_RE = /\.(?:json|ya?ml|toml|txt)$/;
+const tripwireData = (f: string) => /(?:^|\/)test\/fixtures\//.test(f) || (!under(f, CODE_ROOTS) && DATA_EXT_RE.test(f));
 const CLASS_CODE = ['test/egress-receipt-wiring.test.ts'];
 const CLASS_TEST = ['test/spawnsync-timeout-tripwire.test.ts', 'test/test-of-test-ratchet.test.ts', 'test/paid-orphan-tripwire.test.ts', 'test/test-free-shards.test.ts'];
 const CLASS_RELEASE = ['test/agents-digest.test.ts', 'test/gstack-version-bump.test.ts', 'test/gstack-next-version.test.ts', 'test/ship-version-sync.test.ts', 'test/version-source.test.ts'];
@@ -781,9 +786,10 @@ export function untestedCode(changed: string[], sel: Selection, exists: (f: stri
  * What it imports or reaches runs in it, as in any test
  * (test/context-budget-ratchet.test.ts is the only importer of the capture
  * helper); what it points at or joins is a file it reads, covered only when
- * that is data it checks (a fixture), since only the renderers cover a skill
- * file and a module it reads as text never ran. A passing declared test
- * covers everything: the owner declared it for the change.
+ * that is data it checks (tripwireData: a fixture, a JSON or YAML file),
+ * since only the renderers cover a skill file and a module or script it
+ * reads as text never ran. A passing declared test covers everything: the
+ * owner declared it for the change.
  */
 export function uncoveredCode(code: string[], sel: Selection, passed: (file: string) => boolean): string[] {
   const covered = new Set<string>();

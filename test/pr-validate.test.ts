@@ -320,7 +320,7 @@ describe('selectTests', () => {
     expect(cov(['zz/SKILL.md.tmpl'], uni.filter(f => !['test/gen-skill-docs.test.ts', 'test/skill-validation.test.ts'].includes(f)))).toEqual(['zz/SKILL.md.tmpl']);
   });
 
-  test('a skill tripwire\'s path literal or join covers the fixture data it reads, never a template or code it reads as text', () => {
+  test('a skill tripwire\'s path literal or join covers the data it reads, never a template, module or script it reads as text', () => {
     const uni = [...universe, 'test/catalog-budget.test.ts', 'test/tracker-guard-wiring.test.ts'];
     const local: Record<string, string> = {
       // The budget reads templates and its own data; the tracker scan reads modules as text. Neither runs them.
@@ -333,6 +333,15 @@ describe('selectTests', () => {
         "const F = readFileSync(path.join(import.meta.dir, '..', 'bin', 'gstack-zz-read'), 'utf8');",
         "const G = readFileSync(path.join(import.meta.dir, '../make-pdf/src/zz-read.ts'), 'utf8');",
         "const H = readFileSync(path.join(import.meta.dir, 'fixtures', 'zz-tree', 'SKILL.md.tmpl'), 'utf8');",
+        "const I = readFileSync(path.join(import.meta.dir, '../setup'), 'utf8');",
+        "const J = readFileSync(path.join(import.meta.dir, '..', 'contrib', 'zz', 'tool.py'), 'utf8');",
+        "const K = JSON.parse(readFileSync(path.join(import.meta.dir, '../docs/zz-limits.json'), 'utf8'));",
+        "const L = readFileSync(path.join(import.meta.dir, '..', '.github', 'zz-lanes.yml'), 'utf8');",
+        "const M = readFileSync(path.join(import.meta.dir, '../.github/zz-lanes.yaml'), 'utf8');",
+        "const N = readFileSync(path.join(import.meta.dir, '..', 'docs', 'zz-words.txt'), 'utf8');",
+        "const O = readFileSync(path.join(import.meta.dir, '../zz-scanner.toml'), 'utf8');",
+        "const P = readFileSync(path.join(import.meta.dir, '../extension/manifest.json.js'), 'utf8');",
+        "const Q = JSON.parse(readFileSync(path.join(import.meta.dir, '..', 'scripts', 'zz-words.json'), 'utf8'));",
       ].join('\n'),
       'test/tracker-guard-wiring.test.ts': "const S = readFileSync(path.join(import.meta.dir, '../lib/zz-scanned.ts'), 'utf8');",
     };
@@ -350,6 +359,18 @@ describe('selectTests', () => {
       // A script under a code root, or code outside one, is still code.
       ['bin/gstack-zz-read', budget, 'joins', false],
       ['make-pdf/src/zz-read.ts', budget, 'refs', false],
+      // So is a script without a .ts or .sh name outside a code root: the extensionless setup, a .py tool.
+      ['setup', budget, 'refs', false],
+      ['contrib/zz/tool.py', budget, 'joins', false],
+      ['extension/manifest.json.js', budget, 'refs', false],
+      // A code root's data ships with the code that loads it, which the tripwire never runs.
+      ['scripts/zz-words.json', budget, 'joins', false],
+      // Data outside the fixtures and the code roots covers: JSON, YAML, text, TOML.
+      ['docs/zz-limits.json', budget, 'refs', true],
+      ['.github/zz-lanes.yml', budget, 'joins', true],
+      ['.github/zz-lanes.yaml', budget, 'refs', true],
+      ['docs/zz-words.txt', budget, 'joins', true],
+      ['zz-scanner.toml', budget, 'refs', true],
       ['test/fixtures/zz-limits.json', budget, 'refs', true],
       ['test/fixtures/zz-limits.txt', budget, 'joins', true],
       // A fixture is data even when it is shaped like a template.
