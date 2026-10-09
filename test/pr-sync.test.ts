@@ -811,7 +811,7 @@ describe('push', () => {
     expect((await run(t, ['retrigger', '--message', msg, '--yes'])).code).toBe(32);
   });
 
-  test('a PR still at its old head after the read-backs is UNVERIFIED (42) and nothing is recorded; push again records it once the PR shows it, sending nothing', async () => {
+  test('a push neither the PR nor the head remote shows after git exit 0 is UNVERIFIED (42) and nothing is recorded; push again records it once both show it, sending nothing', async () => {
     const t = topology('p23', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
     queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
     expect((await run(t, ['merge'])).code).toBe(0);
@@ -830,21 +830,100 @@ describe('push', () => {
     expect(sent()).toBe(0);
     expect(readStagedSync(stateDir(t), pr)?.sha).toBe(s.sha);
     expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBeNull();
-    // gh pr view keeps reporting H0, whatever the push did.
-    const r = await run(t, ['push', '--yes'], { gh: reporting(s.h0) });
+    // The head remote takes the push but does not keep it: git exits 0, yet the
+    // fetch URL (and so the PR) stays at H0, as when the push reached another repository.
+    const hook = path.join(t.fork, 'hooks', 'post-receive');
+    write(t.fork, 'hooks/post-receive', `#!/bin/sh\ngit update-ref refs/heads/pr/feat ${s.h0}\n`, 0o755);
+    const r = await run(t, ['push', '--yes']);
     expect(r.code, r.out.join('\n')).toBe(42);
     expect(r.out[0]).toStartWith('RESULT UNVERIFIED');
     expect(r.out.join('\n')).not.toContain('RESULT PUSHED');
     expect(sent()).toBe(1);
+    expect(forkHead(t)).toBe(s.h0);
     expect(readStagedSync(stateDir(t), pr)?.sha).toBe(s.sha);
     expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBeNull();
     expect(fs.existsSync(s.scratch)).toBe(true);
     expect(git(t.clone, 'rev-parse', 'HEAD')).toBe(local);
 
-    // GitHub catches up: the PR reports the staged commit, so push records it without a second send.
+    // The commit reaches the head remote after all and the PR reports it: push records it without a second send.
+    fs.rmSync(hook);
+    git(t.clone, 'push', '-q', t.fork, `${s.sha}:refs/heads/pr/feat`);
     const again = await run(t, ['push', '--yes']);
     expect(again.code, again.out.join('\n')).toBe(0);
     expect(again.out[0]).toStartWith('RESULT PUSHED');
+    expect(sent()).toBe(1);
+    expect(readStagedSync(stateDir(t), pr)).toBeNull();
+    expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBe(s.sha);
+    expect(fs.existsSync(s.scratch)).toBe(false);
+    expect(git(t.clone, 'rev-parse', 'HEAD')).toBe(s.sha);
+  });
+
+  /** gh as fakeGh, except that `gh pr view` always reports `oid` as the PR head (GitHub lagging). */
+  const reportingHead = (t: Topo, oid: string) => {
+    const quiet = fakeGh(t);
+    return ((args: string[]) => {
+      const r = quiet(args);
+      return args[0] === 'pr' && args[1] === 'view' ? { ...r, stdout: JSON.stringify({ ...JSON.parse(r.stdout), headRefOid: oid }) } : r;
+    }) as GhRunner;
+  };
+
+  test('a PR lagging past the read-backs while the head remote holds the commit records the push (pending); a second push sends nothing and is not 40', async () => {
+    const t = topology('p24', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    recordValidation(t, s.sha, 0);
+    const lagging = reportingHead(t, s.h0);
+    const sent = () => listReceipts(path.join(t.base, 'home')).filter(x => x.payload_class === 'pr-sync-push').length;
+    const r = await run(t, ['push', '--yes'], { gh: lagging });
+    expect(r.code, r.out.join('\n')).toBe(0);
+    expect(r.out[0]).toStartWith('RESULT PUSHED');
+    expect(r.out[0]).toContain(`readback=pending (${s.h0.slice(0, 12)})`);
+    expect(sent()).toBe(1);
+    expect(forkHead(t)).toBe(s.sha);
+    expect(readStagedSync(stateDir(t), pr)).toBeNull();
+    expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBe(s.sha);
+    expect(fs.existsSync(s.scratch)).toBe(false);
+    expect(git(t.clone, 'rev-parse', 'HEAD')).toBe(s.sha);
+    // Re-run before GitHub catches up: nothing staged, nothing sent, the push stays recorded.
+    const again = await run(t, ['push', '--yes'], { gh: lagging });
+    expect(again.code, again.out.join('\n')).toBe(30);
+    expect(again.out[0]).toContain('no sync is staged');
+    expect(sent()).toBe(1);
+    // The stale-body gate holds for the next write.
+    expect((await run(t, ['retrigger', '--message', ciDraft(t), '--yes'], { gh: lagging })).code).toBe(32);
+  });
+
+  test('a push whose head remote cannot be read back is UNVERIFIED (42); the next push finds the commit there and records it, sending nothing', async () => {
+    const t = topology('p25', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    recordValidation(t, s.sha, 0);
+    const local = git(t.clone, 'rev-parse', 'HEAD');
+    const lagging = reportingHead(t, s.h0);
+    const sent = () => listReceipts(path.join(t.base, 'home')).filter(x => x.payload_class === 'pr-sync-push').length;
+    // The push lands; every read of the head remote after it fails.
+    let pushed = false;
+    const unreachableAfterPush: GitRunner = (args, opts) => {
+      if (pushed && (args[0] === 'fetch' || args[0] === 'ls-remote')) return { status: 128, stdout: '', stderr: 'fatal: unable to access the remote: HTTP 503' };
+      const res = defaultGit(args, opts);
+      if (args[0] === 'push' && res.status === 0) pushed = true;
+      return res;
+    };
+    const r = await run(t, ['push', '--yes'], { gh: lagging, git: unreachableAfterPush });
+    expect(r.code, r.out.join('\n')).toBe(42);
+    expect(r.out[0]).toStartWith('RESULT UNVERIFIED');
+    expect(sent()).toBe(1);
+    expect(forkHead(t)).toBe(s.sha);
+    expect(readStagedSync(stateDir(t), pr)?.sha).toBe(s.sha);
+    expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBeNull();
+    expect(git(t.clone, 'rev-parse', 'HEAD')).toBe(local);
+    // The PR still lags; the head remote now answers and holds the commit: record it, no second send.
+    const again = await run(t, ['push', '--yes'], { gh: lagging });
+    expect(again.code, again.out.join('\n')).toBe(0);
+    expect(again.out[0]).toStartWith('RESULT PUSHED');
+    expect(again.out[0]).toContain('readback=pending');
     expect(sent()).toBe(1);
     expect(readStagedSync(stateDir(t), pr)).toBeNull();
     expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBe(s.sha);
