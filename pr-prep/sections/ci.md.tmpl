@@ -13,11 +13,13 @@
 - `RESULT NO_DRAFT` with `BLAME`: a test failed. It is this PR's failure
   until the same file also fails on the base: run it on both with
   gstack-pr-validate (declare it first) before saying otherwise.
-- `NO_DRAFT` for a stale run, a newer run, or missing evidence: wait for
-  the newer run, or report what is missing.
+- `NO_DRAFT` with `STALE` lines (a run still queued or running, a re-run
+  included, a newer run, or a moved head) or missing evidence: wait for
+  that run to finish and triage again, or report what is missing.
 - `RESULT AGGREGATE` (exit 10): the aggregate job failed with no failed
-  shard; report the enveloped job log tail. `RESULT NOTHING` (exit 11): no
-  Windows shard failed on this head. Exit 40: the PR head moved or is gone
+  shard; report the enveloped job log tail. `RESULT NOTHING` (exit 11):
+  nothing to triage, because the head's newest run passed or every run on
+  it finished without a failed shard. Exit 40: the PR head moved or is gone
   from its remote; triage again once it settles.
 
 A fork contributor cannot re-run upstream jobs, so the remedy is one empty
@@ -32,12 +34,14 @@ names:
 ```
 
 retrigger refuses (exit 30) a draft that is not bound to the PR's current
-head and newest Windows run, or whose bytes changed since triage. Never
-edit or hand-write the draft: re-run triage and ask again
-(`<gstack-qid:pr-prep-ci-retrigger-push>`). It also refuses while the
-body is stale from an earlier push (exit 32: run the body mode first) or
-a sync is staged (exit 50: push or abort it). The new head makes
-the PR body's facts stale, so run the body mode next.
+head and newest Windows run, whose run was re-run since triage (a new
+attempt, or no longer a finished failure), or whose bytes changed since
+triage. Never edit or hand-write the draft: re-run triage and ask again
+(`<gstack-qid:pr-prep-ci-retrigger-push>`); while a re-run is still going,
+triage says `STALE`, so wait for it. It also refuses while the body is
+stale from an earlier push (exit 32: run the body mode first) or a sync
+is staged (exit 50: push or abort it). The new head makes the PR body's
+facts stale, so run the body mode next.
 
 For disclosure (never as clearance), the per-day flake counts across
 upstream runs:
