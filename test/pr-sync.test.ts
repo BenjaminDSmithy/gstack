@@ -22,7 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   syncMain, parseMergeTree, classifyConflicts, changelogBlock, rebuildChangelog, renameBlockHeading,
-  qualifyQueue, pickVersion, cmpVersion, readStagedSync, classifyPush, defaultTool, type SyncDeps, type ToolRunner,
+  qualifyQueue, pickVersion, cmpVersion, readStagedSync, classifyPush, defaultTool, pushUrlsOffTarget, type SyncDeps, type ToolRunner,
 } from '../lib/pr-sync';
 import { prStateDir, topicFor, readStateFor, writeState, defaultGit, type GhRunner, type GitRunner, type PrState } from '../lib/pr-context';
 import { triageMain, writeRetriggerDraft } from '../lib/pr-ci-triage';
@@ -864,6 +864,62 @@ describe('push', () => {
     expect(spawnSync('git', ['rev-parse', '--verify', '--quiet', 'refs/heads/pr/feat'], { cwd: elsewhere, timeout: 30_000 }).status).not.toBe(0);
     expect(readStagedSync(stateDir(t), pr)?.sha).toBe(s.sha);
     expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBeNull();
+  });
+
+  test('a push URL with the head repo\'s OWNER/NAME on another host or path is refused, for push and retrigger', async () => {
+    const t = topology('p22', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    recordValidation(t, s.sha, 0);
+    // Same me/gstack path, another repository: a pushurl or a pushInsteadOf rule sends the push there.
+    const mirror = path.join(t.base, 'mirror-host', 'me', 'gstack.git');
+    fs.mkdirSync(mirror, { recursive: true });
+    git(mirror, 'init', '-q', '--bare', '-b', 'main');
+    const mirrorHead = () => spawnSync('git', ['rev-parse', '--verify', '--quiet', 'refs/heads/pr/feat'], { cwd: mirror, timeout: 30_000 }).status;
+    const sent = () => listReceipts(path.join(t.base, 'home')).filter(x => x.sink === 'pr-prep').length;
+    const before = sent();
+    for (const [key, value] of [['remote.origin.pushurl', mirror], [`url.${path.join(t.base, 'mirror-host')}/.pushInsteadOf`, path.join(t.base, 'fork') + '/']]) {
+      git(t.clone, 'config', key, value);
+      const r = await run(t, ['push', '--yes']);
+      expect(r.code, r.out.join('\n')).toBe(30);
+      expect(r.out[0]).toContain('push URL');
+      git(t.clone, 'config', '--unset', key);
+    }
+    expect(sent()).toBe(before);
+    expect(forkHead(t)).toBe(s.h0);
+    expect(mirrorHead()).not.toBe(0);
+    expect(readStagedSync(stateDir(t), pr)?.sha).toBe(s.sha);
+    expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBeNull();
+
+    expect((await run(t, ['abort'])).code).toBe(0);
+    git(t.clone, 'config', 'remote.origin.pushurl', mirror);
+    const rt = await run(t, ['retrigger', '--message', ciDraft(t), '--yes']);
+    expect(rt.code, rt.out.join('\n')).toBe(30);
+    expect(retriggerReceipts(t)).toBe(0);
+    expect(mirrorHead()).not.toBe(0);
+  });
+
+  test('pushUrlsOffTarget: a push URL must reach the fetch URL\'s host (ssh aliases resolved) and name the repo', () => {
+    const alias = (a: string) => ({ 'gh-work': 'github.com', 'gh-evil': 'gitlab.example.com' } as Record<string, string>)[a] ?? null;
+    const off = (fetch: string, push: string) => pushUrlsOffTarget(fetch, [push], 'me/gstack', '/w', alias).length > 0;
+    const gh = 'https://github.com/me/gstack.git';
+    expect(off(gh, 'git@github.com:me/gstack.git')).toBe(false);
+    expect(off(gh, 'ssh://git@ssh.github.com:443/me/gstack.git')).toBe(false);
+    expect(off(gh, 'git@gh-work:me/gstack.git')).toBe(false);
+    expect(off('git@gh-work:me/gstack.git', 'https://github.com/me/gstack')).toBe(false);
+    expect(off(gh, 'git@gh-evil:me/gstack.git')).toBe(true);
+    expect(off(gh, 'git@gh-unknown:me/gstack.git')).toBe(true);
+    expect(off(gh, 'https://gitlab.com/me/gstack.git')).toBe(true);
+    // an https host is never an ssh alias
+    expect(off(gh, 'https://gh-work/me/gstack.git')).toBe(true);
+    expect(off(gh, 'https://github.com/other/gstack.git')).toBe(true);
+    expect(off(gh, '/srv/mirror/me/gstack.git')).toBe(true);
+    // local paths: the same repository only
+    expect(off('/srv/fork/me/gstack.git', '/srv/fork/me/gstack.git/')).toBe(false);
+    expect(off('/srv/fork/me/gstack.git', 'file:///srv/fork/me/gstack.git')).toBe(false);
+    expect(off('/srv/fork/me/gstack.git', '/srv/mirror/me/gstack.git')).toBe(true);
+    expect(off('/srv/fork/me/gstack.git', gh)).toBe(true);
   });
 
   test('a local pre-push hook refusal is exit 41 with the hook\'s own words, for push and retrigger', async () => {

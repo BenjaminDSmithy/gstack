@@ -499,7 +499,7 @@ function urlNamesRepo(url: string, repo: string): boolean {
  * The lower-cased host of a remote URL (`https://h/...`, `ssh://u@h:22/...`,
  * scp-style `u@h:path`), and whether ssh reaches it, or null for a local path.
  */
-function remoteHost(url: string): { host: string; ssh: boolean } | null {
+export function remoteHost(url: string): { host: string; ssh: boolean } | null {
   const u = url.trim();
   const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/]*)/.exec(u);
   if (scheme) {
@@ -520,7 +520,7 @@ const sshHostNames = new Map<string, string | null>();
  * The HostName ssh connects to for `alias` (`ssh -G`, which reads
  * ~/.ssh/config and never connects), or null when ssh cannot say.
  */
-function sshConfigHostName(alias: string): string | null {
+export function sshConfigHostName(alias: string): string | null {
   if (!/^[a-z0-9][a-z0-9._-]*$/.test(alias)) return null;
   if (!sshHostNames.has(alias)) {
     const r = spawnSync('ssh', ['-G', alias], { encoding: 'utf8', timeout: 5_000, maxBuffer: 1024 * 1024 });

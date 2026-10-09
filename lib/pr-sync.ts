@@ -35,7 +35,7 @@ import path from 'node:path';
 import {
   PrContextError, RELEASE_FILES, defaultGh, defaultGit, parsePrRefFor, upstreamRepoFromGh,
   remoteForRepo, pinBranch, readPr, viewerLogin, assertWritableIdentity, topicFor, prStateDir,
-  readStateFor, writeState, withPrLock, receiptedSend, requireApproval, envelope,
+  readStateFor, writeState, withPrLock, receiptedSend, requireApproval, envelope, remoteHost, sshConfigHostName,
   type GhResult, type GhRunner, type GitRunner, type PrInfo, type PrState,
 } from './pr-context';
 import { pollForWrite, refuseUnackedLatches } from './pr-watch';
@@ -316,12 +316,14 @@ export interface SyncDeps {
   preWriteGate: PreWriteGate;
   /** Pause between head read-backs after a push (GitHub can lag a few seconds). */
   readbackDelayMs: number;
+  /** The HostName ssh connects to for a host alias (`ssh -G`), or null. */
+  sshHostName: (alias: string) => string | null;
 }
 
 const realDeps = (): SyncDeps => ({
   gh: defaultGh, git: defaultGit, tool: defaultTool, env: process.env, now: () => new Date(),
   out: l => process.stdout.write(l + '\n'), err: l => process.stderr.write(l + '\n'), preWriteGate: defaultPreWriteGate,
-  readbackDelayMs: 2_000,
+  readbackDelayMs: 2_000, sshHostName: sshConfigHostName,
 });
 
 // ── staged-sync record ──────────────────────────────────────────────────────
@@ -434,9 +436,9 @@ function resolveCtx(d: SyncDeps, f: Flags): Ctx {
   // closed PR left staged in a topic dir a newer PR from its branch now uses.
   const local = f.sub === 'abort' || f.sub === 'status';
   assertWritableIdentity(local && pr.state !== 'OPEN' ? { ...pr, state: 'OPEN' } : pr, viewerLogin(d.gh));
-  const headRemote = remoteForRepo(d.git, f.cwd, pr.headRepo);
+  const headRemote = remoteForRepo(d.git, f.cwd, pr.headRepo, 'github.com', d.sshHostName);
   if (!headRemote) throw new PrContextError(`no git remote in ${f.cwd} points at ${pr.headRepo}`, 30);
-  const upRemote = remoteForRepo(d.git, f.cwd, repo);
+  const upRemote = remoteForRepo(d.git, f.cwd, repo, 'github.com', d.sshHostName);
   if (!upRemote) throw new PrContextError(`no git remote in ${f.cwd} points at ${repo}`, 30);
   const branch = gitOk(d, f.cwd, ['rev-parse', '--abbrev-ref', 'HEAD'], 'git rev-parse').trim();
   if (branch !== pr.headRef) throw new PrContextError(`the PR worktree is on ${branch}, not the PR head branch ${pr.headRef} (keep the local name equal to the head ref)`, 30);
@@ -1049,18 +1051,47 @@ function urlNamesRepo(url: string, repo: string): boolean {
   return u.endsWith(want) && u.length > want.length && '/:'.includes(u[u.length - want.length - 1]);
 }
 
+const isGithub = (host: string) => host === 'github.com' || host.endsWith('.github.com');
+
+/**
+ * Where a remote URL lands: its host (an ssh alias resolved to the HostName
+ * ssh connects to; github.com and its subdomains are one host), or, for a
+ * local path, that path with its symlinks resolved.
+ */
+function urlDestination(url: string, cwd: string, sshHostName: (alias: string) => string | null): string {
+  const at = remoteHost(url);
+  if (!at) return `path:${canonPath(path.resolve(cwd, url.trim().replace(/^file:\/\//i, '')))}`;
+  const host = at.ssh && !isGithub(at.host) ? (sshHostName(at.host) ?? at.host) : at.host;
+  return `host:${isGithub(host) ? 'github.com' : host}`;
+}
+
+/**
+ * The push URLs that would not reach the repository the fetch URL names:
+ * each must name OWNER/NAME on a path boundary AND land where the fetch URL
+ * does (the same host after ssh-alias resolution, or the same local path).
+ * The path alone is not enough: a pushurl on another server with the same
+ * OWNER/NAME took a probe's push while the PR head never moved.
+ */
+export function pushUrlsOffTarget(fetchUrl: string, pushUrls: readonly string[], repo: string, cwd: string, sshHostName: (alias: string) => string | null): string[] {
+  const want = urlDestination(fetchUrl, cwd, sshHostName);
+  return pushUrls.filter(u => !urlNamesRepo(u, repo) || urlDestination(u, cwd, sshHostName) !== want);
+}
+
 /**
  * The head remote was matched by its FETCH URL; `git push` uses
  * remote.<name>.pushurl and url.<base>.pushInsteadOf when set. Every URL a
  * push to it would reach (as git expands them) must name the PR's head
- * repository, or nothing is sent (30).
+ * repository on the fetch URL's host (or local path), or nothing is sent
+ * (30). `cwd` is where the push runs, which a relative local URL is read from.
  */
-function assertPushTarget(c: Ctx): void {
+function assertPushTarget(c: Ctx, cwd: string): void {
+  const fetch = c.d.git(['remote', 'get-url', c.headRemote], { cwd: c.cwd });
+  if (fetch.status !== 0 || !fetch.stdout.trim()) throw new PrContextError(`git remote get-url ${c.headRemote} failed: ${(fetch.error ?? fetch.stderr).trim()}`, SYNC_EXIT.ERROR);
   const r = c.d.git(['remote', 'get-url', '--push', '--all', c.headRemote], { cwd: c.cwd });
   const urls = r.status === 0 ? r.stdout.split('\n').map(u => u.trim()).filter(Boolean) : [];
   if (!urls.length) throw new PrContextError(`git remote get-url --push ${c.headRemote} failed: ${(r.error ?? r.stderr).trim()}`, SYNC_EXIT.ERROR);
-  const off = urls.filter(u => !urlNamesRepo(u, c.pr.headRepo));
-  if (off.length) throw new PrContextError(`a push to ${c.headRemote} would go to ${off.length} push URL(s) that are not ${c.pr.headRepo} (remote.${c.headRemote}.pushurl or a pushInsteadOf rule): nothing was sent`, SYNC_EXIT.PRECONDITION);
+  const off = pushUrlsOffTarget(fetch.stdout.trim(), urls, c.pr.headRepo, cwd, c.d.sshHostName);
+  if (off.length) throw new PrContextError(`a push to ${c.headRemote} would go to ${off.length} push URL(s) that are not ${c.pr.headRepo} where its fetch URL is (remote.${c.headRemote}.pushurl or a pushInsteadOf rule): nothing was sent`, SYNC_EXIT.PRECONDITION);
 }
 
 /**
@@ -1070,7 +1101,7 @@ function assertPushTarget(c: Ctx): void {
  * git's whole output (the hook's or the server's reason) as untrusted data.
  */
 function pushOrThrow(c: Ctx, cwd: string, sha: string, payloadClass: string, gateAt: number): void {
-  assertPushTarget(c);
+  assertPushTarget(c, cwd);
   // The plan's pre-write gate runs within 60 s of the write. Counted from when
   // the gate started, so a lock wait or a slow fetch after it cannot stretch it.
   const age = Math.round((c.d.now().getTime() - gateAt) / 1000);
