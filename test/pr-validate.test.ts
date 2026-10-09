@@ -91,6 +91,10 @@ describe('validationEnv', () => {
     expect(r.stdout).toMatch(/^identityfile \/dev\/null$/m);
     expect(r.stdout).toMatch(/^batchmode yes$/m);
     expect(r.stdout).not.toContain(sshDir);
+    // It reads no config file at all: not the caller's, not the system's (whose includes can name keys too).
+    const v = spawnSync('/bin/sh', ['-c', `${env.GIT_SSH_COMMAND} -v -G github.com`], { env, encoding: 'utf8', timeout: 30_000 });
+    expect(v.status).toBe(0);
+    expect([...v.stderr.matchAll(/Reading configuration data (\S+)/g)].map(m => m[1])).toEqual(['/dev/null']);
   });
 
   test('drops every bun agent-mode trigger and every credential-shaped name; keeps look-alike metadata', () => {
