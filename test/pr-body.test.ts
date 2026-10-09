@@ -393,6 +393,8 @@ describe('facts and render', () => {
     const top = diffLine();
     expect(top).toContain(': 2 files, ');
     f.out.length = 0;
+    // diff.relative=true would narrow a plain `git diff` from lib/ to lib/ alone (PLAIN_DIFF's --no-relative).
+    git(f.clone, 'config', 'diff.relative', 'true');
     expect(await f.call(['facts'], path.join(f.clone, 'lib'))).toBe(0);
     expect(diffLine()).toBe(top);
   });
