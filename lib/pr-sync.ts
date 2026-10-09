@@ -932,7 +932,12 @@ function stageSync(c: Ctx, p: Pinned, pre: Pre, scratch: string, upToDate: boole
   d.out(`RESULT ${code ? 'DIFF_CHANGED' : 'STAGED'} sha=${sha.slice(0, 12)} kind=${staged.kind} version=${p.oldVersion}->${version} release=${pre.release ? 'yes' : 'no'} proof=${proof.verdict} scratch=${scratch}`);
   for (const f of proof.changed) d.out(`CHANGED\t${f}`);
   for (const a of advisories) d.out(`ADVISORY ${a}`);
-  for (const w of queue?.warnings ?? []) d.out(`QUEUE_WARNING ${w}`);
+  // Some next-version warnings quote another open PR's VERSION file: data, enveloped, never raw.
+  const warnings = queue?.warnings ?? [];
+  if (warnings.length) {
+    d.out(`QUEUE_WARNINGS ${warnings.length} from bin/gstack-next-version (they can quote other PRs' VERSION files):`);
+    d.out(envelope(warnings.join('\n'), 'gstack-next-version warnings'));
+  }
   d.out('NEXT run gstack-pr-validate in the scratch worktree, then `gstack-pr-sync push --yes` after the owner approves');
   return { code, staged };
 }
