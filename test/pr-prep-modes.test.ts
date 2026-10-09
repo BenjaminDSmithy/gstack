@@ -275,6 +275,21 @@ describe('one-way doors', () => {
     expectMentions(safety, [['flag', 'registered id', 'yes']], 'Write safety');
   });
 
+  test('every re-ask of a write ("ask again") names a registered one-way id at its site', () => {
+    // A re-ask carries new bytes (a re-rendered sha256, a re-triaged ci:
+    // draft) the first yes never saw; under an ad-hoc id it is auto-decidable.
+    let found = 0;
+    for (const mode of MODES) {
+      for (const site of blocks(section(mode)).filter(b => /\bask(?:ed)?\s+again\b/i.test(b))) {
+        found++;
+        const ids = [...site.matchAll(/<gstack-qid:([a-z0-9-]+)>/g)].map(m => m[1]);
+        expect(ids, `${mode}: a re-ask names no <gstack-qid:...>:\n${site}`).not.toEqual([]);
+        for (const id of ids) expect(getQuestion(id), `${mode}: ${id}`).toMatchObject({ skill: 'pr-prep', door_type: 'one-way' });
+      }
+    }
+    expect(found).toBeGreaterThan(0);
+  });
+
   test('a stored never-ask cannot auto-decide a follow-up under the id its site names; under an ad-hoc id it would', () => {
     const named = followUpSites().flatMap(({ summary, ids }) => ids.map((id): [string, string] => [id, summary]));
     expect(named.length).toBeGreaterThan(0);
