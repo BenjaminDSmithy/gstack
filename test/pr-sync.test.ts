@@ -22,7 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   syncMain, parseMergeTree, classifyConflicts, changelogBlock, rebuildChangelog, renameBlockHeading,
-  qualifyQueue, pickVersion, cmpVersion, readStagedSync, classifyPush, defaultTool, pushUrlsOffTarget, type SyncDeps, type ToolRunner,
+  qualifyQueue, pickVersion, cmpVersion, readStagedSync, classifyPush, defaultTool, pushUrlsOffTarget, onGithub, type SyncDeps, type ToolRunner,
 } from '../lib/pr-sync';
 import { prStateDir, topicFor, readStateFor, writeState, defaultGit, type GhRunner, type GitRunner, type PrState } from '../lib/pr-context';
 import { triageMain, writeRetriggerDraft } from '../lib/pr-ci-triage';
@@ -864,6 +864,12 @@ describe('push', () => {
     expect(git(t.clone, 'rev-parse', 'HEAD')).toBe(s.sha);
   });
 
+  /**
+   * The fork's path stands in for github.com. Only a head remote on the PR's
+   * host holding the pushed commit shows a PR that does not report it is lagging.
+   */
+  const forkIsPrHost = (t: Topo): Partial<SyncDeps> => ({ onPrHost: url => url === t.fork });
+
   /** gh as fakeGh, except that `gh pr view` always reports `oid` as the PR head (GitHub lagging). */
   const reportingHead = (t: Topo, oid: string) => {
     const quiet = fakeGh(t);
@@ -881,7 +887,7 @@ describe('push', () => {
     recordValidation(t, s.sha, 0);
     const lagging = reportingHead(t, s.h0);
     const sent = () => listReceipts(path.join(t.base, 'home')).filter(x => x.payload_class === 'pr-sync-push').length;
-    const r = await run(t, ['push', '--yes'], { gh: lagging });
+    const r = await run(t, ['push', '--yes'], { gh: lagging, ...forkIsPrHost(t) });
     expect(r.code, r.out.join('\n')).toBe(0);
     expect(r.out[0]).toStartWith('RESULT PUSHED');
     expect(r.out[0]).toContain(`readback=pending (${s.h0.slice(0, 12)})`);
@@ -892,7 +898,7 @@ describe('push', () => {
     expect(fs.existsSync(s.scratch)).toBe(false);
     expect(git(t.clone, 'rev-parse', 'HEAD')).toBe(s.sha);
     // Re-run before GitHub catches up: nothing staged, nothing sent, the push stays recorded.
-    const again = await run(t, ['push', '--yes'], { gh: lagging });
+    const again = await run(t, ['push', '--yes'], { gh: lagging, ...forkIsPrHost(t) });
     expect(again.code, again.out.join('\n')).toBe(30);
     expect(again.out[0]).toContain('no sync is staged');
     expect(sent()).toBe(1);
@@ -917,7 +923,7 @@ describe('push', () => {
       if (args[0] === 'push' && res.status === 0) pushed = true;
       return res;
     };
-    const r = await run(t, ['push', '--yes'], { gh: lagging, git: unreachableAfterPush });
+    const r = await run(t, ['push', '--yes'], { gh: lagging, git: unreachableAfterPush, ...forkIsPrHost(t) });
     expect(r.code, r.out.join('\n')).toBe(42);
     expect(r.out[0]).toStartWith('RESULT UNVERIFIED');
     expect(sent()).toBe(1);
@@ -926,7 +932,7 @@ describe('push', () => {
     expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBeNull();
     expect(git(t.clone, 'rev-parse', 'HEAD')).toBe(local);
     // The PR still lags; the head remote now answers and holds the commit: record it, no second send.
-    const again = await run(t, ['push', '--yes'], { gh: lagging });
+    const again = await run(t, ['push', '--yes'], { gh: lagging, ...forkIsPrHost(t) });
     expect(again.code, again.out.join('\n')).toBe(0);
     expect(again.out[0]).toStartWith('RESULT PUSHED');
     expect(again.out[0]).toContain('readback=pending');
@@ -935,6 +941,51 @@ describe('push', () => {
     expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBe(s.sha);
     expect(fs.existsSync(s.scratch)).toBe(false);
     expect(git(t.clone, 'rev-parse', 'HEAD')).toBe(s.sha);
+  });
+
+  test('a head remote off the PR host holding the commit is no proof the PR has it: 42 with nothing recorded, again on a re-run, recorded once the PR reports it', async () => {
+    const t = topology('p28', { pr: ourFeature, main: d => write(d, 'src/b.txt', 'b9\n') });
+    // origin is a mirror of the fork: the same OWNER/NAME on another server. Pushes land
+    // there (push URL = fetch URL), and the PR, which reads the fork, never moves.
+    const mirror = path.join(t.base, 'mirror', 'me', 'gstack.git');
+    git(t.base, 'clone', '-q', '--bare', t.fork, mirror);
+    git(t.clone, 'remote', 'set-url', 'origin', mirror);
+    queue(t, { version: '1.0.1.0', base_version: '1.0.0.0' });
+    expect((await run(t, ['merge'])).code).toBe(0);
+    const s = readStagedSync(stateDir(t), pr)!;
+    recordValidation(t, s.sha, 0);
+    const local = git(t.clone, 'rev-parse', 'HEAD');
+    const sent = () => listReceipts(path.join(t.base, 'home')).filter(x => x.payload_class === 'pr-sync-push').length;
+    // The mirror is not on the PR's host.
+    const onFork = forkIsPrHost(t);
+    const nothingRecorded = () => {
+      expect(git(mirror, 'rev-parse', 'refs/heads/pr/feat')).toBe(s.sha);
+      expect(forkHead(t)).toBe(s.h0);
+      expect(readStagedSync(stateDir(t), pr)?.sha).toBe(s.sha);
+      expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBeNull();
+      expect(fs.existsSync(s.scratch)).toBe(true);
+      expect(git(t.clone, 'rev-parse', 'HEAD')).toBe(local);
+    };
+    const r = await run(t, ['push', '--yes'], onFork);
+    expect(r.code, r.out.join('\n')).toBe(42);
+    expect(r.out[0]).toStartWith('RESULT UNVERIFIED');
+    expect(r.out.join('\n')).not.toContain('RESULT PUSHED');
+    expect(sent()).toBe(1);
+    nothingRecorded();
+    // Push again: the mirror already holds the commit before any send. Still no proof: 42, nothing sent.
+    const again = await run(t, ['push', '--yes'], onFork);
+    expect(again.code, again.out.join('\n')).toBe(42);
+    expect(again.out[0]).toStartWith('RESULT UNVERIFIED');
+    expect(sent()).toBe(1);
+    nothingRecorded();
+    // The commit reaches the PR's repository and the PR reports it: push records it, sending nothing.
+    git(t.clone, 'push', '-q', t.fork, `${s.sha}:refs/heads/pr/feat`);
+    const late = await run(t, ['push', '--yes'], onFork);
+    expect(late.code, late.out.join('\n')).toBe(0);
+    expect(late.out[0]).toStartWith('RESULT PUSHED');
+    expect(sent()).toBe(1);
+    expect(readStagedSync(stateDir(t), pr)).toBeNull();
+    expect(readStateFor(stateDir(t), pr)?.bodyStaleSince).toBe(s.sha);
   });
 
   test('a PR retargeted to another base after the sync was staged is refused (30)', async () => {
@@ -1072,6 +1123,21 @@ describe('push', () => {
     expect(off('/srv/fork/me/gstack.git', 'file:///srv/fork/me/gstack.git')).toBe(false);
     expect(off('/srv/fork/me/gstack.git', '/srv/mirror/me/gstack.git')).toBe(true);
     expect(off('/srv/fork/me/gstack.git', gh)).toBe(true);
+  });
+
+  test('onGithub, the default PR-host test for a lag record: github.com, its subdomains and ssh aliases to it; never a mirror or a local path', () => {
+    const alias = (a: string) => ({ 'gh-work': 'github.com', 'gh-mirror': 'git.example.com' } as Record<string, string>)[a] ?? null;
+    const on = (url: string) => onGithub(url, '/w', alias);
+    expect(on('https://github.com/me/gstack.git')).toBe(true);
+    expect(on('git@github.com:me/gstack.git')).toBe(true);
+    expect(on('ssh://git@ssh.github.com:443/me/gstack.git')).toBe(true);
+    expect(on('git@gh-work:me/gstack.git')).toBe(true);
+    expect(on('git@gh-mirror:me/gstack.git')).toBe(false);
+    expect(on('git@gh-unknown:me/gstack.git')).toBe(false);
+    expect(on('https://gitlab.com/me/gstack.git')).toBe(false);
+    expect(on('https://github.com.example.net/me/gstack.git')).toBe(false);
+    expect(on('/srv/mirror/me/gstack.git')).toBe(false);
+    expect(on('file:///srv/mirror/me/gstack.git')).toBe(false);
   });
 
   test('a local pre-push hook refusal is exit 41 with the hook\'s own words, for push and retrigger', async () => {
