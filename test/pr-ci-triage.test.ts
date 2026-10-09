@@ -479,6 +479,19 @@ describe('run', () => {
     expect(cancelled.out[0]).toStartWith('RESULT NOTHING');
   });
 
+  test('without --run, a head with no Windows Free Tests run listed yet (right after a push) is no verdict: stale (10), never NOTHING', async () => {
+    // The failure was on the old head A; a ci: or sync push moved the PR to B,
+    // and gh lists no run on B until GitHub creates the pull_request run.
+    // NOTHING would read as "every run on B finished clean" when none has started.
+    const r = await triage([{ id: 100, sha: A, shard: 4, fixture: '37346036310' }]);
+    expect(r.code, r.out.join('\n')).toBe(10);
+    expect(r.out[0]).toStartWith('RESULT NO_DRAFT');
+    expect(r.out.some(l => l.startsWith('STALE') && l.includes(B.slice(0, 12)) && l.includes('yet')), r.out.join('\n')).toBe(true);
+    expect(r.calls.some(c => c[0] === 'run' && c[1] === 'view')).toBe(false);
+    expect(downloads(r.calls)).toBe(0);
+    expect(draftFiles(r)).toEqual([]);
+  });
+
   test('the head remote must hold the head gh reports: a pinned mismatch gets no draft', async () => {
     const bare = path.join(ROOT, 'me', 'gt.git');
     fs.mkdirSync(bare, { recursive: true });
@@ -576,7 +589,7 @@ describe('run', () => {
       await triage([{ id: 600, sha: B, shard: 4, fixture: '37346036310' }]),
       await triage([{ id: 601, sha: B, shard: 2, result: { status: 'failed', exitCode: 1, failingFiles: ['test/x.test.ts'] } }]),
       await triage([{ id: 602, sha: A, shard: 4, fixture: '37346036310' }], ['--run', '602']),
-      await triage([]),
+      await triage([{ id: 603, sha: B, conclusion: 'success', jobs: [{ name: 'windows-free-shard (4)', conclusion: 'success' }] }]),
     ];
     expect(verdicts.map(v => v.out[0].split(' ').slice(0, 2).join(' '))).toEqual(['RESULT DRAFTED', 'RESULT NO_DRAFT', 'RESULT NO_DRAFT', 'RESULT NOTHING']);
   });
@@ -601,11 +614,11 @@ describe('run', () => {
     expect(hangLine).not.toMatch(/GetQueuedCompletionStatusEx|IOCP/);
   });
 
-  test('a named failing test is REAL: the blame protocol, never a draft; no failed run is NOTHING', async () => {
+  test('a named failing test is REAL: the blame protocol, never a draft; a head whose run passed is NOTHING', async () => {
     const r = await triage([{ id: 300, sha: B, shard: 2, fixture: 'none', result: { status: 'failed', exitCode: 1, elapsedMs: 1000, failingFiles: ['test/x.test.ts'] } }]);
     expect(r.code).toBe(10);
     expect(r.out.some(l => l.startsWith('BLAME shard 2'))).toBe(true);
-    expect((await triage([])).code).toBe(11);
+    expect((await triage([{ id: 302, sha: B, conclusion: 'success', jobs: [{ name: 'windows-free-shard (2)', conclusion: 'success' }] }])).code).toBe(11);
   });
 
   test('a shard that timed out after a test failed is REAL: the file is named and the blame step printed', async () => {

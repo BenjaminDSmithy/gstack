@@ -47,7 +47,8 @@ export const TRIAGE_USAGE = `gstack-pr-ci-triage <run|onset> [options]
   run     triage the newest failed Windows Free Tests run on the PR's head
           (or --run <id>; without it, a newest run that finished green is
           nothing to triage, and one still queued or running, a re-run
-          included, is no verdict yet): per failed shard, read
+          included, or no run listed on the head yet (right after a
+          push), is no verdict yet): per failed shard, read
           windows-result-<n>, and for a no-failing-test exit the shard-log
           artifact; classify REAL, CRASH (an IOCP or GLib signature as the
           log's last line), HANG, INFRA, AGGREGATE or UNKNOWN.
@@ -68,8 +69,9 @@ remote when this checkout has one) and has no newer run; a stale run's
 artifacts are never downloaded.
 
 Exit codes: 0 drafted, 1 error, 2 usage, 10 triaged without a draft
-(REAL, UNKNOWN, a stale or unfinished run, or evidence missing), 11 the
-head's newest run passed, or every run on it finished and none failed,
+(REAL, UNKNOWN, a stale or unfinished run, no run on the head yet, or
+evidence missing), 11 the head's newest run passed, or it has runs and
+every one finished and none failed,
 40 the PR head branch is gone from the head remote or keeps moving
 (re-run once it settles).`;
 
@@ -531,9 +533,9 @@ async function sameTreeGreen(d: TriageDeps, repo: string, pr: PrInfo, run: RunIn
   return { green: null, why: 'no earlier run that tested the same tree and files passed the shard' };
 }
 
-/** A run that is not the head's finished verdict: no draft, each reason on a STALE line. */
-function staleNoDraft(d: TriageDeps, runId: number, stale: string[]): number {
-  d.out(`RESULT NO_DRAFT run=${runId} stale: triage the newest finished run on the current head`);
+/** No finished verdict for the head (`runId` null: no run on it yet): no draft, each reason on a STALE line. */
+function staleNoDraft(d: TriageDeps, runId: number | null, stale: string[]): number {
+  d.out(`RESULT NO_DRAFT run=${runId ?? 'none'} stale: triage the newest finished run on the current head`);
   for (const s of stale) d.out(`STALE ${s}`);
   return TRIAGE_EXIT.NO_DRAFT;
 }
@@ -566,9 +568,13 @@ async function cmdRun(d: TriageDeps, f: Flags): Promise<number> {
     // A run still queued or running (the head's first, or a failed run re-run
     // since: gh lists it with no conclusion) has no verdict yet. NOTHING would
     // read as "nothing failed" while a maintainer's re-run is still going.
-    if (newest && newest.status !== 'completed') {
-      stale.push(`run ${newest.databaseId} is still ${word(newest.status) || 'queued'}: wait for every shard to finish, then triage again`);
-      return staleNoDraft(d, newest.databaseId, stale);
+    // Nor does a head with no run listed: right after a sync or ci: push,
+    // GitHub has not created the new head's pull_request run yet.
+    if (!newest || newest.status !== 'completed') {
+      stale.push(newest
+        ? `run ${newest.databaseId} is still ${word(newest.status) || 'queued'}: wait for every shard to finish, then triage again`
+        : `no Windows Free Tests run on ${pr.headOid.slice(0, 12)} yet: wait for GitHub to start one, then triage again`);
+      return staleNoDraft(d, newest?.databaseId ?? null, stale);
     }
     d.out(`RESULT NOTHING no failed Windows Free Tests run on ${pr.headOid.slice(0, 12)}`);
     return TRIAGE_EXIT.NOTHING;
