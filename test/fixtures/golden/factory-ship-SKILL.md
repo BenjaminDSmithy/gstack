@@ -1119,7 +1119,8 @@ the check asks gh for it: `none` needs it to be origin's own, and any other is
 asked like an upstream and named on an `UPSTREAM_PR_DEFAULT` line. A GitHub
 Enterprise host counts when gh has a login there, even one that cannot answer
 now (that stops below; a gh before 2.81 lacks `auth status --json`, so only its
-own words for a missing login rule a host out); its repos print as
+own words for a missing login rule a host out, and a gh that does not run at all
+counts a host only when its `hosts.yml` or `GH_HOST` names it); its repos print as
 `<host>/<owner>/<name>`, which /pr-prep's watch poll refuses (exit 2), so the
 owner handles that PR by hand:
 
@@ -1133,7 +1134,9 @@ _ghrepo() {
   case "$_h" in (github.com|*.github.com) printf '%s\n' "$_u"; return 0 ;; (""|*[!a-z0-9.-]*) return 1 ;; esac
   case "$(gh auth status --hostname "$_h" --json hosts --jq '.hosts|length' 2>/dev/null)" in ([1-9]*) ;; (0) return 1 ;;
     (*) command -v gh >/dev/null || return 1
-      case "$(gh auth status --hostname "$_h" 2>&1)" in (*"not logged into any"*|*"not found among authenticated"*) return 1 ;; esac ;; esac
+      if gh --version >/dev/null 2>&1; then case "$(gh auth status --hostname "$_h" 2>&1)" in (*"not logged into any"*|*"not found among authenticated"*) return 1 ;; esac
+      else _g=${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/hosts.yml; echo "UPSTREAM_PR_NOTE: gh does not run; $_h counts only if its hosts.yml or GH_HOST names it" >&2
+        [ "$(printf '%s' "$GH_HOST" | tr 'A-Z' 'a-z')" = "$_h" ] || { [ -e "$_g" ] || return 1; grep -qxF "$_h:" "$_g"; [ $? != 1 ] || return 1; }; fi ;; esac
   printf '%s/%s\n' "$_h" "$_u"
 }
 _u=$(git remote get-url --push origin 2>/dev/null); _FORK=$(_ghrepo) || { echo "UPSTREAM_PR: none"; exit 0; }
@@ -1167,8 +1170,11 @@ if [ -n "$_OPEN" ]; then echo "UPSTREAM_PR: open ${_OPEN% }"; elif [ -n "$_NEW" 
   description. Then Step 20.
 - `lookup failed`: STOP; an unknown PR state never means no PR. The line names
   what gh could not read (origin, the fork parent, a remote or gh's default
-  repo): repair gh's login or network, fix or remove that remote, or point gh's
-  default at origin (below), then rerun.
+  repo): repair gh (itself, after an `UPSTREAM_PR_NOTE` line), its login or
+  network, fix or remove that remote, or point gh's default at origin (below),
+  then rerun.
+- An `UPSTREAM_PR_NOTE` line: gh is installed but does not run (`gh --version`
+  fails), so its hosts file decided the host. Report it so the owner can repair gh.
 - An `UPSTREAM_PR_SKIP` line names a remote whose repo gh cannot find (deleted,
   renamed, or private and out of this login's reach). It went unchecked; report
   it so the owner can fix or remove the remote.

@@ -185,6 +185,14 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     reworded?: true;
     /** No gh on PATH at all. */
     absent?: true;
+    /**
+     * gh is on PATH but does not run: every call fails, `--version` included
+     * (a mise or asdf shim with no version set, a binary for another CPU; real
+     * gh 2.102 with an unreadable config.yml or hosts.yml fails `--version` too).
+     */
+    crashes?: true;
+    /** The hosts gh's hosts.yml (in GH_CONFIG_DIR) names; 'unreadable': there, mode 000. Left out: no file. */
+    hostsYml?: string[] | 'unreadable';
     /** Open PR numbers whose head branch is feat/x, per lowercase repo; a repo left out is one gh cannot find. */
     prs?: Record<string, number[]>;
     /** Lowercase repos whose PR lookup fails with a server error (gh can see them, but not now). */
@@ -224,6 +232,8 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
       // `--json hosts` lists every host gh has a login for and exits 0 even
       // when that login fails (gh 2.102); plain `auth status` fails then.
       'case "$*" in',
+      // Answered offline, so before the network-down exit below.
+      `  --version) echo "gh version ${g.old ?? '2.102'}.0 (stub)"; exit 0 ;;`,
       `  "auth status --hostname "*" --json hosts --jq .hosts|length") ${g.old ? 'echo "unknown flag: --json" >&2; exit 1' : '[ -f "$d/host-$4" ] && echo 1 || echo 0; exit 0'} ;;`,
       // Plain `auth status` exits 1 both when the host has no login and when
       // its login cannot answer; only the words tell them apart.
@@ -261,6 +271,17 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
       fs.rmSync(path.join(dir, 'gh'));
       fs.writeFileSync(path.join(dir, 'git'), `#!/bin/sh\nexec '${Bun.which('git')}' "$@"\n`, { mode: 0o755 });
     }
+    // mise 2026's words for a shim with no version selected.
+    if (g.crashes) fs.writeFileSync(path.join(dir, 'gh'), '#!/bin/sh\necho "mise ERROR No version is set for shim: gh" >&2\nexit 1\n', { mode: 0o755 });
+    // GH_CONFIG_DIR (run() points it here); the layout gh 2.102 writes: one top-level key per host.
+    fs.mkdirSync(path.join(dir, 'cfg'));
+    fs.mkdirSync(path.join(dir, 'xdg'));
+    fs.symlinkSync('../cfg', path.join(dir, 'xdg', 'gh'));
+    if (g.hostsYml) {
+      const yml = path.join(dir, 'cfg', 'hosts.yml');
+      fs.writeFileSync(yml, (g.hostsYml === 'unreadable' ? ['github.com'] : g.hostsYml).map((h) => `${h}:\n    git_protocol: https\n    users:\n        me:\n    user: me\n`).join(''));
+      if (g.hostsYml === 'unreadable') fs.chmodSync(yml, 0o000);
+    }
     return dir;
   }
 
@@ -279,7 +300,9 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
   // A remote gh cannot find: a contributor's deleted fork, or a private repo this login lost.
   const DEAD = 'https://github.com/someone/deleted-fork.git';
   const DEAD_SKIP = 'UPSTREAM_PR_SKIP: remote contributor (someone/deleted-fork) not found on GitHub; not checked';
-  const cases: { name: string; remotes: Record<string, string>; config?: [string, string][]; gh: Gh; want: string; skip?: string[]; dflt?: string[]; code: number }[] = [
+  const noteFor = (host: string) => `UPSTREAM_PR_NOTE: gh does not run; ${host} counts only if its hosts.yml or GH_HOST names it`;
+  /** `env` values may name the row's stub dir as {stub}. */
+  const cases: { name: string; remotes: Record<string, string>; config?: [string, string][]; env?: Record<string, string>; gh: Gh; want: string; skip?: string[]; dflt?: string[]; note?: string[]; code: number }[] = [
     { name: 'a fork branch with no PR yet is new (a GitLab mirror is not asked)', remotes: { origin: 'https://github.com/me/gstack.git', mirror: 'git@gitlab.example.com:me/gstack.git' }, gh: { repos: { 'Me/gstack': 'Garrytan/gstack' }, prs: { 'garrytan/gstack': [] } }, want: 'UPSTREAM_PR: new garrytan/gstack', code: 0 },
     { name: 'a fork branch with an open PR is open', remotes: { origin: 'git@github.com:me/gstack.git' }, gh: { repos: FORK, prs: { 'garrytan/gstack': [3066] } }, want: 'UPSTREAM_PR: open 3066 garrytan/gstack', code: 0 },
     { name: 'two open PRs on the branch are both named', remotes: { origin: 'ssh://git@ssh.github.com:443/me/gstack' }, gh: { repos: FORK, prs: { 'garrytan/gstack': [3066, 3067] } }, want: 'UPSTREAM_PR: open 3066 3067 garrytan/gstack', code: 0 },
@@ -319,6 +342,16 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     { name: 'a gh before 2.40 with no login for the host is not GitHub', remotes: { origin: 'git@gitlab.example.com:me/proj.git' }, gh: { old: '2.39', hosts: ['ghe.acme.test'] }, want: 'UPSTREAM_PR: none', code: 0 },
     { name: 'a gh with --json is read from its JSON, not its words', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, gh: { reworded: true, hosts: ['ghe.acme.test'] }, want: 'UPSTREAM_PR: none', code: 0 },
     { name: 'with no gh installed a GitLab origin is none', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, gh: { absent: true }, want: 'UPSTREAM_PR: none', code: 0 },
+    // A gh that does not run cannot say which hosts it has a login for, so its
+    // hosts.yml (or GH_HOST) does: a GitLab origin is not stopped by gh's health,
+    // and an Enterprise origin gh had a login for still stops.
+    { name: 'a gh that does not run leaves a GitLab origin none, and says so', remotes: { origin: 'git@gitlab.example.com:me/proj.git' }, gh: { crashes: true, hostsYml: ['github.com'] }, want: 'UPSTREAM_PR: none', note: [noteFor('gitlab.example.com')], code: 0 },
+    { name: "a host is named by its own hosts.yml key, not by another host's that contains it", remotes: { origin: 'https://acme.test/me/proj.git' }, gh: { crashes: true, hostsYml: ['github.com', 'ghe.acme.test'] }, want: 'UPSTREAM_PR: none', note: [noteFor('acme.test')], code: 0 },
+    { name: 'a gh that does not run and has no hosts.yml leaves a GitLab origin none', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, gh: { crashes: true }, want: 'UPSTREAM_PR: none', note: [noteFor('gitlab.example.com')], code: 0 },
+    { name: 'a gh that does not run still stops an Enterprise origin its hosts.yml names', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, gh: { crashes: true, hostsYml: ['github.com', 'ghe.acme.test'] }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', note: [noteFor('ghe.acme.test')], code: 1 },
+    { name: 'a gh that does not run reads hosts.yml under XDG_CONFIG_HOME when GH_CONFIG_DIR is empty', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, env: { GH_CONFIG_DIR: '', XDG_CONFIG_HOME: '{stub}/xdg' }, gh: { crashes: true, hostsYml: ['github.com', 'ghe.acme.test'] }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', note: [noteFor('ghe.acme.test')], code: 1 },
+    { name: 'a gh that does not run still stops an Enterprise origin GH_HOST names', remotes: { origin: 'git@work-ghe:me/proj.git' }, env: { GH_HOST: 'GHE.Acme.test' }, gh: { crashes: true, hostsYml: ['github.com'] }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', note: [noteFor('ghe.acme.test')], code: 1 },
+    { name: 'a gh whose hosts.yml cannot be read stops even a GitLab origin', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, gh: { crashes: true, hostsYml: 'unreadable' }, want: 'UPSTREAM_PR: lookup failed origin (gitlab.example.com/me/proj) - STOP', note: [noteFor('gitlab.example.com')], code: 1 },
     { name: 'a host gh has no login for is not GitHub', remotes: { origin: 'https://ghe.other.test/me/proj.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.other.test/me/proj': 'acme/proj' } }, want: 'UPSTREAM_PR: none', code: 0 },
     // A PR's head lives on its base's host, so origin's branch can head a PR only on origin's host: a remote on another host is not asked.
     { name: 'an Enterprise remote that cannot answer does not stop a github.com fork', remotes: { origin: 'https://github.com/me/gstack.git', work: 'https://ghe.acme.test/x/y.git' }, gh: { hosts: ['ghe.acme.test'], repos: FORK, prs: { 'garrytan/gstack': [] }, broken: ['ghe.acme.test/x/y'] }, want: 'UPSTREAM_PR: new garrytan/gstack', code: 0 },
@@ -345,9 +378,12 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
       test(`under ${shell}: ${c.name}`, () => {
         const cwd = clone(`up-${si}-${i}`, c.remotes, c.config);
         const stub = gh(c.gh);
-        const r = run(shell, CHECK, cwd, c.gh.absent ? { PATH: [stub, '/usr/bin', '/bin'].join(':') } : {}, stub);
+        const env: Record<string, string> = { GH_CONFIG_DIR: path.join(stub, 'cfg'), ...(c.gh.absent ? { PATH: [stub, '/usr/bin', '/bin'].join(':') } : {}) };
+        for (const [k, v] of Object.entries(c.env ?? {})) env[k] = v.replaceAll('{stub}', stub);
+        const r = run(shell, CHECK, cwd, env, stub);
         expect(r.out).not.toContain('unexpected');
         const lines = r.out.split('\n');
+        expect(lines.filter((l) => l.startsWith('UPSTREAM_PR_NOTE:')), r.out).toEqual(c.note ?? []);
         expect(lines.filter((l) => l.startsWith('UPSTREAM_PR:')), r.out).toEqual([c.want]);
         expect(lines.filter((l) => l.startsWith('UPSTREAM_PR_SKIP:')), r.out).toEqual(c.skip ?? []);
         expect(lines.filter((l) => l.startsWith('UPSTREAM_PR_DEFAULT:')), r.out).toEqual(c.dflt ?? []);
@@ -367,6 +403,10 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
       ['handoff', "gh repo set-default <origin's repo>", "owner's to run"],
       // An Enterprise repo is named with its host, and its PR is the owner's to handle.
       ['enterprise', 'login', '<host>/<owner>/<name>', 'by hand'],
+      // A gh that does not run cannot list its logins: its hosts.yml or GH_HOST decides, and the owner hears of it.
+      ['does not run', 'hosts.yml', 'gh_host'],
+      ['upstream_pr_note', 'does not run', 'hosts file'],
+      ['report', 'repair gh'],
       // An open PR: no push, no body or title edit.
       ['open', 'never writes'],
       ['do not push', 'skip steps 18-19', 'screenshot'],
