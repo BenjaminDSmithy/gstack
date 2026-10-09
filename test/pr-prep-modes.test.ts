@@ -18,6 +18,8 @@ const SKILL = fs.readFileSync(path.join(ROOT, 'pr-prep', 'SKILL.md'), 'utf8');
 const TMPL = fs.readFileSync(path.join(ROOT, 'pr-prep', 'SKILL.md.tmpl'), 'utf8');
 const section = (id: string) => fs.readFileSync(path.join(ROOT, 'pr-prep', 'sections', `${id}.md`), 'utf8');
 const MODES = ['open', 'sync', 'body', 'watch', 'ci', 'liveness'];
+/** Paragraphs and list items (a bullet with its wrapped lines) of a section. */
+const blocks = (text: string) => text.split(/\n\s*\n|\n(?=- )/);
 // The section whose AskUserQuestion gates each write, and that write's registered question id.
 const WRITE_QIDS: Record<string, string> = {
   sync: 'pr-prep-sync-push', body: 'pr-prep-body-publish', ci: 'pr-prep-ci-retrigger-push', open: 'pr-prep-open-pr',
@@ -145,6 +147,21 @@ describe('mode sections', () => {
     expectMentions(section('watch'), [['any other exit', '30', 'not write']], 'watch section');
   });
 
+  test('body tells the three read-back outcomes apart, in the words the helper prints', () => {
+    // One bullet read every `RESULT ERROR ... read-back` as a concurrent edit:
+    // a failed read-back (GitHub's state unknown) and a failed gh pr edit
+    // (nothing changed) got the wrong cause and no way forward.
+    const helper = fs.readFileSync(path.join(ROOT, 'lib', 'pr-body.ts'), 'utf8');
+    const site = (token: string) => {
+      expect(helper, `lib/pr-body.ts no longer prints "${token}"`).toContain(token);
+      return blocks(section('body')).find(b => b.includes(token)) ?? '';
+    };
+    expectMentions(site('read-back is not the body sent'), [['never', 're-publish']], 'body: concurrent edit');
+    expectMentions(site('but the read-back failed'), [['only', 'yes', 'again']], 'body: read-back failed');
+    expectTokens(site('but the read-back failed'), ['already-live=yes'], 'body: read-back failed');
+    expectTokens(site('gh pr edit failed'), ['unchanged'], 'body: gh pr edit failed');
+  });
+
   test('sync merges, never rebases, and stops on a code conflict', () => {
     expectMentions(section('sync'), [['never', 'rebase'], ['code', 'conflict', 'STOP']], 'sync section');
   });
@@ -236,9 +253,10 @@ describe('one-way doors', () => {
     ['body', '--confirm-redaction', 'The body for PR 3066 has a MEDIUM email finding. Confirm the redaction finding and publish?'],
     ['body', '--accept-rewritten-stale', 'The stale push 1a2b3c4d5e6f is no longer in the PR head after a rebase. Accept it and publish?'],
     ['open', 'MEDIUM', 'The draft PR body has a MEDIUM email finding. Send it as is?'],
+    // Not wider, but a second send the first yes did not cover.
+    ['body', 'read-back failed', 'The edit to PR 3066 was sent but the read-back failed. Run the same publish again?'],
+    ['body', 'gh pr edit failed', 'gh pr edit failed for PR 3066 and the body is unchanged. Publish again?'],
   ];
-  /** Paragraphs and list items (a bullet with its wrapped lines) of a section. */
-  const blocks = (text: string) => text.split(/\n\s*\n|\n(?=- )/);
   const followUpSites = () => FOLLOW_UPS.flatMap(([mode, token, summary]) => {
     const sites = blocks(section(mode)).filter(b => b.includes(token));
     expect(sites.length, `the ${mode} section no longer mentions ${token}`).toBeGreaterThan(0);
