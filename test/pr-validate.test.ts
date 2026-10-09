@@ -971,6 +971,43 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(quiet.f.out.some(l => l.startsWith('tree changed'))).toBe(false);
   });
 
+  test('the tree gains a file while the preconditions run: an untracked module the commit lacks, or an edit before the first precondition, is red; ignored build output is not', async () => {
+    const BUILT = 'lib/diagram-render/dist/BUILD_INFO.json';
+    const runWith = async (name: string, at: string, act: (tree: string) => void, o: { scripts?: Record<string, string>; pr?: Record<string, string> } = {}) => {
+      let tree = '';
+      const rec = recorder(() => tree, {
+        onCall: l => {
+          // build:gates rewrites its tracked bundle and adds a file beside it; build:cso writes an ignored output.
+          if (l === 'bun run build:gates') {
+            write(tree, BUILT, '{"at":2}\n');
+            write(tree, 'lib/diagram-render/dist/extra.js', '1;\n');
+          }
+          if (l === 'bun run build:cso') write(tree, 'out/cso/bin.js', '1;\n');
+          if (l === at) act(tree);
+        },
+      });
+      const pkg = o.scripts ? { 'package.json': JSON.stringify({ name: 'fx', version: '1.0.0', scripts: o.scripts }) } : {};
+      const f = fixture(name, "test('x', () => expect(y).toBe(2));", { base: { ...CI_TREE, ...pkg, '.gitignore': 'out/\n', [BUILT]: '{"at":1}\n' }, pr: o.pr, deps: { tool: rec.tool } });
+      tree = f.tree;
+      return { f, rc: await f.call(['run']) };
+    };
+    const changedLine = (r: { f: { out: string[] } }) => r.f.out.find(l => l.startsWith('tree changed during the preconditions'));
+    // The PR's lib/y.ts re-exports ./gen, which the commit lacks; a file created while build:cso runs would let the tests pass.
+    const gained = await runWith('pre-untracked', 'bun run build:cso', tree => write(tree, 'lib/gen.ts', 'export const y = 2;\n'), { pr: { 'lib/y.ts': "export { y } from './gen';\n" } });
+    expect(gained.rc).toBe(1);
+    expect(changedLine(gained)).toContain('lib/gen.ts');
+    expect(changedLine(gained)).not.toContain('out/cso');
+    expect(readStateFor(gained.f.dir, pr)!.validation).toMatchObject({ worst: 1 });
+    // No gen:skill-docs drift check to see it: an edit while bun --version runs, before the first precondition.
+    const early = await runWith('pre-edit-first', 'bun --version', tree => write(tree, 'lib/y.ts', 'export const y = 3;\n'), { scripts: { 'vendor:xterm': 'x', 'build:gates': 'x', 'build:cso': 'x' } });
+    expect(early.rc).toBe(1);
+    expect(changedLine(early)).toContain('lib/y.ts');
+    // The preconditions' own output, tracked or ignored, is not a change.
+    const quiet = await runWith('pre-built-only', '', () => {});
+    expect(quiet.rc).toBe(0);
+    expect(quiet.f.out.some(l => l.startsWith('tree changed'))).toBe(false);
+  });
+
   test('a secret scan whose diff failed is red and never scans an empty diff', async () => {
     let tree = '';
     const rec = recorder(() => tree);
@@ -992,6 +1029,8 @@ describe('run, select and declare against a fixture PR tree', () => {
     tree = f.tree;
     expect(await f.call(['run'])).toBe(1);
     expect(f.out).toContain('precondition gen-skill-docs-all rc=0 drift=1 (drift/SKILL.md)');
+    // The generator wrote it: drift, not a change made while the preconditions ran.
+    expect(f.out.some(l => l.startsWith('tree changed'))).toBe(false);
   });
 
   test('tests get a real-path TMPDIR; CI\'s macOS named regressions re-run on the unresolved temp root', async () => {
