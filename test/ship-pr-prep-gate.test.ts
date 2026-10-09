@@ -47,12 +47,12 @@ const SHELLS = ['bash', 'zsh', '/bin/bash']
   .filter((x, i, all) => all.findIndex((y) => y.real === x.real) === i)
   .map((x) => x.s);
 const HAVE_JQ = Bun.which('jq') !== null;
-// Root searches any directory, so a mode-000 one hides nothing from it.
+// Root searches any directory, so a locked one hides nothing from it.
 const IS_ROOT = process.getuid?.() === 0;
 const TOOL_DIRS = [...new Set(['git', 'jq'].map((t) => Bun.which(t)).filter((p): p is string => !!p).map((p) => path.dirname(p)))];
 
 let tmp: string;
-/** Dirs a case set to mode 000; searchable again before the cleanup walks them. */
+/** Dirs a case locked; searchable again before the cleanup walks them. */
 const locked: string[] = [];
 beforeAll(() => {
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ship-pr-prep-gate-')));
@@ -198,8 +198,10 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     crashes?: true;
     /** The hosts gh's hosts.yml (in GH_CONFIG_DIR) names; 'unreadable': there, mode 000. Left out: no file. */
     hostsYml?: string[] | 'unreadable';
-    /** A dir set to mode 000 once hosts.yml is written: gh's config dir, or ~/.config above it. */
+    /** A dir locked once hosts.yml is written: gh's config dir, or ~/.config above it. */
     lock?: 'cfg' | 'home/.config';
+    /** The locked dir's mode, by default 0o000; 0o644 can be read but not searched, 0o311 searched but not read. */
+    lockMode?: number;
     /** Open PR numbers whose head branch is feat/x, per lowercase repo; a repo left out is one gh cannot find. */
     prs?: Record<string, number[]>;
     /** Lowercase repos whose PR lookup fails with a server error (gh can see them, but not now). */
@@ -298,7 +300,7 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     }
     if (g.lock) {
       locked.push(path.join(dir, g.lock));
-      fs.chmodSync(path.join(dir, g.lock), 0o000);
+      fs.chmodSync(path.join(dir, g.lock), g.lockMode ?? 0o000);
     }
     return dir;
   }
@@ -379,6 +381,12 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     // Only a missing one under a dir that can be searched means no login.
     { name: 'a gh whose config dir cannot be searched still stops an Enterprise origin', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, gh: { crashes: true, hostsYml: ['github.com', 'ghe.acme.test'], lock: 'cfg' }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', note: [noteFor('ghe.acme.test')], code: 1 },
     { name: 'a gh whose ~/.config cannot be searched still stops an Enterprise origin', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, env: { GH_CONFIG_DIR: '', XDG_CONFIG_HOME: '', HOME: '{stub}/home' }, gh: { crashes: true, hostsYml: ['github.com', 'ghe.acme.test'], lock: 'home/.config' }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', note: [noteFor('ghe.acme.test')], code: 1 },
+    // Search permission decides, not read: a dir that can be read but not
+    // searched still hides hosts.yml (gh 2.102 fails `--version` under a
+    // mode-644 config dir), and one that can be searched but not read still
+    // shows that a missing file is missing.
+    { name: 'a gh whose config dir can be read but not searched still stops an Enterprise origin', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, gh: { crashes: true, hostsYml: ['github.com', 'ghe.acme.test'], lock: 'cfg', lockMode: 0o644 }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', note: [noteFor('ghe.acme.test')], code: 1 },
+    { name: 'a gh whose config dir can be searched but not read, with no hosts.yml, leaves a GitLab origin none', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, gh: { crashes: true, lock: 'cfg', lockMode: 0o311 }, want: 'UPSTREAM_PR: none', note: [noteFor('gitlab.example.com')], code: 0 },
     { name: 'a gh whose config dir does not exist leaves a GitLab origin none', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, env: { GH_CONFIG_DIR: '{stub}/gone/gh' }, gh: { crashes: true }, want: 'UPSTREAM_PR: none', note: [noteFor('gitlab.example.com')], code: 0 },
     { name: 'a relative config dir that does not exist is looked for from the working dir, and the search ends', remotes: { origin: 'https://gitlab.example.com/me/proj.git' }, env: { GH_CONFIG_DIR: 'gone/gh' }, gh: { crashes: true }, want: 'UPSTREAM_PR: none', note: [noteFor('gitlab.example.com')], code: 0 },
     { name: 'a host gh has no login for is not GitHub', remotes: { origin: 'https://ghe.other.test/me/proj.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.other.test/me/proj': 'acme/proj' } }, want: 'UPSTREAM_PR: none', code: 0 },
