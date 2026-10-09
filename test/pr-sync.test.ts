@@ -28,6 +28,7 @@ import { prStateDir, topicFor, readStateFor, writeState, defaultGit, type GhRunn
 import { triageMain, writeRetriggerDraft } from '../lib/pr-ci-triage';
 import { listReceipts } from '../lib/egress-receipt';
 import { TRACKER_ENVELOPE_BEGIN, TRACKER_ENVELOPE_END } from '../lib/tracker-guard';
+import { between, expectMentions, expectTokens } from './helpers/prompt-structure';
 
 setDefaultTimeout(180_000);
 
@@ -1548,5 +1549,22 @@ describe('push', () => {
     expect(m.code, m.out.join('\n')).toBe(30);
     expect(m.out[0]).toContain('#6');
     expect(worktreeAdds).toBe(before);
+  });
+});
+
+describe("the sync section's push step", () => {
+  const sync = fs.readFileSync(path.join(REPO_ROOT, 'pr-prep', 'sections', 'sync.md'), 'utf8');
+
+  test('handles exit 42: nothing recorded, and push runs again only on a new yes with the same --accept-* flags, since it can send again', () => {
+    // The push's own NOTE says to run it again. Without this step the agent
+    // re-runs on the first yes (a yes covers one write) and, when the head
+    // remote still lacks the commit, pushes a second time.
+    const step4 = between(sync, '### 4.');
+    expectTokens(step4, ['RESULT UNVERIFIED'], 'sync step 4');
+    expectMentions(step4, [
+      ['42', 'nothing', 'recorded'],
+      ['again', 'only', 'new yes', 'pr-prep-sync-push', '--accept-'],
+      ['sends nothing', 'pushes again'],
+    ], 'sync step 4');
   });
 });
