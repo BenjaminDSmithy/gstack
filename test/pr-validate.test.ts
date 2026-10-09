@@ -1586,6 +1586,44 @@ describe('run, select and declare against a fixture PR tree', () => {
       expect(g.out[0], how).toStartWith('RESULT RED');
       expect(g.out.find(l => l.startsWith('test/x.test.ts ')), how).toMatch(/^test\/x\.test\.ts rc=1 .* RED: /);
     }
+
+    // On the base, a stand-in whose workflow pins the local Bun: read through it, a Bun CI would
+    // refuse looks like CI's own pin.
+    let pinTree = '';
+    const pinRec = recorder(() => pinTree, { bunVersion: '1.4.2' });
+    const onPin = fixture('replace-bun-pin', "test('x', () => expect(y).toBe(2));", { base: { '.github/workflows/free-tests.yml': freeTests('1.4.1') }, deps: { tool: pinRec.tool } });
+    pinTree = onPin.tree;
+    const pinB1 = git(onPin.tree, 'rev-parse', 'main');
+    git(onPin.tree, 'checkout', '-q', '--detach', 'main');
+    write(onPin.tree, '.github/workflows/free-tests.yml', freeTests('1.4.2'));
+    git(onPin.tree, 'commit', '-q', '-am', 'local pin');
+    const pinT = git(onPin.tree, 'rev-parse', 'HEAD^{tree}');
+    git(onPin.tree, 'checkout', '-q', 'pr/v');
+    git(onPin.tree, 'replace', pinB1, git(onPin.tree, 'commit-tree', pinT, '-m', 'stand-in'));
+    expect(git(onPin.tree, 'show', `${pinB1}:.github/workflows/free-tests.yml`)).toContain('bun-version: 1.4.2');
+    expect(await onPin.call(['run'])).toBe(1);
+    expect(onPin.out).toContain('bun-pin want=1.4.1 have=1.4.2 rc=1');
+
+    // Two upstream commits after the merge base, and a graft that makes the newer one's parent the
+    // merge base: read through it, the disclosure would hide the middle commit that does run locally.
+    const range = fixture('replace-range', "test('x', () => expect(y).toBe(2));");
+    const rh0 = git(range.tree, 'rev-parse', 'HEAD');
+    const rb1 = git(range.tree, 'rev-parse', 'main');
+    git(range.tree, 'checkout', '-q', 'main');
+    write(range.tree, 'lib/z.ts', 'export const z = 1;\n');
+    git(range.tree, 'add', 'lib/z.ts');
+    git(range.tree, 'commit', '-q', '-m', 'upstream z');
+    write(range.tree, 'lib/w.ts', 'export const w = 1;\n');
+    git(range.tree, 'add', 'lib/w.ts');
+    git(range.tree, 'commit', '-q', '-m', 'upstream w');
+    const rb3 = git(range.tree, 'rev-parse', 'HEAD');
+    git(range.tree, 'checkout', '-q', 'pr/v');
+    git(range.tree, 'replace', '--graft', rb3, rb1);
+    expect(git(range.tree, 'rev-list', '--count', `${rb1}..${rb3}`)).toBe('1');
+    fs.mkdirSync(range.dir, { recursive: true });
+    fs.writeFileSync(path.join(range.dir, 'sync.json'), JSON.stringify({ repo: 'acme/fx', number: 5, scratch: range.tree, base: rb3, h0: rh0 }));
+    expect(await range.call(['run'])).toBe(0);
+    expect(range.err.join('\n')).toMatch(new RegExp(`^UPSTREAM_RANGE ${rb1.slice(0, 12)}\\.\\.${rb3.slice(0, 12)} 2 commit\\(s\\)`, 'm'));
   });
 
   test('gen:skill-docs output that is not committed is red', async () => {
