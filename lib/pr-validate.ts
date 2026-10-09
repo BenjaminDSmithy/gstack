@@ -962,7 +962,8 @@ function statusEntries(c: Ctx, untrackedFiles: 'all' | 'normal' = 'all'): { path
     if (e.length < 4) continue;
     entries.push({ path: e.slice(3), untracked: e.startsWith('??') });
     // A rename or copy names its source in the next field: X is R or C when
-    // it is staged, Y is R when it is in the worktree (the new name added -N).
+    // it is staged; Y is R when it is in the worktree (the new name added -N),
+    // or C for a worktree copy under status.renames=copies.
     if (/^(?:[RC]|.[RC])/.test(e)) i++;
   }
   return entries;
