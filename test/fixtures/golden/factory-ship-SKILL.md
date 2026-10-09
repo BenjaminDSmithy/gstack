@@ -1112,19 +1112,25 @@ stage 4's recovery before publication. Otherwise continue to Step 17.
 **Upstream PR check — before anything is pushed.** A PR on a repo that
 `origin` is not (a fork PR to someone else's project) is the owner's to write to.
 The check reads the upstream from origin's URL (its GitHub fork parent, plus every
-other GitHub remote), never from gh's default repo:
+other GitHub remote), never from gh's default repo. A GitHub Enterprise host
+counts when gh has a login there; its repos print as `<host>/<owner>/<name>`,
+which /pr-prep's watch poll refuses (exit 2), so the owner handles that PR by hand:
 
 ```bash
 _ghrepo() {
   _u=$(printf '%s' "$_u" | tr 'A-Z' 'a-z'); _a=0
   case "$_u" in (ssh://*|git+ssh://*|ssh+git://*) _a=1; _u=${_u#*://} ;; (*://*) _u=${_u#*://} ;; (*:*) _a=1; _u=${_u%%:*}/${_u#*:} ;; (*) return 1 ;; esac
   _h=${_u%%/*}; _h=${_h##*@}; _h=${_h%%:*}; _u=${_u#*/}; _u=${_u#/}; _u=${_u%/}; _u=${_u%.git}
-  case "$_h" in (github.com|*.github.com) ;; (*) [ "$_a" = 1 ] || return 1; case "$(ssh -G "$_h" 2>/dev/null | sed -n 's/^hostname //p')" in (github.com|*.github.com) ;; (*) return 1 ;; esac ;; esac
-  case "$_u" in (*/*/*|*[!a-z0-9._/-]*) return 1 ;; (?*/?*) printf '%s\n' "$_u" ;; (*) return 1 ;; esac
+  case "$_u" in (*/*/*|*[!a-z0-9._/-]*) return 1 ;; (?*/?*) ;; (*) return 1 ;; esac
+  [ "$_a" = 0 ] || case "$_h" in (github.com|*.github.com) ;; (*) _s=$(ssh -G "$_h" 2>/dev/null | sed -n 's/^hostname //p' | tr 'A-Z' 'a-z'); _h=${_s:-$_h} ;; esac
+  case "$_h" in (github.com|*.github.com) printf '%s\n' "$_u"; return 0 ;; (""|*[!a-z0-9.-]*) return 1 ;; esac
+  case "$(gh auth status --hostname "$_h" --json hosts --jq '.hosts|length' 2>/dev/null)" in ([1-9]*) ;; (*) gh auth status --hostname "$_h" >/dev/null 2>&1 || return 1 ;; esac
+  printf '%s/%s\n' "$_h" "$_u"
 }
 _u=$(git remote get-url --push origin 2>/dev/null); _FORK=$(_ghrepo) || { echo "UPSTREAM_PR: none"; exit 0; }
 _UP=$(gh repo view "$_FORK" --json nameWithOwner,parent -q '.nameWithOwner + " " + (if .parent then .parent.owner.login + "/" + .parent.name else "" end)' 2>/dev/null | tr 'A-Z' 'a-z') && [ -n "$_UP" ] || { echo "UPSTREAM_PR: lookup failed origin ($_FORK) - STOP"; exit 1; }
-_SEEN=" $_FORK ${_UP%% *} "; _NEW=${_UP#* }; _OPEN=""
+case "$_FORK" in (*/*/*) _P=${_FORK%%/*}/ ;; (*) _P="" ;; esac
+_SEEN=" $_FORK $_P${_UP%% *} "; _NEW=${_UP#* }; _NEW=${_NEW:+$_P$_NEW}; _OPEN=""
 _prs() { gh pr list --repo "$_C" --head <branch-name> --state open --json number -q '.[].number'; }
 _ask() {
   case "$_SEEN" in (*" $_C "*) return 0 ;; esac; _SEEN="$_SEEN$_C "

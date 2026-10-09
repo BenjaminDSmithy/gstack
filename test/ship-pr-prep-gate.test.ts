@@ -168,8 +168,12 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
   })();
 
   interface Gh {
-    /** Repos gh can see, as GitHub spells them, each with its fork parent (null: not a fork). */
+    /** Repos gh can see, as GitHub spells them (an Enterprise one as host/owner/name), each with its fork parent (null: not a fork). */
     repos?: Record<string, string | null>;
+    /** GitHub Enterprise hosts gh has a login for. */
+    hosts?: string[];
+    /** A gh from before `auth status --json` (the flag is unknown). */
+    old?: true;
     /** Open PR numbers whose head branch is feat/x, per lowercase repo; a repo left out is one gh cannot find. */
     prs?: Record<string, number[]>;
     /** Lowercase repos whose PR lookup fails with a server error (gh can see them, but not now). */
@@ -187,19 +191,27 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
    */
   function gh(g: Gh): string {
     const dir = fs.mkdtempSync(path.join(tmp, 'gh-'));
-    const file = (kind: string, repo: string) => path.join(dir, `${kind}-${repo.replace('/', '_')}.json`);
+    const file = (kind: string, repo: string) => path.join(dir, `${kind}-${repo.replaceAll('/', '_')}.json`);
     // The shape gh 2.102 returns for `--json nameWithOwner,parent`: the parent
     // carries `name` and `owner.login`, never `nameWithOwner` (measured
-    // 2026-10-09 on BenjaminDSmithy/gstack, a fork of garrytan/gstack).
+    // 2026-10-09 on BenjaminDSmithy/gstack, a fork of garrytan/gstack), and
+    // nameWithOwner never carries an Enterprise host.
     for (const [repo, parent] of Object.entries(g.repos ?? {})) {
       const [login, name] = (parent ?? '/').split('/');
-      fs.writeFileSync(file('repo', repo.toLowerCase()), JSON.stringify({ nameWithOwner: repo, parent: parent === null ? null : { id: 'R_1', name, owner: { id: 'U_1', login } } }));
+      fs.writeFileSync(file('repo', repo.toLowerCase()), JSON.stringify({ nameWithOwner: repo.split('/').slice(-2).join('/'), parent: parent === null ? null : { id: 'R_1', name, owner: { id: 'U_1', login } } }));
     }
+    for (const host of g.hosts ?? []) fs.writeFileSync(path.join(dir, `host-${host}`), '');
     for (const [repo, nums] of Object.entries(g.prs ?? {})) fs.writeFileSync(file('prs', repo), JSON.stringify(nums.map((number) => ({ number }))));
     for (const repo of g.broken ?? []) fs.writeFileSync(file('broken', repo), '');
     fs.writeFileSync(path.join(dir, 'gh'), [
       '#!/bin/sh',
       'd=$(dirname "$0")',
+      // `--json hosts` lists every host gh has a login for and exits 0 even
+      // when that login fails (gh 2.102); plain `auth status` fails then.
+      'case "$*" in',
+      `  "auth status --hostname "*" --json hosts --jq .hosts|length") ${g.old ? 'echo "unknown flag: --json" >&2; exit 1' : '[ -f "$d/host-$4" ] && echo 1 || echo 0; exit 0'} ;;`,
+      '  "auth status --hostname "*) [ -f "$d/host-$4" ] && [ ! -f "$d/down" ]; exit ;;',
+      'esac',
       ...(g.down ? ['echo "error connecting to api.github.com" >&2; exit 1'] : []),
       'case "$*" in',
       `  "repo view --json nameWithOwner -q .nameWithOwner") ${g.ghDefault ? `echo '${g.ghDefault}'; exit 0` : 'exit 1'} ;;`,
@@ -217,10 +229,11 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
       '#!/bin/sh',
       '[ "$1" = -G ] || { echo "unexpected ssh $*" >&2; exit 3; }',
       'echo "user git"',
-      'case "$2" in github-me) echo "hostname github.com" ;; *) echo "hostname $2" ;; esac',
+      'case "$2" in github-me) echo "hostname github.com" ;; work-ghe) echo "hostname ghe.acme.test" ;; *) echo "hostname $2" ;; esac',
       'echo "port 22"',
       '',
     ].join('\n'), { mode: 0o755 });
+    if (g.down) fs.writeFileSync(path.join(dir, 'down'), '');
     return dir;
   }
 
@@ -264,6 +277,12 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     { name: 'your own repo with a dead extra remote is none, and the remote is named', remotes: { origin: 'https://github.com/garrytan/gstack.git', contributor: DEAD }, gh: { repos: { 'garrytan/gstack': null } }, want: 'UPSTREAM_PR: none', skip: [DEAD_SKIP], code: 0 },
     { name: 'a fork with a dead extra remote is still new on its parent', remotes: { origin: 'https://github.com/me/gstack.git', upstream: 'https://github.com/garrytan/gstack.git', contributor: DEAD }, gh: { repos: FORK, prs: { 'garrytan/gstack': [] } }, want: 'UPSTREAM_PR: new garrytan/gstack', skip: [DEAD_SKIP], code: 0 },
     { name: 'a fork with a dead extra remote still finds the open PR', remotes: { origin: 'git@github.com:me/gstack.git', contributor: DEAD }, gh: { repos: FORK, prs: { 'garrytan/gstack': [3066] } }, want: 'UPSTREAM_PR: open 3066 garrytan/gstack', skip: [DEAD_SKIP], code: 0 },
+    // GitHub Enterprise counts when gh has a login for its host; its repos carry the host, so gh asks the right server.
+    { name: 'an Enterprise fork with an open upstream PR is open', remotes: { origin: 'https://ghe.acme.test/me/proj.git', upstream: 'https://ghe.acme.test/acme/proj.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.acme.test/me/proj': 'acme/proj' }, prs: { 'ghe.acme.test/acme/proj': [3066] } }, want: 'UPSTREAM_PR: open 3066 ghe.acme.test/acme/proj', code: 0 },
+    { name: 'an ssh alias for an Enterprise host is a new fork PR there', remotes: { origin: 'git@work-ghe:me/proj.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.acme.test/me/proj': 'acme/proj' }, prs: { 'ghe.acme.test/acme/proj': [] } }, want: 'UPSTREAM_PR: new ghe.acme.test/acme/proj', code: 0 },
+    { name: 'a gh without auth status --json still finds an Enterprise fork', remotes: { origin: 'https://ghe.acme.test/me/proj.git' }, gh: { old: true, hosts: ['ghe.acme.test'], repos: { 'ghe.acme.test/me/proj': 'acme/proj' }, prs: { 'ghe.acme.test/acme/proj': [3066] } }, want: 'UPSTREAM_PR: open 3066 ghe.acme.test/acme/proj', code: 0 },
+    { name: 'an Enterprise fork with gh down there stops', remotes: { origin: 'git@ghe.acme.test:me/proj.git' }, gh: { hosts: ['ghe.acme.test'], down: true }, want: 'UPSTREAM_PR: lookup failed origin (ghe.acme.test/me/proj) - STOP', code: 1 },
+    { name: 'a host gh has no login for is not GitHub', remotes: { origin: 'https://ghe.other.test/me/proj.git' }, gh: { hosts: ['ghe.acme.test'], repos: { 'ghe.other.test/me/proj': 'acme/proj' } }, want: 'UPSTREAM_PR: none', code: 0 },
     // Any other failure on an extra remote still stops, and names the remote to fix or remove.
     { name: 'an extra remote whose lookup errors stops and is named', remotes: { origin: 'https://github.com/me/gstack.git', contributor: 'https://github.com/someone/gstack.git' }, gh: { repos: FORK, prs: { 'garrytan/gstack': [] }, broken: ['someone/gstack'] }, want: 'UPSTREAM_PR: lookup failed remote contributor (someone/gstack) - STOP', code: 1 },
   ];
@@ -288,6 +307,8 @@ describe.skipIf(!HAVE_JQ)('/ship Step 17: a fork PR to someone else\'s repo', ()
     expectMentions(prose, [
       // The upstream comes from origin, whatever `gh repo set-default` chose.
       ['upstream', "origin's url", 'parent', "never from gh's default"],
+      // An Enterprise repo is named with its host, and its PR is the owner's to handle.
+      ['enterprise', 'login', '<host>/<owner>/<name>', 'by hand'],
       // An open PR: no push, no body or title edit.
       ['open', 'never writes'],
       ['do not push', 'skip steps 18-19', 'screenshot'],
