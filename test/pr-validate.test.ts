@@ -1056,6 +1056,36 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(quiet.f.out.some(l => l.startsWith('tree changed'))).toBe(false);
   });
 
+  test('a tracked path git quotes in a diff header is fingerprinted by its name: an edit names it once, and its own rebuilt output is no change', async () => {
+    // `git diff` writes `diff --git "a/lib/caf\303\251.ts" "b/lib/caf\303\251.ts"` for these.
+    const ACCENT = 'lib/café.ts';
+    // Every C escape git writes: \033 (octal), \n, \t, \" and \\.
+    const ESCAPED = 'lib/q\u001b[2K\n\t"x"\\y.ts';
+    const BUILT = 'lib/diagram-render/dist/ñ.json';
+    const runWith = async (name: string, act?: (tree: string) => void) => {
+      let tree = '';
+      const rec = recorder(() => tree, {
+        onCall: l => {
+          if (l === 'bun run build:gates') write(tree, BUILT, '{"at":2}\n');
+          if (l === 'bun run build:cso') act?.(tree);
+        },
+      });
+      const f = fixture(name, "test('x', () => expect(y).toBe(2));", { base: { ...CI_TREE, [BUILT]: '{"at":1}\n', [ACCENT]: 'export const c = 1;\n', [ESCAPED]: '1\n' }, deps: { tool: rec.tool } });
+      tree = f.tree;
+      return { f, rc: await f.call(['run']) };
+    };
+    const quiet = await runWith('quoted-quiet');
+    expect(quiet.rc).toBe(0);
+    expect(quiet.f.out.some(l => l.startsWith('tree changed'))).toBe(false);
+    const edited = await runWith('quoted-edit', tree => write(tree, ACCENT, 'export const c = 2;\n'));
+    expect(edited.rc).toBe(1);
+    expect(edited.f.out.find(l => l.startsWith('tree changed during the preconditions'))).toContain(`tracked files ${ACCENT} differ`);
+    // The header's name and git status's name are one file: named once, never as a header.
+    const escaped = await runWith('quoted-escapes', tree => write(tree, ESCAPED, '2\n'));
+    expect(escaped.rc).toBe(1);
+    expect(escaped.f.out.find(l => l.startsWith('tree changed during the preconditions'))).toContain(`tracked files ${JSON.stringify(ESCAPED)} differ`);
+  });
+
   test('the tree gains a file while the preconditions run: an untracked module the commit lacks, or an edit before the first precondition, is red; ignored build output is not', async () => {
     const BUILT = 'lib/diagram-render/dist/BUILD_INFO.json';
     const runWith = async (name: string, at: string, act: (tree: string) => void, o: { scripts?: Record<string, string>; pr?: Record<string, string> } = {}) => {
