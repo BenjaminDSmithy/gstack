@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { listAuditCommits, stampReport, dropSelf, worstOf, searchQualifier, commitsMain, type PriorReport } from '../lib/pr-prep-commits';
-import { defaultGit } from '../lib/pr-context';
+import { defaultGit, prStateDir, topicFor } from '../lib/pr-context';
 
 setDefaultTimeout(120_000);
 
@@ -533,6 +533,45 @@ describe('CLI', () => {
     fs.writeFileSync(legacy, JSON.stringify({ ...JSON.parse(fs.readFileSync(persisted, 'utf8')), repo: undefined }));
     expect(await stamp([failedRecheck, { sha: sha.c4.slice(0, 6), bucket: 'CLEAN' }], ['--repo', UP, '--prior', legacy])).toEqual([2, 'UNVERIFIED']);
     expect(await stamp([failedRecheck, { sha: sha.c4.slice(0, 6), bucket: 'CLEAN' }], ['--prior', legacy])).toEqual([2, 'EXACT_DUP']);
+  });
+
+  test('stamp refuses a --repo other than the one a prior holding an EXACT_DUP was stamped for, and keeps that copy', async () => {
+    const env = { ...process.env, GSTACK_STATE_ROOT: path.join(ROOT, 'home-repo-typo') };
+    let out: string[] = [];
+    const agent = path.join(ROOT, 'agent-repo-typo.json');
+    const ship = path.join(ROOT, 'ship-repo-typo.json');
+    const run = (argv: string[]) => {
+      out = [];
+      return commitsMain([...argv, '--cwd', repo], { out: l => out.push(l), env });
+    };
+    const stamp = async (r: string, rows: { sha: string; bucket: string }[]) => {
+      fs.writeFileSync(agent, JSON.stringify({ summary: 's', commits: rows }));
+      fs.rmSync(ship, { force: true });
+      const code = await run(['stamp', '--base', base, '--repo', r, '--report', agent, '--out', ship]);
+      return [code, JSON.parse(fs.readFileSync(ship, 'utf8')).worst];
+    };
+    const modes = async (r: string) => {
+      expect(await run(['list', '--base', base, '--repo', r])).toBe(0);
+      return JSON.parse(out.slice(1).join('\n')).audit.map((c: { mode: string }) => c.mode);
+    };
+    expect(await stamp(UP, [{ sha: sha.c1, bucket: 'EXACT_DUP' }, { sha: sha.c4, bucket: 'CLEAN' }])).toEqual([0, 'EXACT_DUP']);
+    expect(await modes(UP)).toEqual(['RECHECK', 'CARRY']);
+    // The hand-filled repo has a typo on stamp only, and c1's full search failed.
+    expect(await stamp('acme/upstream2', [{ sha: sha.c1, bucket: 'UNVERIFIED' }, { sha: sha.c4, bucket: 'CLEAN' }])).toEqual([2, 'EXACT_DUP']);
+    expect(out[0]).toMatch(/^RESULT USAGE .*EXACT_DUP audited against acme\/upstream, .*--repo acme\/upstream2/);
+    expect(out[1]).toBe(`PR_PREP_REPORT: ${ship} (EXACT_DUP, refused)`);
+    // The copy keeps the duplicate: the next list against the real upstream still re-checks c1.
+    expect(await modes(UP)).toEqual(['RECHECK', 'CARRY']);
+    // A --persist copy that holds another repo's EXACT_DUP is never replaced either, whatever the prior was.
+    const held = path.join(ROOT, 'persist-held.json');
+    fs.copyFileSync(path.join(prStateDir({ cwd: repo, topic: topicFor('pr/a'), env }), 'audit.json'), held);
+    fs.writeFileSync(agent, JSON.stringify({ summary: 's', commits: [{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4, bucket: 'CLEAN' }] }));
+    const elsewhere = { ...env, GSTACK_STATE_ROOT: path.join(ROOT, 'home-repo-typo-empty') };
+    expect(await commitsMain(['stamp', '--base', base, '--repo', 'acme/upstream2', '--report', agent, '--out', ship, '--persist', held, '--cwd', repo], { out: () => {}, env: elsewhere })).toBe(2);
+    expect(JSON.parse(fs.readFileSync(held, 'utf8'))).toMatchObject({ repo: UP, worst: 'EXACT_DUP' });
+    // Moving to another repo is refused only while the old copy holds an EXACT_DUP.
+    expect(await stamp(UP, [{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4, bucket: 'CLEAN' }])).toEqual([0, 'CLEAN']);
+    expect(await stamp('acme/upstream2', [{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4, bucket: 'CLEAN' }])).toEqual([0, 'CLEAN']);
   });
 
   test('a reader that closes the pipe early (`| head -1`) leaves the exit code as computed, never 1', () => {

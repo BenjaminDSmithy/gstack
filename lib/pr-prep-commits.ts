@@ -336,23 +336,47 @@ function holdsExactDup(r: PriorReport): boolean {
   return [r.worst, ...rows.map(x => (x && typeof x === 'object' ? (x as { bucket?: unknown }).bucket : null))].some(b => normBucket(b) === 'EXACT_DUP');
 }
 
-/**
- * Does the prior a refused stamp read hold an EXACT_DUP the refused report
- * must keep? Read leniently: never throws. A known EXACT_DUP whose
- * re-check search failed stays until a full search returns a verdict
- * (stampReport's keepsDup), and /ship reads only --out, so a refusal for
- * an unrelated row must not drop it. With a valid --repo it counts when
- * the prior carries to that repo (priorForRepo); without one nothing can
- * be checked, so any EXACT_DUP the prior holds stands.
- */
-function priorHoldsDup(file: string | null, repo: string | undefined): boolean {
+/** A report file read leniently: its object, or null (absent, unreadable, not JSON, not an object). */
+function readLenient(file: string | null): PriorReport | null {
   try {
     const p: unknown = file && fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : null;
-    if (!p || typeof p !== 'object' || Array.isArray(p)) return false;
-    const prior = repo && REPO_RE.test(repo) ? priorForRepo(p as PriorReport, repo) : (p as PriorReport);
-    return prior !== null && holdsExactDup(prior);
+    return p && typeof p === 'object' && !Array.isArray(p) ? (p as PriorReport) : null;
   } catch {
-    return false;
+    return null;
+  }
+}
+
+/**
+ * Does the prior a refused stamp read hold an EXACT_DUP the refused report
+ * must keep? A known EXACT_DUP whose re-check search failed stays until a
+ * full search returns a verdict (stampReport's keepsDup), and /ship reads
+ * only --out, so a refusal for an unrelated row must not drop it. With a
+ * valid --repo, a prior from before repo stamping carries nothing (as in
+ * priorForRepo); one stamped for this repo carries, and one stamped for
+ * another repo refuses every stamp (refuseRepoSwitch), so it counts too.
+ * Without a valid --repo nothing can be checked, so any EXACT_DUP stands.
+ */
+function priorHoldsDup(file: string | null, repo: string | undefined): boolean {
+  const prior = readLenient(file);
+  if (!prior || (repo && REPO_RE.test(repo) && typeof prior.repo !== 'string')) return false;
+  return holdsExactDup(prior);
+}
+
+/**
+ * list and stamp each read the prior for themselves, and nothing pairs
+ * their --repo. A stamp under another repo (a typo in the hand-filled
+ * repo) found no prior, treated every commit as NEW, stamped a failed
+ * re-check of a known EXACT_DUP as UNVERIFIED, and replaced the copy that
+ * held it, so the next list against the real upstream started from
+ * nothing. While the prior, or the copy this stamp would replace, holds an
+ * EXACT_DUP stamped for another repo, stamp refuses (2) before it reads the
+ * report or writes anything.
+ */
+function refuseRepoSwitch(held: [string, PriorReport | null][], repo: string): void {
+  for (const [file, r] of held) {
+    if (!r || typeof r.repo !== 'string' || r.repo.toLowerCase() === repo.toLowerCase() || !holdsExactDup(r)) continue;
+    const other = REPO_RE.test(r.repo) ? r.repo : 'another repo';
+    throw new PrContextError(`${file} holds an EXACT_DUP audited against ${other}, but this stamp names --repo ${repo}: list and stamp take the same --repo, the upstream the searches ran against. If ${repo} is right, show the owner that duplicate and move ${file} aside only on their yes`, 2);
   }
 }
 
@@ -411,12 +435,14 @@ export const COMMITS_USAGE = `gstack-pr-prep-commits <list|stamp|self|paths> [op
           --persist is a WARN line, never a failed stamp. A refused or
           failed stamp still writes --out as a refused report whose
           worst is UNVERIFIED, or EXACT_DUP when a row, the report's own
-          worst or the prior says so (a prior that carries to --repo,
-          or any prior when --repo is missing), and never --persist
+          worst or the prior says so (with a valid --repo, a prior from
+          before repo stamping does not count), and never --persist
   self    drop this branch's own open PR from a candidate list on stdin
   paths   print the default persistent report path for this branch
 
-list and stamp need --base and --repo <owner/name>, the same on both.
+list and stamp need --base and --repo <owner/name>, the same on both:
+stamp refuses (2) while the prior, or the copy it would replace, holds
+an EXACT_DUP stamped for another repo.
 list prints \`RESULT OK <n> to audit, <m> skipped\` and then the JSON;
 stamp prints \`RESULT OK <worst> <out>\` and then the \`PR_PREP_REPORT:\`
 line (\`PR_PREP_REPORT: <out> (<worst>, refused)\` after a refusal's
@@ -473,7 +499,20 @@ export async function commitsMain(argv: string[], deps: { git?: GitRunner; out?:
     if (!flags.base) throw new PrContextError('--base is required', 2);
     // list and stamp must agree on the prior, so both need the repo.
     if (!flags.repo || !REPO_RE.test(flags.repo)) throw new PrContextError('--repo <owner/name> (the upstream repo the audit searches) is required', 2);
-    const prior = priorForRepo(readJson<PriorReport>(priorFile()), flags.repo);
+    const priorPath = priorFile();
+    const raw = readJson<PriorReport>(priorPath);
+    if (sub === 'stamp') {
+      const held: [string, PriorReport | null][] = priorPath ? [[priorPath, raw]] : [];
+      let target: string | null = null;
+      try {
+        target = flags.persist ?? persistDefault();
+      } catch {
+        // the persist write below reports this as its WARN line
+      }
+      if (target && (!priorPath || path.resolve(target) !== path.resolve(priorPath))) held.push([target, readLenient(target)]);
+      refuseRepoSwitch(held, flags.repo);
+    }
+    const prior = priorForRepo(raw, flags.repo);
     const list = listAuditCommits(g, cwd, flags.base, prior);
     if (sub === 'list') {
       // The prior's hits hold upstream-authored titles; the model needs only
