@@ -54,4 +54,26 @@ describe('gstack-pr-prep-score CLI', () => {
     expect(r.stdout).toBe('');
     expect(r.stderr).toContain('input is not valid JSON');
   });
+
+  test('the bin drains a reasons line larger than a pipe buffer to a slow reader before it exits', () => {
+    const N = 40_000;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-prep-score-pipe-'));
+    try {
+      const file = path.join(dir, 'candidates.json');
+      const candidates = Array.from({ length: N }, (_, i) => ({ ...dup.candidates![0], ref: `#${i}` }));
+      fs.writeFileSync(file, JSON.stringify({ ...dup, candidates }));
+      // The reader sleeps, so the pipe fills: bytes still buffered when the bin exits must not be dropped.
+      const r = spawnSync('/bin/bash', ['-c', 'set -o pipefail; "$BUN" "$BIN" --file "$F" | (sleep 1; cat)'], {
+        encoding: 'utf8', timeout: 60_000, maxBuffer: 64 * 1024 * 1024,
+        env: { ...process.env, BUN: process.execPath, BIN, F: file },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout.length).toBeGreaterThan(128 * 1024);
+      const out = JSON.parse(r.stdout);
+      expect(out.bucket).toBe('EXACT_DUP');
+      expect(out.reasons).toHaveLength(N);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
