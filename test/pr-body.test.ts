@@ -168,7 +168,9 @@ describe('pure helpers', () => {
     const refused = (n: number) => [`line 1: names #${n} beside an unreleased version (another PR's version goes stale when it merges)`];
     // Our VERSION is 1.91.35.0: another PR's claim on it goes stale when either PR merges (#3032's stale-claim class).
     for (const l of ['PR #3033 also holds 1.91.35.0; whichever merges second re-versions.', '#3033 and this PR both target 1.91.35.0.',
-      'Fixes #3032; #3033 holds 1.91.35.0 too.']) {
+      'Fixes #3032; #3033 holds 1.91.35.0 too.',
+      // A keyword inside a word is no keyword: `Hotfix #3033` names a PR, not an issue it fixes.
+      'Hotfix #3033 holds 1.91.35.0.', 'Unresolved #3033 sits on 1.91.35.0.']) {
       expect(lintBody(`${l}\n`, ctx), l).toEqual(refused(3033));
     }
     // GitHub's closing keywords (close, fix, resolve and their forms) name an issue this PR closes, each the one reference after it.
