@@ -1120,7 +1120,11 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   }
   const scanner = path.join(c.tree, '.github/scripts/gate-secret-scan.mjs');
   if (fs.existsSync(scanner)) {
-    const diff = d.git(['diff', '--unified=0', '--no-color', mb, 'HEAD', '--', '.', ':(exclude)test/fixtures/**', ':(exclude)browse/test/fixtures/**', ':(exclude)docs/evals/**', ':(exclude)test/helpers/security-bench*'], { cwd: c.tree });
+    // git's own diff, the one CI's step reads (quality-gate.yml configures no diff program): a caller's
+    // diff.external, or a diff driver's command or textconv named through core.attributesFile, would
+    // hand the scanner another program's output, which can drop an added line, and the mirror would
+    // pass what CI fails.
+    const diff = d.git(['diff', '--unified=0', '--no-color', '--no-ext-diff', '--no-textconv', mb, 'HEAD', '--', '.', ':(exclude)test/fixtures/**', ':(exclude)browse/test/fixtures/**', ':(exclude)docs/evals/**', ':(exclude)test/helpers/security-bench*'], { cwd: c.tree });
     // CI's step runs under `set -euo pipefail`: a failed diff fails it, and scanning an empty or partial one would pass.
     if (diff.status !== 0 || diff.error) {
       line(`mirror secret-scan RED: git diff failed (${diff.error ?? `exit ${diff.status}: ${diff.stderr.trim().split('\n').at(-1)}`}); nothing was scanned`, true);
