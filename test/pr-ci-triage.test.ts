@@ -206,6 +206,8 @@ function fakeGh(runs: FakeRun[], calls: string[][], headOid = B, trees: Record<s
   return (args => {
     calls.push(args);
     const ok = (v: unknown) => ({ status: 0, stdout: JSON.stringify(v), stderr: '' });
+    // the repo a run without --repo resolves (upstreamRepoFromGh)
+    if (args.join(' ') === 'repo view --json nameWithOwner --jq .nameWithOwner') return { status: 0, stdout: 'acme/gt\n', stderr: '' };
     if (args[0] === 'pr' && args[1] === 'view' && args[args.indexOf('--json') + 1] === 'mergeable') {
       return mergeable === 'FAIL' ? { status: 1, stdout: '', stderr: 'HTTP 502' } : ok({ mergeable });
     }
@@ -254,11 +256,12 @@ function fakeGh(runs: FakeRun[], calls: string[][], headOid = B, trees: Record<s
 }
 
 let homes = 0;
-async function triage(runs: FakeRun[], extra: string[] = [], opts: { headOid?: string; cwd?: string; stateRoot?: string; trees?: Record<string, string>; mergeable?: string } = {}) {
+/** `prArgs`: how the PR is named on the command line (default `--pr 3 --repo acme/gt`). */
+async function triage(runs: FakeRun[], extra: string[] = [], opts: { headOid?: string; cwd?: string; stateRoot?: string; trees?: Record<string, string>; mergeable?: string; prArgs?: string[] } = {}) {
   const calls: string[][] = [];
   const out: string[] = [];
   const env = { ...process.env, GSTACK_STATE_ROOT: opts.stateRoot ?? path.join(ROOT, `home-${++homes}`) };
-  const code = await triageMain(['run', '--pr', '3', '--repo', 'acme/gt', '--cwd', opts.cwd ?? repoDir, ...extra], { gh: fakeGh(runs, calls, opts.headOid ?? B, opts.trees, opts.mergeable), env, out: l => out.push(l) });
+  const code = await triageMain(['run', ...(opts.prArgs ?? ['--pr', '3', '--repo', 'acme/gt']), '--cwd', opts.cwd ?? repoDir, ...extra], { gh: fakeGh(runs, calls, opts.headOid ?? B, opts.trees, opts.mergeable), env, out: l => out.push(l) });
   return { code, out, calls, env };
 }
 const downloads = (calls: string[][]) => calls.filter(c => c[0] === 'run' && c[1] === 'download').length;
@@ -539,6 +542,16 @@ describe('run', () => {
     expect(conflict.calls.some(c => c[0] === 'run' && c[1] === 'view')).toBe(false);
     expect(downloads(conflict.calls)).toBe(0);
     expect(draftFiles(conflict)).toEqual([]);
+    // The same read however `run --pr <n|url> [--repo o/r]` names the PR: with no --repo it reads
+    // the repo gh repo view resolved, and with a pull URL it reads the URL's number.
+    for (const prArgs of [['--pr', '3'], ['--pr', 'https://github.com/acme/gt/pull/3', '--repo', 'acme/gt']]) {
+      const r = await triage([{ id: 100, sha: A, shard: 4, fixture: '37346036310' }], [], { mergeable: 'CONFLICTING', prArgs });
+      const label = `${prArgs.join(' ')}: ${r.out.join('\n')}`;
+      expect(r.code, label).toBe(10);
+      expect(r.calls.some(c => c[0] === 'repo' && c[1] === 'view'), label).toBe(!prArgs.includes('--repo'));
+      expect(r.calls.filter(c => c.includes('mergeable')), label).toEqual([['pr', 'view', '3', '--repo', 'acme/gt', '--json', 'mergeable']]);
+      expect(r.out.find(l => l.startsWith('STALE')) ?? '', label).toContain('conflict');
+    }
     // A mergeable PR, one GitHub has not computed yet (UNKNOWN), or a failed read keeps the wait line.
     for (const mergeable of ['MERGEABLE', 'UNKNOWN', 'FAIL']) {
       const r = await triage([{ id: 100, sha: A, shard: 4, fixture: '37346036310' }], [], { mergeable });
