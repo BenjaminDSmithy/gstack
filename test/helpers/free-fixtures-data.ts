@@ -142,6 +142,8 @@ export const FREE_FIXTURES: Readonly<Record<string, readonly string[]>> = {
   'test/fixtures/plans/autoplan-focus-appearance-design.md': [],
   'test/fixtures/plans/autoplan-focus-appearance.md': [],
   'test/fixtures/plans/ui-heavy-feature-design.md': [],
+  'test/fixtures/pr-ci-triage/**': ['test/pr-ci-triage.test.ts', 'test/pr-sync.test.ts'],
+  'test/fixtures/pr-watch/**': ['test/pr-watch.test.ts'],
   'test/fixtures/prosons-neutral-neg-captures.json': ['test/prosons-neutral-posture.test.ts'],
   'test/fixtures/pty-idle-turn-end.json': ['test/helpers/claude-pty-runner.runners.unit.test.ts', 'test/helpers/claude-pty-runner.screen.unit.test.ts'],
   'test/fixtures/redact-diagram/**': ['test/redact-context-exemptions.test.ts'],
