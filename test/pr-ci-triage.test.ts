@@ -533,8 +533,9 @@ describe('run', () => {
     expect(line).toContain('conflict');
     expect(line).toContain('sync');
     expect(wait(conflict.out)).toBe(false);
-    // the mergeability read is a read-only gh pr view; nothing is viewed, downloaded or drafted
-    expect(conflict.calls.filter(c => c[0] === 'pr' && c[1] === 'view' && c.includes('mergeable'))).toHaveLength(1);
+    // the mergeability read is one read-only gh pr view of THIS PR in THIS repo (without --repo,
+    // gh would read the cwd clone's default repo); nothing is viewed, downloaded or drafted
+    expect(conflict.calls.filter(c => c.includes('mergeable'))).toEqual([['pr', 'view', '3', '--repo', 'acme/gt', '--json', 'mergeable']]);
     expect(conflict.calls.some(c => c[0] === 'run' && c[1] === 'view')).toBe(false);
     expect(downloads(conflict.calls)).toBe(0);
     expect(draftFiles(conflict)).toEqual([]);
