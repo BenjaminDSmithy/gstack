@@ -160,8 +160,12 @@ describe('identifier grammars (CEO-12, ENG-8)', () => {
 
 describe('/pr-prep identifiers take what its helpers print, and nothing else', () => {
   const P = IDENTIFIER_PLACEHOLDERS;
+  /** Each value passes the grammar; one the shell would split or glob unquoted needs a quoted-only entry. */
   const takes = (key: string, values: string[]) => {
-    for (const v of values) expect(P[key].grammar.test(v), `${key} rejected ${JSON.stringify(v)}`).toBe(true);
+    for (const v of values) {
+      expect(P[key].grammar.test(v), `${key} rejected ${JSON.stringify(v)}`).toBe(true);
+      if (/[\s;|&()<>?[\]{}!#*]/.test(v)) expect(P[key].quoted, `${key} takes ${JSON.stringify(v)}, so it must be quoted-only`).toBe(true);
+    }
   };
   const refuses = (key: string, values: string[]) => {
     for (const v of values) expect(P[key].grammar.test(v), `${key} accepted ${JSON.stringify(v)}`).toBe(false);
