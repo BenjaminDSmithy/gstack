@@ -105,10 +105,10 @@ or not fast-forward, 41 a pre-push hook or the remote refused the push
 (stop and report; never --no-verify), 42 the PR does not show the
 commit and neither does the head remote, or it could not be read back,
 or it does but is not on github.com (UNVERIFIED: nothing recorded; check
-the push URL, then push --yes again), 45 lock busy, 50 a sync is already
-staged, the scratch path holds something gstack-pr-sync did not make, or
-the local branch has unpushed commits, 60 the version queue could not be
-read (never guessed).`;
+the push URL, then push --yes again with the same --accept-* flags), 45
+lock busy, 50 a sync is already staged, the scratch path holds something
+gstack-pr-sync did not make, or the local branch has unpushed commits, 60
+the version queue could not be read (never guessed).`;
 
 // ── pure helpers ────────────────────────────────────────────────────────────
 
@@ -1188,7 +1188,7 @@ function cmdPush(c: Ctx): number {
     if (now === staged.sha) {
       if (headRemoteOnPrHost(c)) return recordLanded(c, staged, `pending (${c.pr.headOid.slice(0, 12)})`);
       return unverified(c, staged, c.pr.headOid, "the PR's head; nothing sent now", [
-        `NOTE ${c.headRemote}/${c.pr.headRef} already holds ${staged.sha.slice(0, 12)} but the PR still reports ${c.pr.headOid.slice(0, 12)}: ${UNVERIFIED_KEPT}. Once ${landedWhen(c, staged.sha, false)}, \`gstack-pr-sync push --yes\` records the push without sending anything; if it never does, check where \`git remote get-url --push ${c.headRemote}\` sends it, then \`gstack-pr-sync abort\` and re-sync`,
+        `NOTE ${c.headRemote}/${c.pr.headRef} already holds ${staged.sha.slice(0, 12)} but the PR still reports ${c.pr.headOid.slice(0, 12)}: ${UNVERIFIED_KEPT}. Once ${landedWhen(c, staged.sha, false)}, \`${pushAgain(c)}\` records the push without sending anything; if it never does, check where \`git remote get-url --push ${c.headRemote}\` sends it, then \`gstack-pr-sync abort\` and re-sync`,
       ]);
     }
     if (now !== staged.h0) throw new PrContextError(`${c.headRemote}/${c.pr.headRef} moved to ${now.slice(0, 12)}; abort and re-sync`, SYNC_EXIT.REMOTE_MOVED);
@@ -1209,8 +1209,8 @@ function cmdPush(c: Ctx): number {
         const sha = staged.sha.slice(0, 12);
         const when = landedWhen(c, staged.sha, onHost);
         const notes = at.error !== null
-          ? [`NOTE git push exited 0 but the PR still reports ${h0} and ${ref} could not be read back: ${UNVERIFIED_KEPT}. Run \`gstack-pr-sync push --yes\` again: once ${when}, it records the push without sending anything`, envelope(at.error, `git fetch ${c.headRemote}`)]
-          : [`NOTE git push exited 0 but ${at.sha === staged.sha ? `the PR still reports ${h0} (${ref} holds ${sha})` : `neither the PR nor ${ref} (${at.sha.slice(0, 12)}) shows ${sha}`}: ${UNVERIFIED_KEPT}. Check where \`git remote get-url --push ${c.headRemote}\` sends it. Once ${when}, \`gstack-pr-sync push --yes\` records the push without sending anything; if it never does, \`gstack-pr-sync abort\` and re-sync`];
+          ? [`NOTE git push exited 0 but the PR still reports ${h0} and ${ref} could not be read back: ${UNVERIFIED_KEPT}. Run \`${pushAgain(c)}\` again: once ${when}, it records the push without sending anything`, envelope(at.error, `git fetch ${c.headRemote}`)]
+          : [`NOTE git push exited 0 but ${at.sha === staged.sha ? `the PR still reports ${h0} (${ref} holds ${sha})` : `neither the PR nor ${ref} (${at.sha.slice(0, 12)}) shows ${sha}`}: ${UNVERIFIED_KEPT}. Check where \`git remote get-url --push ${c.headRemote}\` sends it. Once ${when}, \`${pushAgain(c)}\` records the push without sending anything; if it never does, \`gstack-pr-sync abort\` and re-sync`];
         return unverified(c, staged, staged.h0, 'the head before the push', notes);
       }
       rb.detail.push(`NOTE the PR still reports ${staged.h0.slice(0, 12)} after the read-backs, but ${c.headRemote}/${c.pr.headRef} holds ${staged.sha.slice(0, 12)}: GitHub has not caught up; check it with gstack-pr-watch poll`);
@@ -1242,6 +1242,15 @@ function unverified(c: Ctx, staged: StagedSync, seen: string, what: string, note
 function landedWhen(c: Ctx, sha: string, onHost: boolean): string {
   const s = sha.slice(0, 12);
   return onHost ? `${c.headRemote} holds ${s}` : `the PR reports ${s} (${c.headRemote} is not on github.com, so its copy shows nothing about the PR)`;
+}
+
+/**
+ * The push to run again after a 42, with the --accept-* flags this run was
+ * given: the record path re-runs every validation gate, so without them a
+ * push the owner approved with a waiver is refused (31, 21).
+ */
+function pushAgain(c: Ctx): string {
+  return `gstack-pr-sync push --yes${c.f.acceptFullRisk ? ' --accept-full-risk' : ''}${c.f.acceptDiffChange ? ' --accept-diff-change' : ''}`;
 }
 
 /**
