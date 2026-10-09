@@ -1,5 +1,6 @@
 /**
- * Behavioral test for the /pr-prep collision scorer (bin/gstack-pr-prep-score).
+ * Behavioral test for the /pr-prep collision scorer (lib/pr-prep-score.ts,
+ * run through its CLI wrapper bin/gstack-pr-prep-score).
  *
  * Pins the Step 4 bucketing contract from pr-prep/SKILL.md: title/file Jaccard,
  * state weighting, and the EXACT_DUP / OVERLAP / SIBLING / CLEAN precedence.
@@ -10,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { score, jaccard, type ScoreInput } from '../bin/gstack-pr-prep-score';
+import { score, jaccard, type ScoreInput } from '../lib/pr-prep-score';
 
 setDefaultTimeout(120_000);
 

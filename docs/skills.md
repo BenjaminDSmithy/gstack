@@ -691,7 +691,7 @@ It walks `git log <base>..HEAD`, pulls search keywords out of each commit's subj
 
 ### Where the thresholds live
 
-The bucketing is a pure function in `bin/gstack-pr-prep-score` — title Jaccard, changed-file overlap on open PRs, state weighting — with unit tests. The skill pipes candidates through it rather than re-deriving the numbers in prose, so what runs and what is documented cannot drift apart.
+The bucketing is a pure function in `lib/pr-prep-score.ts` — title Jaccard, changed-file overlap on open PRs, state weighting — with unit tests, run as `bin/gstack-pr-prep-score`. The skill pipes candidates through it rather than re-deriving the numbers in prose, so what runs and what is documented cannot drift apart.
 
 ### Reading the tracker safely
 
