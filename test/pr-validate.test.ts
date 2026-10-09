@@ -179,7 +179,7 @@ describe('selectTests', () => {
 
   test('a test that names several changed paths records each; path.join segments join a path', () => {
     const local = {
-      'test/c.test.ts': "spawnSync('bun', ['run', path.join(ROOT, 'scripts', 'eval-list.ts')]);\nrun(path.join(ROOT, 'bin', 'gstack-thing'));\nconst cfg = 'docs/notes.txt';",
+      'test/c.test.ts': "spawnSync('bun', ['run', path.join(ROOT, 'scripts', 'eval-list.ts')], { timeout: 10_000 });\nrun(path.join(ROOT, 'bin', 'gstack-thing'));\nconst cfg = 'docs/notes.txt';",
       'test/d.test.ts': "const fx = path.join(import.meta.dir, 'fixtures', 'pr', 'one.json');\nconst two = path.join(__dirname, \"fixtures/pr/two.json\");",
       'browse/test/e.test.ts': "const own = path.join(import.meta.dir, 'fixtures', 'pr', 'one.json');",
     };
