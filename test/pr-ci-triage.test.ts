@@ -460,6 +460,24 @@ describe('run', () => {
     expect(downloads(r.calls)).toBe(0);
   });
 
+  test('without --run, a run on the head still queued or running (its first, or a failed run re-run since) is no verdict: stale (10), never NOTHING', async () => {
+    // gstack-pr-sync retrigger refuses a bound run re-run since triage and says
+    // to triage again; gh then lists that run unfinished, with no conclusion.
+    for (const st of ['in_progress', 'queued']) {
+      const r = await triage([{ id: 100, sha: B, shard: 4, fixture: '37346036310', status: st, conclusion: '' }]);
+      expect(r.code, r.out.join('\n')).toBe(10);
+      expect(r.out[0]).toStartWith('RESULT NO_DRAFT run=100 stale');
+      expect(r.out.some(l => l.startsWith(`STALE run 100 is still ${st}`))).toBe(true);
+      expect(r.calls.some(c => c[0] === 'run' && c[1] === 'view')).toBe(false);
+      expect(downloads(r.calls)).toBe(0);
+      expect(draftFiles(r)).toEqual([]);
+    }
+    // Every run on the head finished and none failed: nothing to triage.
+    const cancelled = await triage([{ id: 100, sha: B, conclusion: 'cancelled', jobs: [{ name: 'windows-free-shard (4)', conclusion: 'cancelled' }] }]);
+    expect(cancelled.code, cancelled.out.join('\n')).toBe(11);
+    expect(cancelled.out[0]).toStartWith('RESULT NOTHING');
+  });
+
   test('the head remote must hold the head gh reports: a pinned mismatch gets no draft', async () => {
     const bare = path.join(ROOT, 'me', 'gt.git');
     fs.mkdirSync(bare, { recursive: true });

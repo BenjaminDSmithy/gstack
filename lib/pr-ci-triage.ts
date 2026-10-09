@@ -46,10 +46,11 @@ export const TRIAGE_USAGE = `gstack-pr-ci-triage <run|onset> [options]
 
   run     triage the newest failed Windows Free Tests run on the PR's head
           (or --run <id>; without it, a newest run that finished green is
-          nothing to triage): per failed shard, read windows-result-<n>, and
-          for a no-failing-test exit the shard-log artifact; classify REAL,
-          CRASH (an IOCP or GLib signature as the log's last line), HANG,
-          INFRA, AGGREGATE or UNKNOWN.
+          nothing to triage, and one still queued or running, a re-run
+          included, is no verdict yet): per failed shard, read
+          windows-result-<n>, and for a no-failing-test exit the shard-log
+          artifact; classify REAL, CRASH (an IOCP or GLib signature as the
+          log's last line), HANG, INFRA, AGGREGATE or UNKNOWN.
           When no shard log explains a failure, the job log's tail is
           printed (read-only gh api), inside the untrusted envelope
   onset   count failed shards per UTC day across recent runs (disclosure
@@ -67,9 +68,10 @@ remote when this checkout has one) and has no newer run; a stale run's
 artifacts are never downloaded.
 
 Exit codes: 0 drafted, 1 error, 2 usage, 10 triaged without a draft
-(REAL, UNKNOWN, a stale run, or evidence missing), 11 nothing failed or
-the head's newest run passed, 40 the PR head branch is gone from the
-head remote or keeps moving (re-run once it settles).`;
+(REAL, UNKNOWN, a stale or unfinished run, or evidence missing), 11 the
+head's newest run passed, or every run on it finished and none failed,
+40 the PR head branch is gone from the head remote or keeps moving
+(re-run once it settles).`;
 
 export const SHARD_JOB_RE = /^windows-free-shard \((\d+)(?:, \d+)?\)$/;
 /**
@@ -529,6 +531,13 @@ async function sameTreeGreen(d: TriageDeps, repo: string, pr: PrInfo, run: RunIn
   return { green: null, why: 'no earlier run that tested the same tree and files passed the shard' };
 }
 
+/** A run that is not the head's finished verdict: no draft, each reason on a STALE line. */
+function staleNoDraft(d: TriageDeps, runId: number, stale: string[]): number {
+  d.out(`RESULT NO_DRAFT run=${runId} stale: triage the newest finished run on the current head`);
+  for (const s of stale) d.out(`STALE ${s}`);
+  return TRIAGE_EXIT.NO_DRAFT;
+}
+
 async function cmdRun(d: TriageDeps, f: Flags): Promise<number> {
   if (!f.pr) throw new PrContextError('--pr is required', 2);
   const repo = f.repo ?? upstreamRepoFromGh(d.gh, f.cwd);
@@ -554,6 +563,13 @@ async function cmdRun(d: TriageDeps, f: Flags): Promise<number> {
   }
   const runId = f.run ?? onHead.find(r => r.conclusion === 'failure')?.databaseId ?? null;
   if (runId === null) {
+    // A run still queued or running (the head's first, or a failed run re-run
+    // since: gh lists it with no conclusion) has no verdict yet. NOTHING would
+    // read as "nothing failed" while a maintainer's re-run is still going.
+    if (newest && newest.status !== 'completed') {
+      stale.push(`run ${newest.databaseId} is still ${word(newest.status) || 'queued'}: wait for every shard to finish, then triage again`);
+      return staleNoDraft(d, newest.databaseId, stale);
+    }
     d.out(`RESULT NOTHING no failed Windows Free Tests run on ${pr.headOid.slice(0, 12)}`);
     return TRIAGE_EXIT.NOTHING;
   }
@@ -565,12 +581,8 @@ async function cmdRun(d: TriageDeps, f: Flags): Promise<number> {
   const pending = (run.jobs ?? []).filter(j => !j.conclusion).length;
   if (run.status !== 'completed') stale.push(`run ${runId} is still ${word(run.status) || 'queued'}: wait for every shard to finish`);
   else if (pending) stale.push(`run ${runId} has ${pending} unfinished job(s): wait for every shard to finish`);
-  if (stale.length) {
-    // Checked before any artifact is downloaded: nothing from a stale run is read or printed.
-    d.out(`RESULT NO_DRAFT run=${runId} stale: triage the newest finished run on the current head`);
-    for (const s of stale) d.out(`STALE ${s}`);
-    return TRIAGE_EXIT.NO_DRAFT;
-  }
+  // Checked before any artifact is downloaded: nothing from a stale run is read or printed.
+  if (stale.length) return staleNoDraft(d, runId, stale);
   const failed = (run.jobs ?? []).filter(j => j.conclusion === 'failure');
   const shards = failedShards(failed);
   if (!shards.length) {
