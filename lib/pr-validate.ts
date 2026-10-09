@@ -73,7 +73,8 @@ committed test.only fails) and TMPDIR is a real path; git reads CI's
 global config (identity, init.defaultBranch main, safe.directory)
 instead of yours.
 Records the verdict for the exact commit in the PR state; red if HEAD
-or a tracked file changed after the preconditions, while the tests ran.
+moves off that commit, or a tracked file changes while the preconditions
+(bar their own build outputs) or the tests run.
 
   run       preconditions + selection + per-file runs + mirrors
             (typecheck, typecheck:test, the added-line secret scan,
@@ -852,6 +853,12 @@ function cmdDeclare(c: Ctx): number {
   return 0;
 }
 
+/**
+ * Tracked files a precondition rebuilds: build:gates' build:diagram-render
+ * rewrites lib/diagram-render/dist (BUILD_INFO.json and the bundled html).
+ */
+const REBUILT_RE = /^lib\/diagram-render\/dist\//;
+
 /** HEAD and the tracked worktree changes against it (`git diff HEAD`), per file and as one digest. */
 function treeState(c: Ctx): { head: string; diff: string; files: Map<string, string> } {
   const head = gitOk(c.d, c.tree, ['rev-parse', 'HEAD'], 'git rev-parse').trim();
@@ -863,6 +870,11 @@ function treeState(c: Ctx): { head: string; diff: string; files: Map<string, str
     files.set(name, createHash('sha256').update(part).digest('hex'));
   }
   return { head, diff: createHash('sha256').update(r.stdout).digest('hex'), files };
+}
+
+/** Tracked files whose `git diff HEAD` section differs between two tree states. */
+function movedFiles(a: { files: Map<string, string> }, b: { files: Map<string, string> }): string[] {
+  return [...new Set([...a.files.keys(), ...b.files.keys()])].filter(f => a.files.get(f) !== b.files.get(f));
 }
 
 function freshState(pr: PrInfo): PrState {
@@ -924,7 +936,9 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   const have = tool('bun', ['--version'], 30_000).stdout.trim();
   line(`bun-pin ${pin ? `want=${pin} have=${have}` : 'no pin found'} rc=${pin && pin !== have ? 1 : 0}`, !!pin && pin !== have);
 
-  // CI's preconditions, in CI's order.
+  // CI's preconditions, in CI's order. They run for minutes: what the tree
+  // holds when they start (`sha`, clean) is what they may change.
+  let settled = treeState(c);
   if (fs.existsSync(path.join(c.tree, 'bun.lock'))) {
     const r = tool('bun', ['install', '--frozen-lockfile'], 300_000);
     line(`precondition bun-install rc=${r.status}`, r.status !== 0);
@@ -940,6 +954,8 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
     const g = tool('bun', ['run', 'gen:skill-docs', '--host', 'all'], 900_000);
     const diff = gitOk(d, c.tree, ['status', '--porcelain', '--untracked-files=all'], 'git status').split('\n').filter(Boolean);
     line(`precondition gen-skill-docs-all rc=${g.status} drift=${diff.length}${diff.length ? ` (${diff.slice(0, 5).map(l => l.slice(3)).join(', ')})` : ''}`, g.status !== 0 || diff.length > 0);
+    // The drift check judged everything up to here but a commit.
+    settled = treeState(c);
   }
   const script = (name: string, timeoutMs: number): boolean => {
     if (!pkg.scripts?.[name]) return false;
@@ -957,8 +973,15 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   const gates = script('build:gates', 900_000);
   script('build:cso', 600_000);
   const testEnv: NodeJS.ProcessEnv = gates ? { ...env, GSTACK_EXPECT_BINARIES: '1' } : env;
-  // The verdict names `sha`: from here on, only what the preconditions left may be in the tree.
+  // The verdict names `sha`. A commit made while the preconditions ran, or
+  // an edit to anything but their own build outputs, is what the tests
+  // would run instead.
   const before = treeState(c);
+  if (before.head !== sha) line(`tree changed during the preconditions: HEAD moved from ${sha.slice(0, 12)} to ${before.head.slice(0, 12)}; the verdict cannot name either`, true);
+  else {
+    const moved = movedFiles(settled, before).filter(f => !REBUILT_RE.test(f));
+    if (moved.length) line(`tree changed during the preconditions: tracked files ${moved.slice(0, 5).join(', ')} differ from ${sha.slice(0, 12)}, which is not what the tests would run`, true);
+  }
 
   for (const f of sel.missingDeclared) line(`declared ${f} RED: not a free test file in this tree`, true);
   if (sel.full.length) line(`selection FULL (${sel.full.join(', ')}): the full free suite is the real gate${c.f.acceptFull ? '; accepted by --accept-full-risk' : ''}`, !c.f.acceptFull);
@@ -1024,7 +1047,7 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   const after = treeState(c);
   if (after.head !== before.head) line(`tree changed during the run: HEAD moved from ${before.head.slice(0, 12)} to ${after.head.slice(0, 12)}; the verdict cannot name either`, true);
   else if (after.diff !== before.diff) {
-    const moved = [...new Set([...before.files.keys(), ...after.files.keys()])].filter(f => before.files.get(f) !== after.files.get(f));
+    const moved = movedFiles(before, after);
     line(`tree changed during the run: tracked files ${moved.slice(0, 5).join(', ') || '(content)'} differ from what the preconditions left; ${sha.slice(0, 12)} was not what ran`, true);
   }
 
