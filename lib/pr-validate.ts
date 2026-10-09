@@ -75,7 +75,8 @@ instead of yours.
 Records the verdict for the exact commit in the PR state; red if HEAD
 moves off that commit, a tracked file changes while the preconditions
 (bar their own build outputs) or the tests run, or an untracked file
-appears while the preconditions run.
+appears while the preconditions run. Every commit is read as CI's
+checkout holds it: your replace refs (git replace) are ignored.
 
   run       preconditions + selection + per-file runs + mirrors
             (typecheck, typecheck:test, the added-line secret scan,
@@ -710,6 +711,20 @@ export function parseValidateArgs(argv: string[]): Flags {
 
 interface Ctx { d: ValidateDeps; f: Flags; repo: string; pr: PrInfo; stateDir: string; tree: string; base: string; stagedH0: string | null }
 
+/**
+ * Every git call validate makes reads the objects as they are, as CI's fresh
+ * checkout holds them: never through the caller's replace refs (`git
+ * replace`). A ref replacing the merge base with a stand-in that carries the
+ * PR's tree hides every change from the selection (RESULT GREEN 0/0 for a PR
+ * whose test fails), and one replacing the PR's head lets a tree checked out
+ * under it read clean in `git status` while it holds what the verdict's
+ * commit does not. GIT_NO_REPLACE_OBJECTS leaves each argv as it is. The
+ * tests' own git keeps git's default: their env is validationEnv's.
+ */
+function withoutReplaceRefs(git: GitRunner, env: NodeJS.ProcessEnv): GitRunner {
+  return (args, o) => git(args, { ...o, env: { ...(o.env ?? env), GIT_NO_REPLACE_OBJECTS: '1' } });
+}
+
 function gitOk(d: ValidateDeps, cwd: string, args: string[], what: string): string {
   const r = d.git(args, { cwd });
   if (r.status !== 0) throw new PrContextError(`${what} failed: ${(r.error ?? r.stderr).trim().split('\n').at(-1)}`, 1);
@@ -984,7 +999,10 @@ function cmdRun(c: Ctx): number {
   const dirty = statusEntries(c, 'normal');
   if (dirty.length) {
     const what = dirty.every(e => e.untracked) ? 'untracked files' : 'uncommitted changes';
-    throw new PrContextError(`${c.tree} has ${what} (${shownPaths(dirty.map(e => e.path))}); a verdict must name a commit that holds everything the tests use`, VALIDATE_EXIT.PRECONDITION);
+    // The caller's own `git status` follows their replace refs and can read clean: say why this one does not.
+    const replaced = d.git(['replace', '-l'], { cwd: c.tree }).stdout.split('\n').filter(Boolean).length;
+    const against = replaced ? ` against HEAD as CI's checkout holds it, read without this repo's ${replaced} replace ref(s) (git replace -l)` : '';
+    throw new PrContextError(`${c.tree} has ${what} (${shownPaths(dirty.map(e => e.path))})${against}; a verdict must name a commit that holds everything the tests use`, VALIDATE_EXIT.PRECONDITION);
   }
   const outDir = path.join(c.stateDir, 'validate', sha.slice(0, 12));
   fs.rmSync(outDir, { recursive: true, force: true });
@@ -1037,12 +1055,13 @@ const SECRET_SCAN_PATHSPEC = ['.', ':(exclude)test/fixtures/**', ':(exclude)brow
  * file, never checked out, fails the diff with 'unable to read'. So the
  * caller's repo fetches them first, in one batch. A diff that prints a stat
  * reads both sides of every path (--quiet stops at the first change, with
- * the rest unfetched); its output is discarded, and --no-replace-objects
- * keeps it on the objects the own git dir reads, which has no replace refs.
+ * the rest unfetched); its output is discarded. Like every git call here it
+ * reads no replace refs (withoutReplaceRefs), so it fetches the objects the
+ * own git dir reads, which has none.
  */
 function secretScanDiff(c: Ctx, mb: string, sha: string, ciGitConfig: string, tmp: string): { r: GhResult; what: string } {
   if (isPartialClone(c)) {
-    const r = c.d.git(['--no-replace-objects', 'diff', '--numstat', '--no-renames', '--no-ext-diff', '--no-textconv', mb, sha, '--', ...SECRET_SCAN_PATHSPEC], { cwd: c.tree });
+    const r = c.d.git(['diff', '--numstat', '--no-renames', '--no-ext-diff', '--no-textconv', mb, sha, '--', ...SECRET_SCAN_PATHSPEC], { cwd: c.tree });
     if (r.status !== 0 || r.error) return { r, what: 'partial-clone blob fetch' };
   }
   const objects = path.resolve(c.tree, gitOk(c.d, c.tree, ['rev-parse', '--git-path', 'objects'], 'git rev-parse').trim());
@@ -1239,7 +1258,8 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
 }
 
 export async function validateMain(argv: string[], deps: Partial<ValidateDeps> = {}): Promise<number> {
-  const d = { ...realDeps(), ...deps };
+  const given = { ...realDeps(), ...deps };
+  const d: ValidateDeps = { ...given, git: withoutReplaceRefs(given.git, given.env) };
   if (!argv.length || argv.includes('--help') || argv.includes('-h')) {
     d.out(VALIDATE_USAGE);
     return argv.length ? 0 : VALIDATE_EXIT.USAGE;
