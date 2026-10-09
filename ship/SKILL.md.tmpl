@@ -602,7 +602,7 @@ _ghrepo() {
     (*) command -v gh >/dev/null || return 1
       if gh --version >/dev/null 2>&1; then case "$(gh auth status --hostname "$_h" 2>&1)" in (*"not logged into any"*|*"not found among authenticated"*) return 1 ;; esac
       else _g=${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/hosts.yml; echo "UPSTREAM_PR_NOTE: gh does not run; $_h counts if hosts.yml or GH_HOST names it, or that file cannot be checked" >&2
-        [ "$(printf '%s' "$GH_HOST" | tr 'A-Z' 'a-z')" = "$_h" ] || { [ -e "$_g" ] || { _d=$_g; while [ ! -e "${_d:-/}" ]; do case "$_d" in (*/*) _d=${_d%/*} ;; (*) _d=.; break ;; esac; done; [ ! -x "${_d:-/}" ] || return 1; }
+        [ "$(printf '%s' "$GH_HOST" | tr 'A-Z' 'a-z')" = "$_h" ] || { [ -e "$_g" ] || { _d=$_g; while [ ! -e "${_d:-/}" ] && [ ! -L "${_d:-/}" ]; do case "$_d" in (*/*) _d=${_d%/*} ;; (*) _d=.; break ;; esac; done; [ ! -x "${_d:-/}" ] || return 1; }
           grep -qxF "$_h:" "$_g"; [ $? != 1 ] || return 1; }; fi ;; esac
   printf '%s/%s\n' "$_h" "$_u"
 }
