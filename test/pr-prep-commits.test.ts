@@ -575,6 +575,9 @@ describe('CLI', () => {
     const elsewhere = { ...env, GSTACK_STATE_ROOT: path.join(ROOT, 'home-repo-typo-empty') };
     expect(await commitsMain(['stamp', '--base', base, '--repo', 'acme/upstream2', '--report', agent, '--out', ship, '--persist', held, '--cwd', repo], { out: () => {}, env: elsewhere })).toBe(2);
     expect(JSON.parse(fs.readFileSync(held, 'utf8'))).toMatchObject({ repo: UP, worst: 'EXACT_DUP' });
+    // GitHub repo names are case-insensitive: the same repo in other case is no switch, and its failed re-check keeps the duplicate.
+    expect(await stamp(UP.toUpperCase(), [{ sha: sha.c1, bucket: 'UNVERIFIED' }, { sha: sha.c4, bucket: 'CLEAN' }])).toEqual([0, 'EXACT_DUP']);
+    expect(await modes(UP)).toEqual(['RECHECK', 'CARRY']);
     // Moving to another repo is refused only while the old copy holds an EXACT_DUP.
     expect(await stamp(UP, [{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4, bucket: 'CLEAN' }])).toEqual([0, 'CLEAN']);
     expect(await stamp('acme/upstream2', [{ sha: sha.c1, bucket: 'CLEAN' }, { sha: sha.c4, bucket: 'CLEAN' }])).toEqual([0, 'CLEAN']);
