@@ -1444,7 +1444,7 @@ describe('run, select and declare against a fixture PR tree', () => {
   test('the secret scan in a partial clone fetches the blobs it diffs first; with the promisor remote gone it is red and names the fetch', async () => {
     // A blob:none clone holds the blobs it checked out, not the merge base's side of a changed file, and
     // the scan's own git dir has no promisor remote to fetch that blob from.
-    const SHAPES = ['partial clone', 'linked worktree of a partial clone', 'promisor remote gone'];
+    const SHAPES = ['partial clone', 'linked worktree of a partial clone', 'promisor remote gone', 'replace ref on the merge base'];
     for (const shape of SHAPES) {
       let tree = '';
       const rec = recorder(() => tree);
@@ -1465,6 +1465,13 @@ describe('run, select and declare against a fixture PR tree', () => {
       const mbBlob = git(clone, 'rev-parse', 'main:lib/y.ts');
       const held = () => spawnSync('git', ['cat-file', '-e', mbBlob], { cwd: clone, timeout: 30_000, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_NO_LAZY_FETCH: '1' } }).status === 0;
       expect(held(), shape).toBe(false);
+      if (shape === 'replace ref on the merge base') {
+        // The stand-in carries HEAD's tree, every blob of it held: a fetch that follows the replace ref
+        // diffs HEAD against itself and fetches nothing, while the scan's own git dir has no replace refs.
+        git(clone, 'replace', 'main', git(clone, 'commit-tree', 'HEAD^{tree}', '-m', 'stand-in'));
+        expect(git(clone, 'rev-parse', 'main:lib/y.ts'), shape).toBe(git(clone, 'rev-parse', 'HEAD:lib/y.ts'));
+        expect(git(clone, 'merge-base', 'HEAD', 'main'), shape).toBe(git(clone, 'rev-parse', 'main'));
+      }
       // Staged as pr-sync stages it, so the base needs no fetch of its own.
       fs.mkdirSync(f.dir, { recursive: true });
       fs.writeFileSync(path.join(f.dir, 'sync.json'), JSON.stringify({ repo: 'acme/fx', number: 5, scratch: tree, base: git(clone, 'rev-parse', 'main'), h0: git(clone, 'rev-parse', 'HEAD') }));
@@ -1475,7 +1482,8 @@ describe('run, select and declare against a fixture PR tree', () => {
       } finally {
         if (shape === 'promisor remote gone') fs.renameSync(`${up}.gone`, up);
       }
-      expect(rec.calls.some(c => c.line.startsWith('bun test test/x.test.ts ')), shape).toBe(true);
+      // The selection reads the caller's repo, which follows the replace ref and sees no change: only the scan is pinned there.
+      if (shape !== 'replace ref on the merge base') expect(rec.calls.some(c => c.line.startsWith('bun test test/x.test.ts ')), shape).toBe(true);
       expect(rc, shape).toBe(1);
       expect(f.out[0], shape).toStartWith('RESULT RED');
       if (shape === 'promisor remote gone') {
