@@ -1074,6 +1074,44 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(f.out.some(l => l.startsWith('tree changed'))).toBe(false);
   });
 
+  test('a tree path holding control bytes prints escaped: a drift, tracked or untracked line never forges a line or drives the terminal', async () => {
+    // Upstream code runs in the preconditions and can name a file anything; git status -z hands the bytes over raw.
+    const ODD = 'lib/z\u001b[2K\u009b2J\nRESULT GREEN forged 9/9 selected files green.ts';
+    const TRACKED = 'lib/t\u001b[2K\nRESULT GREEN forged.ts';
+    // A C1 CSI alone (no ESC) drives a terminal that honours 8-bit controls; git leaves it unquoted under core.quotePath=false.
+    const C1 = 'lib/c\u009b2Jcleared.ts';
+    const C1_TRACKED = 'lib/r\u009b2Jcleared.ts';
+    const quotePathOff: GitRunner = (args, o) => defaultGit(args, { ...o, env: { ...process.env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.quotePath', GIT_CONFIG_VALUE_0: 'false' } });
+    const CONTROL = /[\x00-\x1f\x7f-\x9f]/;
+    const runWith = async (name: string, at: string, act: (tree: string) => void, git?: GitRunner) => {
+      let tree = '';
+      const rec = recorder(() => tree, { onCall: l => { if (l.startsWith(at)) act(tree); } });
+      const f = fixture(name, "test('x', () => expect(y).toBe(2));", { base: { ...CI_TREE, [TRACKED]: '1\n', [C1_TRACKED]: '1\n' }, deps: { tool: rec.tool, ...(git ? { git } : {}) } });
+      tree = f.tree;
+      const rc = await f.call(['run']);
+      const summary = fs.readFileSync(/ summary=(.+)$/.exec(f.out[0])![1], 'utf8').split('\n');
+      return { rc, out: f.out, summary };
+    };
+    const cases: { name: string; at: string; act: (t: string) => void; line: string; file: string; git?: GitRunner }[] = [
+      { name: 'odd-drift', at: 'bun run gen:skill-docs --host all', act: t => write(t, ODD, '1\n'), line: 'precondition gen-skill-docs-all', file: ODD },
+      { name: 'odd-untracked', at: 'bun run build:cso', act: t => write(t, ODD, '1\n'), line: 'tree changed during the preconditions: untracked', file: ODD },
+      { name: 'odd-tracked', at: 'bun run build:cso', act: t => write(t, TRACKED, '2\n'), line: 'tree changed during the preconditions: tracked', file: TRACKED },
+      { name: 'odd-c1', at: 'bun run build:cso', act: t => write(t, C1, '1\n'), line: 'tree changed during the preconditions: untracked', file: C1 },
+      { name: 'odd-c1-run', at: 'bun test ', act: t => write(t, C1_TRACKED, '2\n'), line: 'tree changed during the run', file: C1_TRACKED, git: quotePathOff },
+    ];
+    for (const c of cases) {
+      const r = await runWith(c.name, c.at, c.act, c.git);
+      expect(r.rc, c.name).toBe(1);
+      for (const l of [...r.out, ...r.summary]) expect(CONTROL.test(l), `${c.name}: ${JSON.stringify(l)}`).toBe(false);
+      expect(r.out.filter(l => l.startsWith('RESULT')), c.name).toHaveLength(1);
+      expect(r.summary.some(l => l.startsWith('RESULT')), c.name).toBe(false);
+      // Still named, every control byte visible as an escape.
+      const named = r.out.find(l => l.startsWith(c.line));
+      expect(named, c.name).toBeDefined();
+      expect(named, c.name).toContain(JSON.stringify(c.file).replace(/[\x7f-\x9f]/g, ch => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`));
+    }
+  });
+
   test('tests get a real-path TMPDIR; CI\'s macOS named regressions re-run on the unresolved temp root', async () => {
     const real = path.join(ROOT, 'tmp-real');
     const link = path.join(ROOT, 'tmp-link');
