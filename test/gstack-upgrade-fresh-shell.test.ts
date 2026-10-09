@@ -179,7 +179,7 @@ describe.skipIf(IS_WINDOWS)('C9: destructive upgrade/spec fences refuse bad path
   type Kind = typeof BAD_VALUES[number];
   const UNUSABLE: Kind[] = ['unset', 'empty', 'nonexistent', 'unreadable'];
   const cases: Array<{ name: string; doc: 'upgrade' | 'spec'; marker: string; target: string; kinds?: Kind[]; others: (wd: ReturnType<typeof world>, h: HostRender) => Record<string, string> }> = [
-    { name: 'ff-only upgrade', doc: 'upgrade', marker: 'git pull --ff-only', target: 'INSTALL_DIR', others: () => ({}) },
+    { name: 'ff-only upgrade', doc: 'upgrade', marker: 'merge --ff-only --autostash', target: 'INSTALL_DIR', others: () => ({}) },
     { name: 'reset fallback', doc: 'upgrade', marker: 'git reset --hard origin/main', target: 'INSTALL_DIR', others: () => ({}) },
     { name: 'vendored swap', doc: 'upgrade', marker: 'git clone --depth 1', target: 'INSTALL_DIR', others: () => ({}) },
     { name: 'local copy detection', doc: 'upgrade', marker: '_RESOLVED_PRIMARY=', target: 'INSTALL_DIR', kinds: UNUSABLE, others: () => ({}) },
@@ -218,7 +218,7 @@ describe.skipIf(IS_WINDOWS)('C9: destructive upgrade/spec fences refuse bad path
   async function controls(h: HostRender): Promise<string[]> {
     const wd = world(h);
     const problems: string[] = [];
-    const ff = await run(wd, fence(h.upgrade, 'git pull --ff-only'), { INSTALL_DIR: wd.gstack });
+    const ff = await run(wd, fence(h.upgrade, 'merge --ff-only --autostash'), { INSTALL_DIR: wd.gstack });
     if (!ff.stdout.includes('FF_OK') || !ff.gitCalls.some(c => c.startsWith('fetch'))) problems.push(`${h.host}: ff-only upgrade did not run: ${ff.stderr}`);
     const local = join(wd.project, h.localDir);
     const team = await run(wd, fence(h.upgrade, 'git rm -r --cached'), { LOCAL_GSTACK: local });

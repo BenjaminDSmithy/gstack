@@ -133,8 +133,9 @@ Use the install type and directory detected in Step 2:
 **For git installs** (global-git, local-git):
 
 Fast-forward first — the same policy the session-update auto-upgrade
-uses. `--autostash` carries local edits over the pull; render-footprint dirt
-is discarded first because it is regenerable and poisons stashes:
+uses. `--autostash` carries local edits over the fast-forward; render-footprint
+dirt is discarded first because it is regenerable and poisons stashes. Hooks
+run from this checkout, so the commit is hook-checked before it moves:
 ```bash
 cd -- "${INSTALL_DIR:?INSTALL_DIR is not set: re-run Step 2 and substitute the printed path}" || exit 1
 { [ -f VERSION ] && [ -f setup ] && [ -f bin/gstack-config ] && [ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ]; } || { echo "ERROR: $INSTALL_DIR is not a gstack checkout; nothing was changed. Re-run Step 2." >&2; exit 1; }
@@ -142,15 +143,30 @@ cd -- "${INSTALL_DIR:?INSTALL_DIR is not set: re-run Step 2 and substitute the p
 # generated SKILL.md / sections files IN PLACE. They are regenerable (setup
 # re-renders to ~/.gstack/render), so discarding is lossless.
 git checkout -- 'SKILL.md' '*/SKILL.md' '*/sections/*.md' 2>/dev/null || true
-git fetch origin
+git fetch origin || { echo "FETCH_FAILED: nothing was changed" >&2; exit 1; }
 # Same pre-advance check as the auto-updater: the incoming release's Bun floor.
 HOLD=$(. bin/gstack-bun-version.sh 2>/dev/null && gstack_bun_incoming_hold . origin/main) && { echo "BUN_TOO_OLD: $HOLD; nothing was changed" >&2; exit 1; }
+INCOMING=$(git rev-parse --verify 'origin/main^{commit}') || exit 1
+# The auto-updater's hook check.
+_HCK=bin/gstack-hook-check
+_HC=$(mktemp -d "${TMPDIR:-/tmp}/gstack-hooks.XXXXXX") && git archive --format=tar "$INCOMING" | tar -xf - -C "$_HC" && { [ -f "$_HCK" ] || _HCK="$_HC/$_HCK"; _FAIL=$("$_HCK" "$_HC" | sed -n 's/^fail [^ ]* //p' | head -1); } 2>/dev/null; rm -rf "$_HC"
+[ -z "$_FAIL" ] || { echo "HOOK_DOES_NOT_PARSE: ${_FAIL#"$_HC"/}; nothing was changed" >&2; exit 1; }
 PRE_UPGRADE_COMMIT=$(git rev-parse HEAD)
 echo "PRE_UPGRADE_COMMIT=$PRE_UPGRADE_COMMIT"
-if git pull --ff-only --autostash origin main; then
+[ -z "$(git ls-files -u)" ] || { echo "UNMERGED_FILES: nothing was changed" >&2; exit 1; }
+_MO=$(mktemp "${TMPDIR:-/tmp}/gstack-merge.XXXXXX") || exit 1
+LC_ALL=C git -c core.abbrev=40 merge --ff-only --autostash "$INCOMING" >"$_MO" 2>&1; _FF_RC=$?; cat "$_MO"
+# git exits 0 on a conflicting pop.
+if [ -n "$(git ls-files -u)" ]; then
+  _AS=$(sed -n 's/^Created autostash: \([0-9a-f]\{40\}\).*/\1/p' "$_MO")
+  [ -n "$_AS" ] && [ "$(git rev-parse HEAD)" = "$INCOMING" ] && { git stash list --format=%H | grep -qx "$_AS" || git update-ref "refs/gstack-autostash/$(date -u +%Y%m%dT%H%M%SZ)" "$_AS"; } && git reset -q --hard "$INCOMING" || { echo "AUTOSTASH_CONFLICT" >&2; exit 1; }
+  _FF_RC=0; echo "AUTOSTASH_KEPT $_AS"
+fi
+rm -f "$_MO"
+if [ "$_FF_RC" -eq 0 ]; then
   if {{SETUP_COMMAND}} --refresh-registered; then echo "FF_OK"; else echo "SETUP_FAILED: git update succeeded; stop and inspect setup output (previous commit: $PRE_UPGRADE_COMMIT)" >&2; exit 1; fi
 else
-  echo "FF_REFUSED"
+  echo "FF_REFUSED $INCOMING"
 fi
 ```
 
@@ -162,9 +178,13 @@ its retry command and never say every host was refreshed. A `skipped` row
 belongs to another checkout or project; pass on its command, do not run it.
 
 If the output ends with `FF_OK`, the upgrade is done — skip the fallback
-below entirely.
+below entirely. `AUTOSTASH_KEPT <id>`: conflicting local edits are kept,
+unapplied, in `<id>`; tell the user, never drop it.
 On `BUN_TOO_OLD`, STOP: tell the user to run `bun upgrade`, then /gstack-upgrade again.
-On `SETUP_FAILED`, STOP; keep user changes and report the recovery commit. There is no `.bak` on the git path. Do not enter the divergence fallback merely because setup failed. Enter it only on `FF_REFUSED`, after inspecting the pull error; network/auth failures stop for repair, not reset.
+On `HOOK_DOES_NOT_PARSE`, STOP: nothing moved; report its file:line as a gstack bug.
+On `UNMERGED_FILES` or `AUTOSTASH_CONFLICT`, STOP: the user resolves the conflicts in `$INSTALL_DIR`; never reset them away.
+On `FETCH_FAILED`, stop for network/auth repair.
+On `SETUP_FAILED`, STOP; keep user changes and report the recovery commit. There is no `.bak` on the git path. Do not enter the divergence fallback merely because setup failed. Enter it only on `FF_REFUSED <commit>`, after inspecting the merge error, with `INCOMING` set to that commit.
 
 **Fallback (ff-only refused — local commits or divergence).** `git reset
 --hard` DESTROYS things: a clean tree with unpushed local commits still loses
@@ -184,6 +204,7 @@ those commits. Gate it:
 ```bash
 cd -- "${INSTALL_DIR:?INSTALL_DIR is not set: re-run Step 2 and substitute the printed path}" || exit 1
 { [ -f VERSION ] && [ -f setup ] && [ -f bin/gstack-config ] && [ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ]; } || { echo "ERROR: $INSTALL_DIR is not a gstack checkout; nothing was changed. Re-run Step 2." >&2; exit 1; }
+[ "$(git rev-parse origin/main)" = "${INCOMING:?set INCOMING to the commit FF_REFUSED printed}" ] || { echo "ORIGIN_MOVED: re-run Step 4; nothing was changed" >&2; exit 1; }
 STASH_OUTPUT=$(git stash 2>&1)
 git reset --hard origin/main
 {{SETUP_COMMAND}} --refresh-registered

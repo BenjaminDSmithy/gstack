@@ -13,12 +13,27 @@ const read = (p: string) => fs.readFileSync(path.join(ROOT, p), 'utf-8');
 describe('gstack-upgrade template: ff-only precedes the gated reset (#2517)', () => {
   const tmpl = read('gstack-upgrade/SKILL.md.tmpl');
 
-  test('git pull --ff-only runs before any reset --hard', () => {
-    const ff = tmpl.indexOf('git pull --ff-only --autostash');
+  test('the ff-only merge runs before any reset --hard', () => {
+    const ff = tmpl.indexOf('merge --ff-only --autostash "$INCOMING"');
     const reset = tmpl.indexOf('git reset --hard origin/main');
     expect(ff).toBeGreaterThan(-1);
     expect(reset).toBeGreaterThan(-1);
     expect(ff).toBeLessThan(reset);
+  });
+
+  test('no git pull: it fetches again and moves to a commit nothing checked', () => {
+    expect(tmpl).not.toContain('git pull --ff-only');
+  });
+
+  test('the hook check runs before the fast-forward; the fallback resets only to the checked commit', () => {
+    const check = tmpl.indexOf('git archive --format=tar "$INCOMING"');
+    expect(check).toBeGreaterThan(-1);
+    expect(check).toBeLessThan(tmpl.indexOf('merge --ff-only --autostash "$INCOMING"'));
+    expect(tmpl).toContain('echo "FF_REFUSED $INCOMING"');
+    const pinned = tmpl.indexOf('[ "$(git rev-parse origin/main)" = "${INCOMING:?');
+    expect(pinned).toBeGreaterThan(check);
+    expect(pinned).toBeLessThan(tmpl.indexOf('STASH_OUTPUT=$(git stash'));
+    expect(tmpl.indexOf('STASH_OUTPUT=$(git stash')).toBeLessThan(tmpl.indexOf('git reset --hard origin/main'));
   });
 
   test('the ff path carries the FF_OK success gate that skips the fallback', () => {
