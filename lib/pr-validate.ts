@@ -76,7 +76,8 @@ Records the verdict for the exact commit in the PR state; red if HEAD
 moves off that commit, a tracked file changes while the preconditions
 (bar their own build outputs) or the tests run, or an untracked file
 appears while the preconditions run. Every commit is read as CI's
-checkout holds it: your replace refs (git replace) are ignored.
+checkout holds it: your replace refs (git replace) and graft file
+(info/grafts) are ignored.
 
   run       preconditions + selection + per-file runs + mirrors
             (typecheck, typecheck:test, the added-line secret scan,
@@ -718,11 +719,18 @@ interface Ctx { d: ValidateDeps; f: Flags; repo: string; pr: PrInfo; stateDir: s
  * PR's tree hides every change from the selection (RESULT GREEN 0/0 for a PR
  * whose test fails), and one replacing the PR's head lets a tree checked out
  * under it read clean in `git status` while it holds what the verdict's
- * commit does not. GIT_NO_REPLACE_OBJECTS leaves each argv as it is. The
- * tests' own git keeps git's default: their env is validationEnv's.
+ * commit does not. Nor through the graft file (`info/grafts`, what replace
+ * refs superseded), which GIT_NO_REPLACE_OBJECTS leaves on: a graft giving
+ * the new upstream base the PR's head as parent makes the head the merge
+ * base. GIT_GRAFT_FILE names a path under /dev/null, which no file can be:
+ * git reads no grafts and stays silent (GIT_GRAFT_FILE=/dev/null itself is
+ * read, and prints the deprecated-grafts hint). Env only, so each argv stays
+ * as it is. The tests' own git keeps git's default: their env is
+ * validationEnv's.
  */
+const NO_GRAFT_FILE = '/dev/null/gstack-pr-validate-no-grafts';
 function withoutReplaceRefs(git: GitRunner, env: NodeJS.ProcessEnv): GitRunner {
-  return (args, o) => git(args, { ...o, env: { ...(o.env ?? env), GIT_NO_REPLACE_OBJECTS: '1' } });
+  return (args, o) => git(args, { ...o, env: { ...(o.env ?? env), GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: NO_GRAFT_FILE } });
 }
 
 function gitOk(d: ValidateDeps, cwd: string, args: string[], what: string): string {
