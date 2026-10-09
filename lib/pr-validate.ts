@@ -271,7 +271,8 @@ const under = (f: string, roots: readonly string[]) => roots.some(r => f.startsW
 const RENDER_TESTS = ['test/gen-skill-docs.test.ts', 'test/skill-validation.test.ts'];
 // Tripwires over the skill surface: the generated files' size budgets and the
 // tracker-text wiring scan. Like every class pick they run but never cover,
-// and they cover nothing through any other rule either.
+// and a path they only name (names:) is a file they reason about, not one they
+// run; the code they import, reach or join runs in them and is covered.
 const CLASS_SKILL = ['test/catalog-budget.test.ts', 'test/context-budget-ratchet.test.ts', 'test/tracker-guard-wiring.test.ts'];
 const CLASS_CODE = ['test/egress-receipt-wiring.test.ts'];
 const CLASS_TEST = ['test/spawnsync-timeout-tripwire.test.ts', 'test/test-of-test-ratchet.test.ts', 'test/paid-orphan-tripwire.test.ts', 'test/test-free-shards.test.ts'];
@@ -768,20 +769,23 @@ export function untestedCode(changed: string[], sel: Selection, exists: (f: stri
  * skill-rendering tests run a rendered template and every module the
  * generator imports). A `class:*` pick never covers: those tests are
  * tripwires that scan source or generated files for one pattern, and they
- * run without exercising the change. A skill-surface tripwire covers
- * nothing but itself, whatever picked it (test/tracker-guard-wiring.test.ts
- * names the files its exemption list reasons about). A passing declared
- * test covers everything: the owner declared it for the change.
+ * run without exercising the change. A skill-surface tripwire's `names:`
+ * never covers either: it names the files it reasons about
+ * (test/tracker-guard-wiring.test.ts's exemption list), not code it runs;
+ * what it imports, reaches, points at or joins runs in it, as in any test
+ * (test/context-budget-ratchet.test.ts is the only importer of the capture
+ * helper). A passing declared test covers everything: the owner declared
+ * it for the change.
  */
 export function uncoveredCode(code: string[], sel: Selection, passed: (file: string) => boolean): string[] {
   const covered = new Set<string>();
   for (const s of sel.files) {
     if (!passed(s.file)) continue;
     if (s.rules.includes('declared')) return [];
-    const tripwire = CLASS_SKILL.includes(s.file);
+    const rule = CLASS_SKILL.includes(s.file) ? /^(?:imports|reaches|refs|joins):(.+)$/ : /^(?:imports|reaches|refs|joins|names|renders):(.+)$/;
     for (const r of s.rules) {
       if (r === 'changed') covered.add(s.file);
-      const m = tripwire ? null : /^(?:imports|reaches|refs|joins|names|renders):(.+)$/.exec(r);
+      const m = rule.exec(r);
       if (m) covered.add(m[1]);
     }
   }

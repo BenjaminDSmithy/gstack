@@ -285,6 +285,41 @@ describe('selectTests', () => {
     expect(cov(['test/tracker-guard-wiring.test.ts'], ['test/tracker-guard-wiring.test.ts'])).toEqual([]);
   });
 
+  test('a skill tripwire covers the code it imports, reaches or joins, as any test does; never a file it only names or scans', () => {
+    const uni = [...universe, 'test/context-budget-ratchet.test.ts', 'test/tracker-guard-wiring.test.ts'];
+    const local: Record<string, string> = {
+      // As the real ratchet: it imports the capture helper it tells contributors to re-run, and names it in prose.
+      'test/context-budget-ratchet.test.ts': [
+        "import { capture } from './helpers/zz-capture';",
+        "import { bill } from '../lib/zz-bill';",
+        "const RE_RUN = 'bun test/helpers/zz-capture.ts';",
+        "const FX = path.join(import.meta.dir, 'fixtures', 'zz-budget.json');",
+        "const SEE = 'lib/zz-prose.ts';",
+      ].join('\n'),
+      'lib/zz-bill.ts': "import { tok } from './zz-tok';\nexport const bill = 1;",
+      'lib/zz-tok.ts': 'export const tok = 1;',
+      'test/tracker-guard-wiring.test.ts': "const SCANNER_EXEMPT = [{ file: 'lib/zz-exempt.ts', pattern: 'gh pr body read' }];",
+    };
+    const pick = (changed: string[]) => selectTests({ changed, universe: uni, declared: [], pkgVersionOnly: true, source: f => local[f] ?? src[f] ?? '' });
+    const rulesOf = (changed: string[]) => Object.fromEntries(pick(changed).files.map(f => [f.file, f.rules]));
+    const cov = (changed: string[], passing: string[]) => uncoveredCode(changed, pick(changed), f => passing.includes(f));
+    const ratchet = ['test/context-budget-ratchet.test.ts'];
+    const helper = 'test/helpers/zz-capture.ts';
+    expect(rulesOf([helper])[ratchet[0]]).toContain(`imports:${helper}`);
+    expect(cov([helper], ratchet)).toEqual([]);
+    expect(cov([helper], [])).toEqual([helper]);
+    // Through the modules it imports, and the fixture it joins and reads.
+    expect(rulesOf(['lib/zz-tok.ts'])[ratchet[0]]).toEqual(['reaches:lib/zz-tok.ts']);
+    expect(cov(['lib/zz-tok.ts', 'test/fixtures/zz-budget.json'], ratchet)).toEqual([]);
+    // A path it only names is not code it runs; nor is a file the tracker tripwire's exemption list names.
+    expect(rulesOf(['lib/zz-prose.ts'])[ratchet[0]]).toEqual(['names:lib/zz-prose.ts']);
+    expect(cov(['lib/zz-prose.ts'], ratchet)).toEqual(['lib/zz-prose.ts']);
+    expect(rulesOf(['lib/zz-exempt.ts'])['test/tracker-guard-wiring.test.ts']).toEqual(['names:lib/zz-exempt.ts']);
+    expect(cov(['lib/zz-exempt.ts'], ['test/tracker-guard-wiring.test.ts'])).toEqual(['lib/zz-exempt.ts']);
+    // A template it scans stays uncovered by its pass.
+    expect(cov(['zz/SKILL.md.tmpl'], uni.filter(f => !['test/gen-skill-docs.test.ts', 'test/skill-validation.test.ts'].includes(f)))).toEqual(['zz/SKILL.md.tmpl']);
+  });
+
   test('the skill surface cannot drift from the files the tracker-text tripwire scans', () => {
     // Read the tripwire's own trackedFiles filter and run it over this repo's tracked files.
     const REPO = path.resolve(import.meta.dir, '..');
@@ -570,6 +605,22 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(await red.call(['run'])).toBe(1);
     expect(red.out.find(l => l.startsWith('test/x.test.ts'))).toMatch(/RED: .*\[reaches:lib\/inner\.ts\]$/);
     expect(readStateFor(red.dir, pr)!.validation).toMatchObject({ worst: 1 });
+  });
+
+  test('a helper only the budget ratchet imports is covered by the ratchet\'s pass: green, never NO_TESTS', async () => {
+    // As the real budget ratchet imports its capture helper, and no other test does.
+    const RATCHET = 'test/context-budget-ratchet.test.ts';
+    const base = {
+      'test/helpers/capture.ts': 'export const measure = (s: string) => s.length;\n',
+      [RATCHET]: "import { test, expect } from 'bun:test';\nimport { measure } from './helpers/capture';\ntest('budget', () => expect(measure('abcd')).toBe(4));\n",
+    };
+    const f = fixture('ratchet-helper', null, { base, universe: [RATCHET], pr: { 'test/helpers/capture.ts': '// tidy\nexport const measure = (s: string) => s.length;\n' } });
+    expect(await f.call(['select'])).toBe(0);
+    expect(f.out).toContain(`SELECT\t${RATCHET}\timports:test/helpers/capture.ts`);
+    f.out.length = 0;
+    expect(await f.call(['run'])).toBe(0);
+    expect(f.out.some(l => l.startsWith('NO_TESTS'))).toBe(false);
+    expect(readStateFor(f.dir, pr)!.validation).toMatchObject({ worst: 0, summary: '1/1 selected files green' });
   });
 
   test('a CLI test that spawns the changed module through a path.join from its own directory runs, and its failure is red', async () => {
