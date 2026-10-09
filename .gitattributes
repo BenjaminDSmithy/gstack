@@ -45,12 +45,6 @@ Dockerfile*  text eol=lf
 *.mjs        text eol=lf
 *.cjs        text eol=lf
 
-# Windows CI shard logs, kept byte for byte: their CR bytes are the evidence
-# lib/pr-ci-triage.ts classifies, so git must never normalise them (with
-# `*.txt text eol=lf` a checkout reported them modified and the next add
-# would strip the CRs).
-test/fixtures/pr-ci-triage/*.log.txt  -text
-
 # Binary files — never touch.
 *.png        binary
 *.jpg        binary
