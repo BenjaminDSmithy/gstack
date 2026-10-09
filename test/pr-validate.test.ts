@@ -1245,35 +1245,43 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(quiet.f.out.some(l => l.startsWith('tree changed'))).toBe(false);
   });
 
-  test('a secret scan whose diff failed is red and never scans an empty diff', async () => {
-    let tree = '';
-    const rec = recorder(() => tree);
-    const git: GitRunner = (args, o) => (args[0] === 'diff' && args.includes('--unified=0') ? { status: 128, stdout: '', stderr: 'fatal: bad object' } : defaultGit(args, o));
-    const f = fixture('scan-diff-fails', "test('x', () => expect(y).toBe(2));", {
-      base: { '.github/scripts/gate-secret-scan.mjs': 'process.exit(0);\n' },
-      deps: { tool: rec.tool, git },
-    });
-    tree = f.tree;
-    expect(await f.call(['run'])).toBe(1);
-    expect(f.out).toContain('mirror secret-scan RED: git diff failed (exit 128: fatal: bad object); nothing was scanned');
-    expect(rec.calls.some(c => c.line.includes('gate-secret-scan.mjs'))).toBe(false);
+  test('a secret scan whose git dir or diff failed is red and never scans an empty diff', async () => {
+    // Without its own git dir the diff would fall back to `git diff --no-index` and read the commits as paths.
+    const FAILS: [string, (args: string[]) => boolean][] = [
+      ['git diff', args => args.includes('diff') && args.includes('--unified=0')],
+      ['git init', args => args[0] === 'init'],
+    ];
+    for (const [what, fails] of FAILS) {
+      let tree = '';
+      const rec = recorder(() => tree);
+      const git: GitRunner = (args, o) => (fails(args) ? { status: 128, stdout: '', stderr: 'fatal: bad object' } : defaultGit(args, o));
+      const f = fixture(`scan-fails-${what.replace(/\W/g, '-')}`, "test('x', () => expect(y).toBe(2));", {
+        base: { '.github/scripts/gate-secret-scan.mjs': 'process.exit(0);\n' },
+        deps: { tool: rec.tool, git },
+      });
+      tree = f.tree;
+      expect(await f.call(['run']), what).toBe(1);
+      expect(f.out, what).toContain(`mirror secret-scan RED: ${what} failed (exit 128: fatal: bad object); nothing was scanned`);
+      expect(rec.calls.some(c => c.line.includes('gate-secret-scan.mjs')), what).toBe(false);
+    }
   });
 
   test('the secret scan reads git\'s own diff, as CI does: a caller\'s external diff, diff driver or textconv never hides an added line', async () => {
     // A caller's config can hand `git diff` to another program (diff.external, difftastic's documented
-    // setup) or, through core.attributesFile, to a driver's command or a lossy textconv. CI runs none.
-    const attrs = path.join(ROOT, 'scan-zz.gitattributes');
-    fs.writeFileSync(attrs, '*.ts diff=zz\n');
-    const CONFIGS: [string, [string, string][]][] = [
-      ['default', []],
-      ['diff.external', [['diff.external', '/usr/bin/true']]],
-      ['driver command', [['core.attributesFile', attrs], ['diff.zz.command', '/usr/bin/true']]],
-      ['driver textconv', [['core.attributesFile', attrs], ['diff.zz.textconv', 'sed /ZZSECRET/d']]],
+    // setup) or to a driver's command or a lossy textconv, here named by a tracked .gitattributes that CI
+    // reads too, with no zz driver. CI runs none. The config is forced onto every git call, the mirror's
+    // own env included: it stands for config the mirror's own git dir would not keep out.
+    const ZZ = { '.gitattributes': '*.ts diff=zz\n' };
+    const CONFIGS: [string, [string, string][], Record<string, string>][] = [
+      ['default', [], {}],
+      ['diff.external', [['diff.external', '/usr/bin/true']], {}],
+      ['driver command', [['diff.zz.command', '/usr/bin/true']], ZZ],
+      ['driver textconv', [['diff.zz.textconv', 'sed /ZZSECRET/d']], ZZ],
     ];
-    for (const [label, keys] of CONFIGS) {
+    for (const [label, keys, attrs] of CONFIGS) {
       const cfg: NodeJS.ProcessEnv = { GIT_CONFIG_COUNT: String(keys.length) };
       keys.forEach(([k, v], i) => { cfg[`GIT_CONFIG_KEY_${i}`] = k; cfg[`GIT_CONFIG_VALUE_${i}`] = v; });
-      const git: GitRunner = (args, o) => defaultGit(args, { ...o, env: { ...process.env, ...cfg } });
+      const git: GitRunner = (args, o) => defaultGit(args, { ...o, env: { ...(o.env ?? process.env), ...cfg } });
       let tree = '';
       const rec = recorder(() => tree);
       const scanned: string[] = [];
@@ -1286,7 +1294,7 @@ describe('run, select and declare against a fixture PR tree', () => {
         return rec.tool(cmd, args, o);
       };
       const f = fixture(`scan-own-diff-${label.replace(/\W/g, '-')}`, "test('x', () => expect(y).toBe(2));", {
-        base: { '.github/scripts/gate-secret-scan.mjs': 'process.exit(0);\n' },
+        base: { '.github/scripts/gate-secret-scan.mjs': 'process.exit(0);\n', ...attrs },
         pr: { 'lib/y.ts': 'export const y = 2; // ZZSECRET\n' },
         deps: { tool, git },
       });
@@ -1296,6 +1304,94 @@ describe('run, select and declare against a fixture PR tree', () => {
       expect(scanned[0], label).toMatch(/^\+export const y = 2; \/\/ ZZSECRET$/m);
       expect(f.out, label).toContain('mirror secret-scan rc=1');
       expect(f.out[0], label).toStartWith('RESULT RED');
+    }
+  });
+
+  test('the secret scan reads CI\'s config and attributes, never the caller\'s: no attribute, driver, size, copy or replace setting of theirs hides an added line', async () => {
+    // CI's step diffs a fresh Linux checkout under CI's global config alone. The caller's env, home and
+    // repo can each turn an added line into no `+` line: a binary rule (`-diff`, a driver with
+    // binary=true, a file over core.bigFileThreshold) prints 'Binary files ... differ', copy detection
+    // turns a new file copied from a modified one into a copy header, and a replace ref swaps the blob.
+    const noDiff = path.join(ROOT, 'scan-ci-no-diff.gitattributes');
+    fs.writeFileSync(noDiff, '*.ts -diff\n');
+    const xdg = path.join(ROOT, 'scan-ci-xdg');
+    write(xdg, 'git/attributes', '*.ts -diff\n');
+    const xdgConfig = path.join(ROOT, 'scan-ci-xdg-config');
+    write(xdgConfig, 'git/config', '[core]\n\tbigFileThreshold = 1\n');
+    const ADDED = /^\+export const y = 2; \/\/ ZZSECRET$/m;
+    // A secret already in the base, in a new file copied from a file the PR modifies: CI's rename-only
+    // detection shows every line of the new file as added.
+    const COPY_BASE = { 'docs/k.md': 'token ZZSECRET-base\nversion 1\n' };
+    const COPY_PR = { 'docs/k.md': 'token ZZSECRET-base\nversion 2\n', 'docs/k2.md': 'token ZZSECRET-base\nversion 2\n' };
+    interface Case { label: string; env?: NodeJS.ProcessEnv; base?: Record<string, string>; pr?: Record<string, string>; local?: (tree: string) => NodeJS.ProcessEnv | void; want?: RegExp; ciHides?: boolean }
+    const CASES: Case[] = [
+      { label: 'default' },
+      // The tree's own .gitattributes is what CI reads: a rule there hides the line from CI's scan too.
+      { label: 'tracked -diff', base: { '.gitattributes': '*.ts -diff\n' }, ciHides: true },
+      { label: 'env core.attributesFile -diff', env: { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.attributesFile', GIT_CONFIG_VALUE_0: noDiff } },
+      { label: 'XDG attributes -diff', env: { XDG_CONFIG_HOME: xdg } },
+      { label: 'XDG config bigFileThreshold', env: { XDG_CONFIG_HOME: xdgConfig } },
+      { label: 'info/attributes -diff', local: t => write(t, '.git/info/attributes', '*.ts -diff\n') },
+      { label: 'local driver binary', base: { '.gitattributes': '*.ts diff=zz\n' }, local: t => void git(t, 'config', 'diff.zz.binary', 'true') },
+      { label: 'local bigFileThreshold', local: t => void git(t, 'config', 'core.bigFileThreshold', '1') },
+      // CI's Linux checkout has core.ignorecase off, so `*.TS` never matches lib/y.ts there.
+      { label: 'case-folded attribute', base: { '.gitattributes': '*.TS -diff\n' } },
+      { label: 'local replace ref', local: t => void git(t, 'replace', git(t, 'rev-parse', 'HEAD:lib/y.ts'), git(t, 'rev-parse', 'HEAD~1:lib/y.ts')) },
+      { label: 'local diff.renames=copies', base: COPY_BASE, pr: COPY_PR, local: t => void git(t, 'config', 'diff.renames', 'copies'), want: /^\+token ZZSECRET-base$/m },
+      {
+        label: 'env GIT_ATTR_SOURCE', local: t => {
+          // A tree whose .gitattributes says `*.ts -diff`, in the caller's object store only.
+          write(t, '.gitattributes', '*.ts -diff\n');
+          git(t, 'add', '.gitattributes');
+          const attrTree = git(t, 'write-tree');
+          git(t, 'rm', '-q', '--cached', '.gitattributes');
+          fs.rmSync(path.join(t, '.gitattributes'));
+          return { GIT_ATTR_SOURCE: attrTree };
+        },
+      },
+    ];
+    for (const c of CASES) {
+      const name = `scan-ci-config-${c.label.replace(/\W/g, '-')}`;
+      // The caller's env: deps.env, and what a git call without an env of its own runs in (as defaultGit does).
+      const callerEnv: NodeJS.ProcessEnv = { ...process.env, GSTACK_STATE_ROOT: path.join(ROOT, name, 'home'), ...c.env };
+      const scanEnvs: NodeJS.ProcessEnv[] = [];
+      const gitRunner: GitRunner = (args, o) => {
+        if (args.includes('--unified=0')) scanEnvs.push({ ...(o.env ?? callerEnv) });
+        return defaultGit(args, { ...o, env: o.env ?? callerEnv });
+      };
+      let tree = '';
+      const rec = recorder(() => tree);
+      const scanned: string[] = [];
+      // Stands in for gate-secret-scan.mjs: red on an added line holding the secret.
+      const tool: ToolRunner = (cmd, args, o) => {
+        if (args[0]?.endsWith('/.github/scripts/gate-secret-scan.mjs')) {
+          scanned.push(o.input ?? '');
+          return { status: /^\+.*ZZSECRET/m.test(o.input ?? '') ? 1 : 0, stdout: '', stderr: '' };
+        }
+        return rec.tool(cmd, args, o);
+      };
+      const f = fixture(name, "test('x', () => expect(y).toBe(2));", {
+        base: { '.github/scripts/gate-secret-scan.mjs': 'process.exit(0);\n', ...c.base },
+        pr: c.pr ?? { 'lib/y.ts': 'export const y = 2; // ZZSECRET\n' },
+        env: c.env,
+        deps: { tool, git: gitRunner, env: callerEnv },
+      });
+      tree = f.tree;
+      Object.assign(callerEnv, c.local?.(f.tree));
+      const rc = await f.call(['run']);
+      expect(scanned, c.label).toHaveLength(1);
+      if (c.ciHides) {
+        expect(scanned[0], c.label).toContain('Binary files a/lib/y.ts and b/lib/y.ts differ');
+        expect(f.out, c.label).toContain('mirror secret-scan rc=0');
+        expect(rc, c.label).toBe(0);
+      } else {
+        expect(scanned[0], c.label).toMatch(c.want ?? ADDED);
+        expect(f.out, c.label).toContain('mirror secret-scan rc=1');
+        expect(rc, c.label).toBe(1);
+        expect(f.out[0], c.label).toStartWith('RESULT RED');
+      }
+      // Nor a system config or gitattributes file: CI's runner has neither, Homebrew's git reads $(prefix)/etc's.
+      expect(scanEnvs.map(e => [e.GIT_CONFIG_NOSYSTEM, e.GIT_ATTR_NOSYSTEM]), c.label).toEqual([['1', '1']]);
     }
   });
 

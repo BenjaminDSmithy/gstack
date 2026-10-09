@@ -997,12 +997,53 @@ function cmdRun(c: Ctx): number {
   }
 }
 
+/** What CI's secret-scan step diffs: all but the fixtures and baselines that hold credential-shaped strings on purpose. */
+const SECRET_SCAN_PATHSPEC = ['.', ':(exclude)test/fixtures/**', ':(exclude)browse/test/fixtures/**', ':(exclude)docs/evals/**', ':(exclude)test/helpers/security-bench*'];
+
+/**
+ * The patch CI's secret-scan step pipes to gate-secret-scan.mjs: `git diff
+ * --unified=0 --no-color <base> <head>` in a fresh Linux checkout, under
+ * CI's global config and nothing else. Run in the caller's repo, the diff
+ * reads the caller's config and attributes, and several of them leave an
+ * added line with no `+`:
+ * - a `-diff` or binary rule (core.attributesFile, the XDG attributes file,
+ *   .git/info/attributes, GIT_ATTR_SOURCE, the system file), a driver with
+ *   binary=true, or a file over core.bigFileThreshold prints only
+ *   'Binary files ... differ';
+ * - diff.renames=copies turns a new file copied from a modified one into a
+ *   copy header;
+ * - a replace ref swaps the blob that is read;
+ * - macOS's core.ignorecase lets a `*.TS` rule match lib/y.ts, which CI's
+ *   Linux checkout never does.
+ * So the diff runs in an empty git dir of its own over the caller's object
+ * store. It reads no config but CI's global one, no attributes but the
+ * tree's tracked .gitattributes, and no GIT_* variable of the caller's.
+ * --no-ext-diff and --no-textconv (diff.external, a driver's command or
+ * textconv) stay for a config that reaches it anyway.
+ */
+function secretScanDiff(c: Ctx, mb: string, sha: string, ciGitConfig: string, tmp: string): { r: GhResult; what: string } {
+  const objects = path.resolve(c.tree, gitOk(c.d, c.tree, ['rev-parse', '--git-path', 'objects'], 'git rev-parse').trim());
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(c.d.env)) if (!k.startsWith('GIT_') && v !== undefined) env[k] = v;
+  Object.assign(env, { GIT_CONFIG_GLOBAL: ciGitConfig, GIT_CONFIG_NOSYSTEM: '1', GIT_ATTR_NOSYSTEM: '1' });
+  const gitDir = path.join(tmp, 'secret-scan.git');
+  // Without its git dir, `git diff` falls back to --no-index and reads the arguments as paths.
+  const init = c.d.git(['init', '-q', '--bare', '--template=', gitDir], { cwd: tmp, env });
+  if (init.status !== 0 || init.error) return { r: init, what: 'git init' };
+  const r = c.d.git([
+    `--git-dir=${gitDir}`, `--work-tree=${c.tree}`, '-c', 'core.attributesFile=/dev/null', '-c', 'core.ignorecase=false',
+    'diff', '--unified=0', '--no-color', '--no-ext-diff', '--no-textconv', mb, sha, '--', ...SECRET_SCAN_PATHSPEC,
+  ], { cwd: c.tree, env: { ...env, GIT_OBJECT_DIRECTORY: objects } });
+  return { r, what: 'git diff' };
+}
+
 function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string): number {
   const { d } = c;
   const state = readStateFor(c.stateDir, c.pr);
   const declaredAtStart = new Set(state?.focused?.paths ?? []);
   const { sel, mb, changed } = selection(c, state);
-  const env = validationEnv(d.env, tmp, mb, writeCiGitConfig(outDir));
+  const ciGitConfig = writeCiGitConfig(outDir);
+  const env = validationEnv(d.env, tmp, mb, ciGitConfig);
   const lines: string[] = [];
   let worst = 0;
   const line = (s: string, bad: boolean) => {
@@ -1123,14 +1164,10 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   }
   const scanner = path.join(c.tree, '.github/scripts/gate-secret-scan.mjs');
   if (fs.existsSync(scanner)) {
-    // git's own diff, the one CI's step reads (quality-gate.yml configures no diff program): a caller's
-    // diff.external, or a diff driver's command or textconv named through core.attributesFile, would
-    // hand the scanner another program's output, which can drop an added line, and the mirror would
-    // pass what CI fails.
-    const diff = d.git(['diff', '--unified=0', '--no-color', '--no-ext-diff', '--no-textconv', mb, 'HEAD', '--', '.', ':(exclude)test/fixtures/**', ':(exclude)browse/test/fixtures/**', ':(exclude)docs/evals/**', ':(exclude)test/helpers/security-bench*'], { cwd: c.tree });
+    const { r: diff, what } = secretScanDiff(c, mb, sha, ciGitConfig, tmp);
     // CI's step runs under `set -euo pipefail`: a failed diff fails it, and scanning an empty or partial one would pass.
     if (diff.status !== 0 || diff.error) {
-      line(`mirror secret-scan RED: git diff failed (${diff.error ?? `exit ${diff.status}: ${diff.stderr.trim().split('\n').at(-1)}`}); nothing was scanned`, true);
+      line(`mirror secret-scan RED: ${what} failed (${diff.error ?? `exit ${diff.status}: ${diff.stderr.trim().split('\n').at(-1)}`}); nothing was scanned`, true);
     } else {
       const runner = d.which('node') ? 'node' : 'bun';
       const r = tool(runner, [scanner], 120_000, diff.stdout);
