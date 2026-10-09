@@ -1041,6 +1041,15 @@ describe('run, select and declare against a fixture PR tree', () => {
     }
   });
 
+  test('the dirty-tree refusal names an untracked directory once, never the first five files inside it', async () => {
+    const f = fixture('dirty-untracked-dir', null);
+    for (let i = 0; i < 7; i++) write(f.tree, `lib/newdir/f${i}.ts`, '1\n');
+    expect(await f.call(['run'])).toBe(30);
+    expect(f.out).toHaveLength(1);
+    expect(f.out[0]).toMatch(/^RESULT PRECONDITION .* has untracked files \(lib\/newdir\/\); /);
+    expect(f.out[0]).not.toContain('lib/newdir/f');
+  });
+
   const freeTests = (pin: string) =>
     `jobs:\n  free:\n    steps:\n      - uses: oven-sh/setup-bun@v2\n        with:\n          bun-version: ${pin}\n  macos-named-regressions:\n    steps:\n      - run: |\n          files=(test/x.test.ts)\n`;
 
