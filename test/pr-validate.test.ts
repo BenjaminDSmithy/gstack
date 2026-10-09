@@ -1444,7 +1444,8 @@ describe('run, select and declare against a fixture PR tree', () => {
   test('the secret scan in a partial clone fetches the blobs it diffs first; with the promisor remote gone it is red and names the fetch', async () => {
     // A blob:none clone holds the blobs it checked out, not the merge base's side of a changed file, and
     // the scan's own git dir has no promisor remote to fetch that blob from.
-    const SHAPES = ['partial clone', 'linked worktree of a partial clone', 'promisor remote gone', 'replace ref on the merge base'];
+    const SHAPES = ['partial clone', 'linked worktree of a partial clone', 'promisor remote gone', 'replace ref on the merge base',
+      'base moved past the merge base', 'promisor remote not named origin'];
     for (const shape of SHAPES) {
       let tree = '';
       const rec = recorder(() => tree);
@@ -1452,17 +1453,30 @@ describe('run, select and declare against a fixture PR tree', () => {
       const f = fixture(`scan-partial-${shape.replace(/\W/g, '-')}`, "test('x', () => expect(y).toBe(2));", { ...SCAN_FX, deps: { tool: scan.tool } });
       const up = path.join(path.dirname(f.tree), 'acme', 'fx.git');
       git(f.tree, 'push', '-q', 'upstream', 'pr/v');
+      if (shape === 'base moved past the merge base') {
+        // Main changes lib/y.ts again after the PR branched, and the PR is not rebased onto it: the staged
+        // base is the new main, and the merge base's side is what the scan diffs and the prefetch must fetch.
+        git(f.tree, 'checkout', '-q', 'main');
+        write(f.tree, 'lib/y.ts', 'export const y = 3;\n');
+        git(f.tree, 'commit', '-q', '-am', 'main moves on');
+        git(f.tree, 'push', '-q', 'upstream', 'main');
+        git(f.tree, 'checkout', '-q', 'pr/v');
+      }
       git(up, 'config', 'uploadpack.allowFilter', 'true');
       git(up, 'config', 'uploadpack.allowAnySHA1InWant', 'true');
       const clone = path.join(path.dirname(f.tree), 'partial');
-      git(ROOT, 'clone', '-q', '--no-checkout', '--filter=blob:none', `file://${up}`, clone);
+      git(ROOT, 'clone', '-q', '--no-checkout', '--filter=blob:none', ...(shape === 'promisor remote not named origin' ? ['-o', 'up'] : []), `file://${up}`, clone);
       git(clone, 'checkout', '-q', 'pr/v');
+      // `clone -o up` names its promisor remote up: no remote.origin key exists to detect.
+      if (shape === 'promisor remote not named origin') expect(git(clone, 'config', '--get-regexp', 'promisor'), shape).toBe('remote.up.promisor true');
       tree = clone;
       if (shape === 'linked worktree of a partial clone') {
         tree = path.join(path.dirname(f.tree), 'partial-scratch');
         git(clone, 'worktree', 'add', '-q', '--detach', tree, 'HEAD');
       }
-      const mbBlob = git(clone, 'rev-parse', 'main:lib/y.ts');
+      const mb = git(clone, 'merge-base', 'HEAD', 'main');
+      if (shape === 'base moved past the merge base') expect(mb, shape).not.toBe(git(clone, 'rev-parse', 'main'));
+      const mbBlob = git(clone, 'rev-parse', `${mb}:lib/y.ts`);
       const held = () => spawnSync('git', ['cat-file', '-e', mbBlob], { cwd: clone, timeout: 30_000, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_NO_LAZY_FETCH: '1' } }).status === 0;
       expect(held(), shape).toBe(false);
       if (shape === 'replace ref on the merge base') {
