@@ -240,6 +240,47 @@ describe('selectTests', () => {
     for (const f of ['contrib/zz-host/SKILL.md.tmpl', 'hosts/claude/hooks/zz-hook.ts']) expect(cov([f], uni), f).toEqual([f]);
   });
 
+  test('the skill surface is the tracker tripwire\'s roots, and that tripwire never covers what it scans', () => {
+    const uni = [...universe, 'test/tracker-guard-wiring.test.ts', 'test/catalog-budget.test.ts'];
+    const local: Record<string, string> = {
+      'test/tracker-guard-wiring.test.ts': "const SCANNER_EXEMPT = [{ file: 'doc/sections/body.md.tmpl', pattern: 'gh pr body read' }];",
+    };
+    const pick = (changed: string[]) => selectTests({ changed, universe: uni, declared: [], pkgVersionOnly: true, source: f => local[f] ?? src[f] ?? '' });
+    const rulesOf = (changed: string[]) => Object.fromEntries(pick(changed).files.map(f => [f.file, f.rules]));
+    const cov = (changed: string[], passing: string[]) => uncoveredCode(changed, pick(changed), f => passing.includes(f));
+    // A section template runs the tripwire and the budgets, and the renderers render it.
+    const sec = 'zz/sections/ceo-phase.md.tmpl';
+    expect(rulesOf([sec])['test/tracker-guard-wiring.test.ts']).toEqual([`class:skill(${sec})`]);
+    expect(rulesOf([sec])['test/catalog-budget.test.ts']).toEqual([`class:skill(${sec})`]);
+    expect(rulesOf([sec])['test/gen-skill-docs.test.ts']).toEqual([`renders:${sec}`]);
+    for (const f of ['review/checklist.md', 'scripts/resolvers/zz-new.ts']) expect(rulesOf([f])['test/tracker-guard-wiring.test.ts'], f).toEqual([`class:skill(${f})`]);
+    expect(cov([sec], ['test/gen-skill-docs.test.ts'])).toEqual([]);
+    // It covers nothing it scans, not even a file it names; a changed tripwire covers itself.
+    expect(cov([sec], ['test/tracker-guard-wiring.test.ts', 'test/catalog-budget.test.ts'])).toEqual([sec]);
+    expect(rulesOf(['doc/sections/body.md.tmpl'])['test/tracker-guard-wiring.test.ts']).toContain('names:doc/sections/body.md.tmpl');
+    expect(cov(['doc/sections/body.md.tmpl'], ['test/tracker-guard-wiring.test.ts'])).toEqual(['doc/sections/body.md.tmpl']);
+    expect(cov(['test/tracker-guard-wiring.test.ts'], ['test/tracker-guard-wiring.test.ts'])).toEqual([]);
+  });
+
+  test('the skill surface cannot drift from the files the tracker-text tripwire scans', () => {
+    // Read the tripwire's own trackedFiles filter and run it over this repo's tracked files.
+    const REPO = path.resolve(import.meta.dir, '..');
+    const text = fs.readFileSync(path.join(REPO, 'test/tracker-guard-wiring.test.ts'), 'utf8');
+    const m = /function trackedFiles\(\)[\s\S]*?\.filter\(Boolean\)\s*\.filter\(\s*\((\w+)\)\s*=>([\s\S]*?),\s*\);\s*\n\}/.exec(text);
+    expect(m, 'trackedFiles filter in test/tracker-guard-wiring.test.ts').not.toBeNull();
+    const scans = new Function(m![1], `return (${m![2]});`) as (f: string) => boolean;
+    const ls = spawnSync('git', ['ls-files'], { cwd: REPO, encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024 * 1024 });
+    expect(ls.status).toBe(0);
+    const scanned = [...ls.stdout.split('\n').filter(Boolean), 'zz/sections/new.md.tmpl', 'zz/deep/er/new.md.tmpl', 'scripts/resolvers/zz-new.ts', 'review/zz-new.md'].filter(f => scans(f));
+    expect(scanned.length).toBeGreaterThan(100);
+    const uni = ['test/tracker-guard-wiring.test.ts', 'test/gen-skill-docs.test.ts'];
+    for (const f of scanned) {
+      const s = selectTests({ changed: [f], universe: uni, declared: [], pkgVersionOnly: true, source: () => '' });
+      expect(s.files.find(x => x.file === 'test/tracker-guard-wiring.test.ts')?.rules, f).toEqual([`class:skill(${f})`]);
+      expect(uncoveredCode([f], s, t => t === 'test/tracker-guard-wiring.test.ts'), f).toEqual([f]);
+    }
+  });
+
   test('the class roots cannot drift from the roots the tripwires themselves scan', () => {
     const REPO = path.resolve(import.meta.dir, '..');
     const literal = (file: string, name: string) => {
@@ -529,6 +570,32 @@ describe('run, select and declare against a fixture PR tree', () => {
     f.out.length = 0;
     expect(await f.call(['run'])).toBe(1);
     expect(f.out.find(l => l.startsWith('tool/test/cli-exit.test.ts'))).toMatch(/RED: .*\[joins:tool\/cli\.ts\]$/);
+    expect(readStateFor(f.dir, pr)!.validation).toMatchObject({ worst: 1 });
+  });
+
+  test('a template change runs the tracker-text tripwire, and its failure is red although the renderers pass', async () => {
+    const universe = ['test/x.test.ts', 'test/z.test.ts', 'test/gen-skill-docs.test.ts', 'test/tracker-guard-wiring.test.ts'];
+    const base = {
+      'sk/SKILL.md.tmpl': '# sk\n',
+      'test/gen-skill-docs.test.ts': "import { test, expect } from 'bun:test';\ntest('renders', () => expect(1).toBe(1));\n",
+      // A stand-in for the real tripwire: no template may read a PR body raw.
+      'test/tracker-guard-wiring.test.ts': [
+        "import { test, expect } from 'bun:test';",
+        "import fs from 'node:fs';",
+        "import path from 'node:path';",
+        "test('no raw body read', () => {",
+        "  const dir = path.resolve(import.meta.dir, '..', 'sk');",
+        "  for (const f of fs.readdirSync(dir)) expect(fs.readFileSync(path.join(dir, f), 'utf8')).not.toContain('--json body');",
+        '});',
+      ].join('\n'),
+    };
+    const f = fixture('tracker-tmpl', null, { universe, base, pr: { 'sk/SKILL.md.tmpl': '# sk\ngh pr view 9 --json body\n' } });
+    expect(await f.call(['select'])).toBe(0);
+    expect(f.out).toContain('SELECT\ttest/tracker-guard-wiring.test.ts\tclass:skill(sk/SKILL.md.tmpl)');
+    expect(f.out).toContain('SELECT\ttest/gen-skill-docs.test.ts\trenders:sk/SKILL.md.tmpl');
+    f.out.length = 0;
+    expect(await f.call(['run'])).toBe(1);
+    expect(f.out.find(l => l.startsWith('test/tracker-guard-wiring.test.ts'))).toContain('RED');
     expect(readStateFor(f.dir, pr)!.validation).toMatchObject({ worst: 1 });
   });
 
