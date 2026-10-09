@@ -4,5 +4,10 @@ import { watchMain } from '../lib/pr-watch';
 // process.exit() discards stdout still buffered in a pipe: past 64 KiB (many
 // unacknowledged signals, one envelope each) a slow reader lost END markers
 // and the NEXT line. Set the code and let the runtime drain stdout, as
-// bin/gstack-pr-body does.
+// bin/gstack-pr-body does. A reader that closes the pipe early (`poll | head
+// -1`) then raised EPIPE as an unhandled stdout error, and the process exited
+// 1 instead of the poll's code: drop EPIPE, the reader wanted no more.
+process.stdout.on('error', (error: NodeJS.ErrnoException) => {
+  if (error.code !== 'EPIPE') throw error;
+});
 process.exitCode = await watchMain(process.argv.slice(2));
