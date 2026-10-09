@@ -438,6 +438,16 @@ describe('CLI', () => {
     expect(await modes('Me/Fork')).toEqual(['CARRY', 'CARRY']);
     // Against the real upstream, a delta search would never see an older open duplicate there.
     expect(await modes(UP)).toEqual(['NEW', 'NEW']);
+    // A persistent report from before 2d3dea03e names no repo: it carries nothing, even to the repo it searched.
+    const stamped = JSON.parse(fs.readFileSync(ship, 'utf8'));
+    const withRepo = path.join(ROOT, 'prior-with-repo.json');
+    const legacy = path.join(ROOT, 'prior-no-repo.json');
+    fs.writeFileSync(withRepo, JSON.stringify(stamped));
+    fs.writeFileSync(legacy, JSON.stringify({ ...stamped, repo: undefined }));
+    for (const [prior, want] of [[withRepo, ['CARRY', 'CARRY']], [legacy, ['NEW', 'NEW']]] as const) {
+      expect(await run(['list', '--base', base, '--repo', 'me/fork', '--prior', prior])).toBe(0);
+      expect(JSON.parse(out.slice(1).join('\n')).audit.map((c: { mode: string }) => c.mode), prior).toEqual([...want]);
+    }
     expect(await run(['list', '--base', base])).toBe(2);
     expect(out[0]).toMatch(/^RESULT USAGE .*--repo/);
     expect(await run(['list', '--base', base, '--repo', 'not a repo'])).toBe(2);
