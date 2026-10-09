@@ -20,6 +20,8 @@ Every step is a helper; the judgement left to you is in the STOP lines.
   signal; the watch section says what to do.
 - Exit 12 (UNVERIFIED): STOP, the PR's state is unknown. Exit 45: another
   poll or write holds the lock; poll again.
+- Any other exit (1 an error, 2 usage, 30 this topic's state or watch
+  belongs to another PR): STOP and show the owner its RESULT line.
 
 ### 2. Plan, then merge
 

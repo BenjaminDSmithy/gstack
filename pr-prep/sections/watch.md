@@ -42,8 +42,10 @@ PRs. An external commenter cannot raise a P0.
   one credit sits on every open PR's base). Information only; nothing
   latches.
 - **UNVERIFIED (exit 12).** An endpoint did not answer. That is not quiet:
-  say so, and do not write. Exit 30: this topic's state or watch belongs
-  to another PR. Exit 45: another poll or write holds the lock; poll again.
+  say so, and do not write. Exit 45: another poll or write holds the
+  lock; poll again. Any other exit (1 an error, 2 usage, 30 this topic's
+  state or watch belongs to another PR) is not quiet either: show the
+  owner its RESULT line and do not write.
 
 P0 and P1 signals stay latched, and every pr-prep write refuses, until the
 owner has read them. Only then record it, with each `<signal id>@<level>`
