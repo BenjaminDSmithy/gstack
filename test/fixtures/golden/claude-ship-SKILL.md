@@ -1108,15 +1108,28 @@ stage 4's recovery before publication. Otherwise continue to Step 17.
 ## Step 17: Push
 
 **Upstream PR check — before anything is pushed.** A PR on a repo that
-`origin` is not (a fork PR to someone else's project) is the owner's to write to:
+`origin` is not (a fork PR to someone else's project) is the owner's to write to.
+The check reads the upstream from origin's URL (its GitHub fork parent, plus every
+other GitHub remote), never from gh's default repo:
 
 ```bash
-_UP_REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null | tr 'A-Z' 'a-z')
-_PUSH_URL=$(git remote get-url --push origin 2>/dev/null | tr 'A-Z' 'a-z')
-case "$_PUSH_URL" in (""|*[/:]"$_UP_REPO"|*[/:]"$_UP_REPO".git|*[/:]"$_UP_REPO"/) _UP_REPO="" ;; esac
-if [ -z "$_UP_REPO" ]; then echo "UPSTREAM_PR: none"; exit 0; fi
-_OPEN=$(gh pr list --repo "$_UP_REPO" --head <branch-name> --state open --json number -q '.[].number' 2>/dev/null) || { echo "UPSTREAM_PR: lookup failed - STOP"; exit 1; }
-if [ -z "$_OPEN" ]; then echo "UPSTREAM_PR: new $_UP_REPO"; else echo "UPSTREAM_PR: open $(printf '%s\n' "$_OPEN" | tr '\n' ' ')$_UP_REPO"; fi
+_ghrepo() {
+  _u=$(printf '%s' "$_u" | tr 'A-Z' 'a-z'); _a=0
+  case "$_u" in (ssh://*|git+ssh://*|ssh+git://*) _a=1; _u=${_u#*://} ;; (*://*) _u=${_u#*://} ;; (*:*) _a=1; _u=${_u%%:*}/${_u#*:} ;; (*) return 1 ;; esac
+  _h=${_u%%/*}; _h=${_h##*@}; _h=${_h%%:*}; _u=${_u#*/}; _u=${_u#/}; _u=${_u%/}; _u=${_u%.git}
+  case "$_h" in (github.com|*.github.com) ;; (*) [ "$_a" = 1 ] || return 1; case "$(ssh -G "$_h" 2>/dev/null | sed -n 's/^hostname //p')" in (github.com|*.github.com) ;; (*) return 1 ;; esac ;; esac
+  case "$_u" in (*/*/*|*[!a-z0-9._/-]*) return 1 ;; (?*/?*) printf '%s\n' "$_u" ;; (*) return 1 ;; esac
+}
+_u=$(git remote get-url --push origin 2>/dev/null); _FORK=$(_ghrepo) || { echo "UPSTREAM_PR: none"; exit 0; }
+_UP=$(gh repo view "$_FORK" --json nameWithOwner,parent -q '.nameWithOwner + " " + (if .parent then .parent.owner.login + "/" + .parent.name else "" end)' 2>/dev/null | tr 'A-Z' 'a-z') && [ -n "$_UP" ] || { echo "UPSTREAM_PR: lookup failed - STOP"; exit 1; }
+_SEEN=" $_FORK ${_UP%% *} "; _UP=${_UP#* }; _NEW=$_UP; _OPEN=""
+for _R in $(git remote); do [ "$_R" = origin ] || _UP="$_UP $(_u=$(git remote get-url "$_R" 2>/dev/null); _ghrepo)"; done
+for _C in $(printf '%s\n' $_UP); do
+  case "$_SEEN" in (*" $_C "*) continue ;; esac; _SEEN="$_SEEN$_C "
+  _N=$(gh pr list --repo "$_C" --head <branch-name> --state open --json number -q '.[].number' 2>/dev/null) || { echo "UPSTREAM_PR: lookup failed - STOP"; exit 1; }
+  [ -z "$_N" ] || _OPEN="$_OPEN$(printf '%s\n' "$_N" | tr '\n' ' ')$_C "
+done
+if [ -n "$_OPEN" ]; then echo "UPSTREAM_PR: open ${_OPEN% }"; elif [ -n "$_NEW" ]; then echo "UPSTREAM_PR: new $_NEW"; else echo "UPSTREAM_PR: none"; fi
 ```
 
 - `none`: continue below.
@@ -1129,7 +1142,8 @@ if [ -z "$_OPEN" ]; then echo "UPSTREAM_PR: new $_UP_REPO"; else echo "UPSTREAM_
   `~/.claude/skills/gstack/bin/gstack-pr-watch poll --pr <number> --repo <repo>`
   must exit 0 before the owner pushes, then `/pr-prep body` refreshes the
   description. Then Step 20.
-- `lookup failed`: STOP; an unknown PR state never means no PR.
+- `lookup failed`: STOP; an unknown PR state never means no PR. Origin is on
+  GitHub and gh could not answer: repair gh's login or network, then rerun.
 
 **Credential pre-push guard — run before the push:**
 
