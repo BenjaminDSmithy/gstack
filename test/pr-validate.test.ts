@@ -1020,23 +1020,31 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(readStateFor(f.dir, pr)).toBeNull();
   });
 
-  test('the dirty-tree refusal names a renamed file once, by its new path, whether the rename is staged or only in the worktree', async () => {
+  test('the dirty-tree refusal names a renamed or copied file once, by its new path, whether the rename is staged or only in the worktree', async () => {
     // `git status -z` writes a rename as `XY <new>\0<old>\0`: X is R for a staged rename (git mv), Y is R
-    // for a worktree one (git add -N on the new name). The source is no entry of its own.
-    const renames: GitRunner = (args, o) => defaultGit(args, { ...o, env: { ...process.env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'status.renames', GIT_CONFIG_VALUE_0: 'true' } });
-    const cases: [string, (tree: string) => void][] = [
-      ['staged', tree => git(tree, 'mv', 'lib/y.ts', 'lib/w.ts')],
-      ['worktree', tree => {
+    // for a worktree one (git add -N on the new name), or C for a worktree copy under
+    // status.renames=copies. The source is no entry of its own; a copy's source that changed too is.
+    const pinned = (value: string): GitRunner => (args, o) => defaultGit(args, { ...o, env: { ...process.env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'status.renames', GIT_CONFIG_VALUE_0: value } });
+    const cases: [string, string, (tree: string) => void, string][] = [
+      ['staged', 'true', tree => git(tree, 'mv', 'lib/y.ts', 'lib/w.ts'), 'lib/w.ts'],
+      ['worktree', 'true', tree => {
         fs.renameSync(path.join(tree, 'lib/y.ts'), path.join(tree, 'lib/w.ts'));
         git(tree, 'add', '-N', 'lib/w.ts');
-      }],
+      }, 'lib/w.ts'],
+      // Raw: ` C lib/w.ts\0lib/y.ts\0 M lib/y.ts\0`.
+      ['worktree copy', 'copies', tree => {
+        fs.copyFileSync(path.join(tree, 'lib/y.ts'), path.join(tree, 'lib/w.ts'));
+        git(tree, 'add', '-N', 'lib/w.ts');
+        write(tree, 'lib/y.ts', 'export const y = 3;\n');
+      }, 'lib/w.ts, lib/y.ts'],
     ];
-    for (const [label, rename] of cases) {
-      const f = fixture(`dirty-rename-${label}`, null, { deps: { git: renames } });
-      rename(f.tree);
+    for (const [label, renames, act, names] of cases) {
+      const f = fixture(`dirty-rename-${label.replace(/\W/g, '-')}`, null, { deps: { git: pinned(renames) } });
+      act(f.tree);
       expect(await f.call(['run']), label).toBe(30);
       expect(f.out, label).toHaveLength(1);
-      expect(f.out[0], label).toMatch(/^RESULT PRECONDITION .* has uncommitted changes \(lib\/w\.ts\); /);
+      expect(f.out[0], label).toStartWith('RESULT PRECONDITION ');
+      expect(f.out[0], label).toContain(` has uncommitted changes (${names}); `);
       expect(readStateFor(f.dir, pr), label).toBeNull();
     }
   });
