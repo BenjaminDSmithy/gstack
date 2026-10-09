@@ -878,6 +878,44 @@ describe('run, select and declare against a fixture PR tree', () => {
     expect(committed.f.out.find(l => l.startsWith('tree changed during the run'))).toMatch(/HEAD moved from \w{12} to \w{12}/);
   });
 
+  test('the tree changes while the preconditions run: a commit or an edit is red; their own build output is not', async () => {
+    const BUILT = 'lib/diagram-render/dist/BUILD_INFO.json';
+    const runWith = async (name: string, at: string, act: (tree: string) => void) => {
+      let tree = '';
+      const rec = recorder(() => tree, {
+        onCall: l => {
+          if (l === 'bun run build:gates') write(tree, BUILT, '{"at":2}\n');
+          if (l === at) act(tree);
+        },
+      });
+      const f = fixture(name, "test('x', () => expect(y).toBe(2));", { base: { ...CI_TREE, [BUILT]: '{"at":1}\n' }, deps: { tool: rec.tool } });
+      tree = f.tree;
+      return { f, rc: await f.call(['run']) };
+    };
+    const commit = (tree: string) => {
+      write(tree, 'docs/later.md', 'later\n');
+      git(tree, 'add', 'docs/later.md');
+      git(tree, 'commit', '-q', '-m', 'later');
+    };
+    // A commit while build:cso runs: the tests would run the new HEAD, the verdict would name the old.
+    const late = await runWith('pre-commit-late', 'bun run build:cso', commit);
+    expect(late.rc).toBe(1);
+    expect(late.f.out.find(l => l.startsWith('tree changed during the preconditions'))).toMatch(/HEAD moved from \w{12} to \w{12}/);
+    expect(readStateFor(late.f.dir, pr)!.validation).toMatchObject({ worst: 1 });
+    // A commit during bun install leaves the gen:skill-docs drift check a clean tree; HEAD still moved.
+    const early = await runWith('pre-commit-early', 'bun install --frozen-lockfile', commit);
+    expect(early.rc).toBe(1);
+    expect(early.f.out.some(l => l.startsWith('tree changed during the preconditions: HEAD moved'))).toBe(true);
+    // An uncommitted edit after the drift check, while vendor:xterm runs.
+    const edited = await runWith('pre-edit', 'bun run vendor:xterm', tree => write(tree, 'lib/y.ts', 'export const y = 3;\n'));
+    expect(edited.rc).toBe(1);
+    expect(edited.f.out.find(l => l.startsWith('tree changed during the preconditions'))).toContain('lib/y.ts');
+    // build:gates rewrote its own tracked output in every run above; alone it stays green.
+    const quiet = await runWith('pre-quiet', '', () => {});
+    expect(quiet.rc).toBe(0);
+    expect(quiet.f.out.some(l => l.startsWith('tree changed'))).toBe(false);
+  });
+
   test('a secret scan whose diff failed is red and never scans an empty diff', async () => {
     let tree = '';
     const rec = recorder(() => tree);
