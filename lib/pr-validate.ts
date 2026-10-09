@@ -73,8 +73,9 @@ committed test.only fails) and TMPDIR is a real path; git reads CI's
 global config (identity, init.defaultBranch main, safe.directory)
 instead of yours.
 Records the verdict for the exact commit in the PR state; red if HEAD
-moves off that commit, or a tracked file changes while the preconditions
-(bar their own build outputs) or the tests run.
+moves off that commit, a tracked file changes while the preconditions
+(bar their own build outputs) or the tests run, or an untracked file
+appears while the preconditions run.
 
   run       preconditions + selection + per-file runs + mirrors
             (typecheck, typecheck:test, the added-line secret scan,
@@ -881,6 +882,20 @@ function movedFiles(a: { files: Map<string, string> }, b: { files: Map<string, s
   return [...new Set([...a.files.keys(), ...b.files.keys()])].filter(f => a.files.get(f) !== b.files.get(f));
 }
 
+/** What `git status` lists against HEAD, one entry per path: tracked changes and untracked files (ignored files never appear). */
+function statusEntries(c: Ctx): { path: string; untracked: boolean }[] {
+  const parts = gitOk(c.d, c.tree, ['status', '--porcelain', '-z', '--untracked-files=all'], 'git status').split('\0');
+  const entries: { path: string; untracked: boolean }[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const e = parts[i];
+    if (e.length < 4) continue;
+    entries.push({ path: e.slice(3), untracked: e.startsWith('??') });
+    // A staged rename or copy names its source in the next field.
+    if (/^[RC]/.test(e)) i++;
+  }
+  return entries;
+}
+
 function freshState(pr: PrInfo): PrState {
   return {
     v: 1, topic: topicFor(pr.headRef), repo: pr.repo, number: pr.number, headRef: pr.headRef, headOwner: pr.headOwner,
@@ -954,10 +969,13 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
       return {};
     }
   })();
+  // Paths the drift check already reported: red there, not a change made alongside the preconditions.
+  const drifted = new Set<string>();
   if (pkg.scripts?.['gen:skill-docs']) {
     const g = tool('bun', ['run', 'gen:skill-docs', '--host', 'all'], 900_000);
-    const diff = gitOk(d, c.tree, ['status', '--porcelain', '--untracked-files=all'], 'git status').split('\n').filter(Boolean);
-    line(`precondition gen-skill-docs-all rc=${g.status} drift=${diff.length}${diff.length ? ` (${diff.slice(0, 5).map(l => l.slice(3)).join(', ')})` : ''}`, g.status !== 0 || diff.length > 0);
+    const diff = statusEntries(c).map(e => e.path);
+    line(`precondition gen-skill-docs-all rc=${g.status} drift=${diff.length}${diff.length ? ` (${diff.slice(0, 5).join(', ')})` : ''}`, g.status !== 0 || diff.length > 0);
+    diff.forEach(f => drifted.add(f));
     // The drift check judged everything up to here but a commit.
     settled = treeState(c);
   }
@@ -979,12 +997,17 @@ function runIn(c: Ctx, sha: string, outDir: string, tmp: string, sysTmp: string)
   const testEnv: NodeJS.ProcessEnv = gates ? { ...env, GSTACK_EXPECT_BINARIES: '1' } : env;
   // The verdict names `sha`. A commit made while the preconditions ran, or
   // an edit to anything but their own build outputs, is what the tests
-  // would run instead.
+  // would run instead. `git status` also shows an untracked file a test
+  // could import (cmdRun refuses one for that reason) and an edit made
+  // before the first fingerprint; their ignored build outputs never show.
   const before = treeState(c);
   if (before.head !== sha) line(`tree changed during the preconditions: HEAD moved from ${sha.slice(0, 12)} to ${before.head.slice(0, 12)}; the verdict cannot name either`, true);
   else {
-    const moved = movedFiles(settled, before).filter(f => !REBUILT_RE.test(f));
+    const status = statusEntries(c).filter(e => !REBUILT_RE.test(e.path) && !drifted.has(e.path));
+    const moved = [...new Set([...movedFiles(settled, before), ...status.filter(e => !e.untracked).map(e => e.path)])].filter(f => !REBUILT_RE.test(f));
+    const gained = status.filter(e => e.untracked).map(e => e.path);
     if (moved.length) line(`tree changed during the preconditions: tracked files ${moved.slice(0, 5).join(', ')} differ from ${sha.slice(0, 12)}, which is not what the tests would run`, true);
+    if (gained.length) line(`tree changed during the preconditions: untracked files ${gained.slice(0, 5).join(', ')} appeared, which ${sha.slice(0, 12)} does not hold and the tests could use`, true);
   }
 
   for (const f of sel.missingDeclared) line(`declared ${f} RED: not a free test file in this tree`, true);
