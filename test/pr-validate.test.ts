@@ -39,9 +39,12 @@ describe('validationEnv', () => {
       PATH: '/usr/bin', HOME: '/h', CLAUDECODE: '1', AI_AGENT: 'claude', CLAUDE_CODE_X: 'y', GSTACK_SKIP_RENDER_HOOK: '1',
       EVALS: '1', EVALS_ALL: '1', GH_TOKEN: 't', GITHUB_TOKEN: 't', ANTHROPIC_API_KEY: 'k', OPENAI_API_KEY: 'k',
       GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'a.b', GIT_CONFIG_VALUE_0: 'c', GIT_CONFIG_PARAMETERS: "'x.y=z'", GIT_CONFIG_GLOBAL: '/dev/null',
+      GSTACK_EXPECT_BINARIES: '1',
     }, '/real/tmp', 'abc', '/state/ci.gitconfig');
     for (const gone of ['CLAUDECODE', 'AI_AGENT', 'CLAUDE_CODE_X', 'GSTACK_SKIP_RENDER_HOOK', 'EVALS', 'EVALS_ALL', 'GH_TOKEN', 'GITHUB_TOKEN', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY',
-      'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_PARAMETERS']) {
+      'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_PARAMETERS',
+      // CI sets it on the free-suite step; validate arms it itself, and only for the tests after build:gates.
+      'GSTACK_EXPECT_BINARIES']) {
       expect(env[gone], gone).toBeUndefined();
     }
     expect(env).toMatchObject({ PATH: '/usr/bin', HOME: '/h', TMPDIR: '/real/tmp/', GSTACK_FREE_SEED_BASE: 'abc', GIT_CONFIG_GLOBAL: '/state/ci.gitconfig', CI: 'true' });
