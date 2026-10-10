@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+
 /** Existing PTY shutdown grace, also bounds waiting for exit/reader completion. */
 export const PTY_SHUTDOWN_GRACE_MS = 3000;
 
@@ -98,13 +100,45 @@ export type PtyLifecycle = ReturnType<typeof createPtyLifecycle>;
 
 type PtySpawn = (argv: string[], options: Record<string, any>) => any;
 
-/** Spawn a child on a Bun.Terminal. `spawn` is injectable for tests. */
+/** Waits for one line on fd 3, then execs the real argv without fd 3. */
+const PTY_SPAWN_GATE = 'IFS= read -r _ <&3; exec -- "$@" 3<&-';
+
+/**
+ * Spawn a child on a Bun.Terminal. `spawn` is injectable for tests.
+ *
+ * macOS: a PTY child that writes output and exits while Bun.spawn() is still
+ * running wedges the spawning thread for good. XNU makes the exiting child
+ * unfindable before it is reapable, and holds it in ttywait() until the PTY
+ * master drains. Bun (measured on 1.3.13 and 1.4.2) answers the failed kqueue
+ * watch (ESRCH) with a blocking wait4() on the very thread whose event loop
+ * would drain the master. Signal handlers never run again; only SIGKILL frees
+ * it. Hold the child in /bin/sh until spawn has returned, then release it.
+ * Bun bug: oven-sh/bun#42171, fix pending in oven-sh/bun#41732; drop the gate
+ * once the minimum Bun includes that fix.
+ */
 export function spawnPty(
   argv: string[],
   options: Record<string, any>,
   spawn: PtySpawn = (cmd, opts) => (Bun as any).spawn(cmd, { windowsHide: true, ...opts }),
+  platform: string = process.platform,
 ): any {
-  return spawn(argv, options);
+  if (platform !== 'darwin') return spawn(argv, options);
+  const proc = spawn(['/bin/sh', '-c', PTY_SPAWN_GATE, 'sh', ...argv], {
+    ...options,
+    stdio: ['inherit', 'inherit', 'inherit', 'pipe'],
+  });
+  // Reading .stdio hands the parent end of a 'pipe' fd to the caller (Bun
+  // >= 1.4.2, Subprocess.stdio): Bun never closes it, so close it here.
+  const gate = proc.stdio?.[3];
+  try {
+    fs.writeSync(gate, '\n');
+  } catch {
+    // A child that is never released would wait in the gate for good.
+    try { proc.kill('SIGKILL'); } catch {}
+  } finally {
+    if (typeof gate === 'number') { try { fs.closeSync(gate); } catch {} }
+  }
+  return proc;
 }
 
 interface OwnedPtyProcess {
