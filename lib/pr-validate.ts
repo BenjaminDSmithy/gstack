@@ -142,7 +142,11 @@ of a staged sync on stderr before executing it).`;
 // Agent markers (bun 1.4 switches to agent-mode output on CLAUDECODE, AGENT
 // and REPL_ID, which breaks nested-runner tests), the render hook and eval
 // knobs.
-const STRIP_RE = /^(CLAUDECODE|AI_AGENT|AGENT|REPL_ID|CLAUDE[A-Z0-9_]*|GSTACK_SKIP_RENDER_HOOK|EVALS[A-Z0-9_]*)$/;
+// GSTACK_EXPECT_BINARIES is a step setting, not ambient state: CI sets it on the
+// free-suite step only. A caller that holds it (a validate run inside the free
+// suite) must not pass it to the precondition builds, or to tests after a tree
+// with no build:gates; the test step arms it itself.
+const STRIP_RE = /^(CLAUDECODE|AI_AGENT|AGENT|REPL_ID|CLAUDE[A-Z0-9_]*|GSTACK_SKIP_RENDER_HOOK|GSTACK_EXPECT_BINARIES|EVALS[A-Z0-9_]*)$/;
 // CI's free lane is secretless: any name with a credential-shaped segment
 // goes, the same segment rule as test/helpers/hermetic-env.ts
 // (GITHUB_TOKEN_1, GH_PAT, AWS_SESSION_TOKEN, SSH_AUTH_SOCK), never a
