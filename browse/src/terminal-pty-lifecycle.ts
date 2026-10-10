@@ -96,6 +96,17 @@ export function createPtyLifecycle(options: PtyLifecycleOptions) {
 
 export type PtyLifecycle = ReturnType<typeof createPtyLifecycle>;
 
+type PtySpawn = (argv: string[], options: Record<string, any>) => any;
+
+/** Spawn a child on a Bun.Terminal. `spawn` is injectable for tests. */
+export function spawnPty(
+  argv: string[],
+  options: Record<string, any>,
+  spawn: PtySpawn = (cmd, opts) => (Bun as any).spawn(cmd, { windowsHide: true, ...opts }),
+): any {
+  return spawn(argv, options);
+}
+
 interface OwnedPtyProcess {
   pid: number;
   exitCode: number | null;

@@ -31,7 +31,7 @@ import { findAvailablePort } from './port-allocator';
 import { extractPtyCookie } from './pty-session-cookie';
 import { allowedExtensionOrigin } from './extension-id';
 import {
-  createPtyLifecycle, disposePtyProcess, ptyCompletionReason,
+  createPtyLifecycle, disposePtyProcess, ptyCompletionReason, spawnPty,
   type PtyCompletion, type PtyLifecycle,
 } from './terminal-pty-lifecycle';
 
@@ -348,7 +348,7 @@ function spawnClaude(cols: number, rows: number, lifecycle: PtyLifecycle) {
   const stateDir = path.dirname(STATE_FILE);
   const tabHint = buildTabAwarenessHint(stateDir);
 
-  const proc = (Bun as any).spawn([claudePath, '--append-system-prompt', tabHint], {
+  const proc = spawnPty([claudePath, '--append-system-prompt', tabHint], {
     windowsHide: true,
     terminal: {
       rows,
