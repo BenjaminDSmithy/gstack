@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.91.102.0] - 2026-10-15
+
+**Auto-update no longer runs setup over a half-merged install.** A local edit that conflicts with the next release is kept in a stash, and the install lands clean.
+
+Team mode's auto-updater fast-forwards your install with `git merge --ff-only --autostash`, so local edits to tracked files ride over each release. When one of those edits conflicts with the release, git (2.56 here) still exits 0, writes conflict markers into the checkout Claude Code runs hooks from, and keeps the edit in a stash entry. The updater only looked for that case on a non-zero exit, so it logged `UPDATED` and ran setup over the markers. Now it reads the merge's unmerged files instead of its exit code, puts the release back, and keeps your edit.
+
+### What this means for you
+
+- **A conflicting local edit no longer breaks the install.** The checkout is reset to the release the hook check passed, setup runs, and the log names where your edit is: `AUTOSTASH_CONFLICT_RECOVERED tree_reset=1 kept_stash=<id> kept_ref=<ref>`. Read it with `git -C ~/.claude/skills/gstack stash show -p <id>`.
+- **Your own stashes are never dropped.** `refs/stash` is shared by every worktree of a repository, so the updater keeps git's own autostash and touches no other entry. When `refs/stash.lock` keeps git from storing it, the edit is kept under `refs/gstack-autostash/<UTC time>`.
+- **An update it cannot recover stops instead of guessing.** If git does not name the autostash, or the index cannot be read, nothing is reset: the markers stay for you to resolve, the run logs `PULL_FAILED`, and setup runs at the next check once you have resolved them.
+- **Conflicts you left in the install hold the update.** Unmerged files from your own merge, rebase or stash pop keep the checkout where it is (`PULL_FAILED` "unmerged files ..."), so the update never buries them.
+- **git 2.27 to 2.30 work too.** The merge pins `core.abbrev=40`; the value `no` is only accepted from git 2.31.
+
+### For contributors
+
+- `test/session-update-autostash.test.ts` adds a 10-case block, "a conflicting autostash pop", with a small `shim(fx, name, tool, body)` helper for a git whose merge prints nothing, an index read that fails, and a `mktemp` that fails. 8 of the 10 fail against the v1.91.101.0 updater; the unmerged-files guard and the non-conflicting control pass on both.
+
 ## [1.91.101.0] - 2026-10-13
 
 **The field wave's residual gaps are closed.** v1.91.96.0 through v1.91.100.0 shipped the install-honesty and unattended-`/autoplan` wave (`docs/designs/GSTACK_FIELD_WAVE_2026_10_12.md`); running that release on a Capy machine left six gaps, each reproduced here with a test that failed first.
