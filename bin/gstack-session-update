@@ -138,19 +138,16 @@ hook_hold_path() {
 # autostash_recover — after `merge --autostash` popped local edits onto
 # $INCOMING with conflicts (git 2.56 still exits 0 for that), put $INCOMING
 # back and KEEP the edits. Never `stash drop`: refs/stash is shared with every
-# worktree, and its top entry may not be the autostash. The id is git's own
-# ("cannot store <id>" when refs/stash.lock is held, else "Created autostash:
-# <id>"); a moved refs/stash is only the fallback. An id that is not a stash
-# entry is anchored under refs/gstack-autostash/. Prints "<id> <ref>"; returns
-# 1, resetting nothing, when the autostash commit cannot be found or anchored.
+# worktree, and its top entry may not be the autostash. Only git's own id
+# counts ("cannot store <id>" when refs/stash.lock is held, else "Created
+# autostash: <id>"): a moved refs/stash may be a sibling worktree's stash, and
+# resetting on its word would erase edits nothing holds. An id that is not a
+# stash entry is anchored under refs/gstack-autostash/. Prints "<id> <ref>";
+# returns 1, resetting nothing, when the id is missing or cannot be anchored.
 autostash_recover() {
   [ "$(git -C "$GSTACK_DIR" rev-parse HEAD 2>/dev/null)" = "$INCOMING" ] || return 1
-  _as=$(sed -n 's/^error: cannot store \([0-9a-f]\{4,\}\).*/\1/p' "${PULL_ERR_FILE:-/dev/null}" 2>/dev/null | head -1)
-  [ -n "$_as" ] || _as=$(sed -n 's/^Created autostash: \([0-9a-f]\{4,\}\).*/\1/p' "${MERGE_OUT:-/dev/null}" 2>/dev/null | head -1)
-  if [ -z "$_as" ]; then
-    _as=$(git -C "$GSTACK_DIR" rev-parse -q --verify refs/stash 2>/dev/null)
-    [ "$_as" != "$STASH_BEFORE" ] || _as=""
-  fi
+  _as=$(sed -n 's/^error: cannot store \([0-9a-f]\{4,\}\).*/\1/p' "$PULL_ERR_FILE" 2>/dev/null | head -1)
+  [ -n "$_as" ] || _as=$(sed -n 's/^Created autostash: \([0-9a-f]\{4,\}\).*/\1/p' "$MERGE_OUT" 2>/dev/null | head -1)
   [ -n "$_as" ] || return 1
   _as=$(git -C "$GSTACK_DIR" rev-parse -q --verify "$_as^{commit}" 2>/dev/null) || return 1
   _as_ref=refs/stash
@@ -320,22 +317,33 @@ fi
   if [ "$PULL_EXIT" -eq 0 ] && [ -z "$HELD" ] && [ "$INCOMING" != "$OLD_HEAD" ]; then
     HELD=$(hook_incoming_hold "$INCOMING") || HELD=""
   fi
+  if [ "$PULL_EXIT" -eq 0 ] && [ -z "$HELD" ] && [ -z "$PULL_ERR_FILE" ] && [ "$INCOMING" != "$OLD_HEAD" ]; then
+    # Recovering a conflicting autostash needs git's own messages; without a
+    # file to keep them in, hold rather than merge blind.
+    HELD="temp-file-unavailable: cannot create a temp file under ${TMPDIR:-/tmp}"
+  fi
   if [ "$PULL_EXIT" -eq 0 ] && [ -z "$HELD" ]; then
-    if [ -n "$(git -C "$GSTACK_DIR" ls-files -u 2>/dev/null | head -1)" ]; then
+    # An index that cannot be read is never "no conflicts".
+    if ! _UNMERGED=$(git -C "$GSTACK_DIR" ls-files -u 2>/dev/null); then
+      echo "cannot read the index of $GSTACK_DIR; nothing was moved" > "${PULL_ERR_FILE:-/dev/null}"
+      PULL_EXIT=1
+    elif [ -n "$_UNMERGED" ]; then
       # Someone's own merge, rebase or stash pop left conflicts here. Moving
       # the checkout would bury them, and the recovery below would take them
       # for its own and reset them away.
       echo "unmerged files in $GSTACK_DIR; resolve or reset them, then gstack retries" > "${PULL_ERR_FILE:-/dev/null}"
       PULL_EXIT=1
     else
-      STASH_BEFORE=$(git -C "$GSTACK_DIR" rev-parse -q --verify refs/stash 2>/dev/null)
       MERGE_OUT="${PULL_ERR_FILE:+$PULL_ERR_FILE.out}"
       # The C locale and core.abbrev=40 (not "no", which git before 2.31
       # rejects) fix the wording and length of the autostash id git prints.
       LC_ALL=C git -C "$GSTACK_DIR" -c core.abbrev=40 merge --ff-only --autostash -q "$INCOMING" >"${MERGE_OUT:-/dev/null}" 2>"${PULL_ERR_FILE:-/dev/null}"
       PULL_EXIT=$?
       # A conflicting pop is judged by its unmerged files, whatever the exit.
-      if [ -n "$(git -C "$GSTACK_DIR" ls-files -u 2>/dev/null | head -1)" ]; then
+      if ! _UNMERGED=$(git -C "$GSTACK_DIR" ls-files -u 2>/dev/null); then
+        echo "cannot read the index of $GSTACK_DIR after the update; conflict markers may be left for you to resolve" > "${PULL_ERR_FILE:-/dev/null}"
+        PULL_EXIT=1
+      elif [ -n "$_UNMERGED" ]; then
         if KEPT=$(autostash_recover); then
           log_entry "AUTOSTASH_CONFLICT_RECOVERED tree_reset=1 kept_stash=${KEPT% *} kept_ref=${KEPT#* }"
           PULL_EXIT=0
@@ -371,6 +379,14 @@ fi
     PULL_REASON=$(head -c 300 "$PULL_ERR_FILE" 2>/dev/null | tr '\n' ' ' | tr -s ' ')
     log_entry "PULL_FAILED exit=$PULL_EXIT reason=${PULL_REASON:-unknown}"
     P_PULL="exit $PULL_EXIT: $(printf '%s' "${PULL_REASON:-no error output}" | head -c 160)"
+    if [ -n "$NEW_HEAD" ] && [ "$NEW_HEAD" != "$OLD_HEAD" ]; then
+      # The checkout moved but setup did not run. Owe it, or once the person
+      # resolves the conflict the next check sees nothing new and never sets
+      # up this revision. The unmerged-files check holds it until then.
+      [ -n "$P_FROM" ] || P_FROM=$(git -C "$GSTACK_DIR" show "$OLD_HEAD:VERSION" 2>/dev/null || echo "unknown")
+      P_STAGES="${P_STAGES:-setup}" P_NEXT=0 P_REASON="$P_PULL"
+      log_entry "PENDING stages=$P_STAGES after a moved checkout"
+    fi
     pending_save
     rm -f "$PULL_ERR_FILE" 2>/dev/null
     exit 0
