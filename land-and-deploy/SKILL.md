@@ -707,8 +707,8 @@ Poll in 4-minute rounds (300 s shell timeout), 15 minutes max; record the wait:
 ```
 
 Other verdicts follow Step 2. PENDING at 15 minutes: list the still-pending checks;
-ask A) wait 15 more minutes, B) exclude named `required=n` checks (Step 3.5
-approves each), or C) stop.
+ask with AskUserQuestion: A) wait 15 more minutes, B) exclude named `required=n`
+checks (Step 3.5 approves each), or C) stop, the recommended one first.
 
 ---
 
@@ -824,13 +824,14 @@ If deploy fails/cancels: record `DEPLOY_STATUS=FAILED`, then use AskUserQuestion
 - C) Continue to health checks anyway — the deploy failure might be a flaky step, and the site might actually be fine
 
 **A:** Read `gh run view <run-id> --repo "$REPO" --log-failed` (or configured platform
-logs), summarize the cause and evidence limits, then ask: revert (Step 8), inspect
-health (Step 7), or finish unverified (Step 9). No automatic code edits or redeploy.
+logs), summarize the cause and evidence limits, then ask with AskUserQuestion: revert
+(Step 8), inspect health (Step 7), or finish unverified (Step 9), the recommended one first. No automatic code edits or redeploy.
 **B:** Step 8. **C:** Step 7 if a URL exists, otherwise Step 5's URL question. A passing
 canary never erases FAILED deployment evidence.
 
-At 20 minutes (including waiting for a run to appear), ask: **A)** wait another bounded
-20 minutes, **B)** finish without verification. A resets only the wait deadline and
+At 20 minutes (including waiting for a run to appear), ask with AskUserQuestion:
+**A)** wait another bounded 20 minutes, **B)** finish without verification, the
+recommended one first. A resets only the wait deadline and
 resumes the same lookup/poll; B records pending/unknown deployment and goes to Step 9.
 Status-query failure is unknown: show the error and offer the same bounded wait or
 finish choices, not a fabricated success. During rollback monitoring, failure offers

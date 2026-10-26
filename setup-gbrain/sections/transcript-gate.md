@@ -39,7 +39,7 @@ bun run ~/.claude/skills/gstack/bin/gstack-memory-ingest.ts --probe --sources tr
 ```
 Read `Total files in window`, `Total bytes` and the estimate from each.
 
-**No transcripts found** (both probes report 0): ask yes/no instead:
+**No transcripts found** (both probes report 0): ask yes/no with AskUserQuestion instead:
 
 > "Ingest coding-agent sessions as they appear?"
 
@@ -76,7 +76,7 @@ Options:
 - C) Yes, only new sessions starting now (`new`)
 - E) No, never ingest transcripts (`off`)
 
-On any yes, ask a second, separate question: "Which repos' sessions?"
+On any yes, ask a second, separate question with AskUserQuestion: "Which repos' sessions?"
 A) every project repo your repo policy allows, or B) only this repo (offer
 B only when `git remote get-url origin` succeeds here). Store nothing until
 both answers are known; if the user cancels in between, store nothing.

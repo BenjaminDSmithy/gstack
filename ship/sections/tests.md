@@ -65,7 +65,7 @@ Absent config files and absent `tests/` directories are NOT evidence of "no test
 
 **If NO ecosystem marker matched:** Use AskUserQuestion:
 "I couldn't detect your project's language. What runtime are you using?"
-Options: A) Node.js/TypeScript B) Ruby/Rails C) Python D) Go E) Rust F) PHP G) Elixir H) This project doesn't need tests.
+The answers are A) Node.js/TypeScript B) Ruby/Rails C) Python D) Go E) Rust F) PHP G) Elixir H) This project doesn't need tests. That is more than one call's 4 options, so batch them and drop none: ask A, B, C and "Another runtime, or no tests"; on that, ask D, E, "PHP or Elixir" and H; on "PHP or Elixir", ask F or G.
 If the runtime you need isn't listed, offer "Other" and take the runtime plus the test command as free text.
 If user picks H → write `.gstack/no-test-bootstrap` and continue without tests.
 

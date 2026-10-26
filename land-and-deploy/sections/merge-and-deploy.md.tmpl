@@ -211,19 +211,19 @@ route**. The docs-only no-deploy route can finish immediately; it needs no stagi
    SKIPPED (docs-only), then Step 9 with MERGED — NO DEPLOY NEEDED. Unknown deployment
    detection is not proof that nothing was triggered; use the question below instead.
 4. Otherwise use configured production URL/status checks in Steps 6-7. If neither
-   a usable URL nor deploy status exists, ask once. Also ask when Step 6 finishes
-   without a production URL needed for canary:
+   a usable URL nor deploy status exists, ask once with AskUserQuestion. Also ask
+   when Step 6 finishes without a production URL needed for canary:
    - **Re-ground:** "PR #NNN is merged. {Known deploy state}. I need a URL to check
      health; merge alone does not prove this revision is live."
    - **RECOMMENDATION:** A for a web app; B only when no deployment is required.
-   - A) Provide the production URL → save it, continue to Step 7
+   - A) Provide the production URL (typed through Other) → save it, continue to Step 7
    - B) No deploy needed (library/CLI) → Step 9, MERGED — NO DEPLOY NEEDED
    - C) Finish without verification → Step 9, use the evidence-based verdict table
    Offer B only with no observed or expected deploy; it cannot erase a running/failing deploy.
 
 ### 5a: Optional staging verification, not a deployment gate
 
-For non-doc changes, offer this only when a staging/preview URL and successful
+For non-doc changes, offer this with AskUserQuestion only when a staging/preview URL and successful
 deployment record identify `PR_HEAD` (preview) or `MERGE_SHA` (post-merge staging).
 A URL alone is insufficient. If unavailable, record staging N/A and take the
 production route above. No staging trigger or promotion is executed here.

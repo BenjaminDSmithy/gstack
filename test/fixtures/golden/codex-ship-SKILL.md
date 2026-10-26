@@ -948,12 +948,13 @@ chooses it in item 2 and ALREADY_BUMPED derives it in item 1.
 Read `$GSTACK_ROOT/review/TODOS-format.md`.
 
 **1. Open or create:** Read root `TODOS.md`. An explicit "add TODO" choice authorizes
-creation with `# TODOS` and `## Completed`. Otherwise, if missing, ask: A) Create
-a component/priority-organized TODOS.md, B) Skip. Skip goes to item 5.
+creation with `# TODOS` and `## Completed`. Otherwise, if missing, ask with
+AskUserQuestion: A) Create a component/priority-organized TODOS.md, B) Skip, the
+recommended one first. Skip goes to item 5.
 
 **2. Organization:** Use component headings, `**Priority:**` P0–P4 and `## Completed`
-at the bottom. If disorganized, ask: A) Reorganize preserving all content
-(recommended), B) Leave as-is.
+at the bottom. If disorganized, ask with AskUserQuestion: A) Reorganize preserving
+all content (recommended), B) Leave as-is.
 
 **3. Add approved deferrals:**
 - Step 2: add the approved distribution follow-up as P1 with the missing pipeline and affected artifact.

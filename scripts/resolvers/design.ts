@@ -647,10 +647,10 @@ I'll render the wireframe." Never install either for them.
 
 **Step 4: Present and iterate**
 
-Show the screenshot to the user. Ask: "Does this feel right? Want to iterate on the layout?"
+Show the screenshot to the user, then ask with AskUserQuestion: "Does this feel right? Want to iterate on the layout?" Options: A) Looks right, proceed (recommended), B) Iterate on the layout. The user's feedback comes through Other; on B without feedback, ask what to change the same way, offering the 2-3 likeliest layout changes.
 
-If they want changes, regenerate the HTML with their feedback and re-render.
-If they approve or say "good enough," proceed.
+If they want changes, regenerate the HTML with their feedback, re-render and ask again.
+If they pick A, proceed.
 
 **Step 5: Include in design doc**
 
@@ -1234,7 +1234,7 @@ ${designReadyProbe(ctx)}
 
 **If \`DESIGN_READY\`:** Generate visual mockup explorations for the user.
 
-Generating visual mockups of the proposed design... (say "skip" if you don't need visuals)
+Ask with AskUserQuestion before generating: "Generate visual mockups of the proposed design?" Options: A) Generate mockups (recommended), B) Skip visuals. On B, skip the mockup steps below.
 
 **Step 1: Set up the design directory**
 

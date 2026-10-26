@@ -140,8 +140,10 @@ If NONE of the above: the plan has no developer-facing surface. Tell the user:
 reviews plans for APIs, CLIs, SDKs, libraries, platforms, and docs. Consider
 /plan-eng-review or /plan-design-review instead." Exit gracefully.
 
-If detected: State your classification and ask for confirmation. Do not ask from
-scratch. "I'm reading this as a CLI Tool plan. Correct?"
+If detected: State your classification and ask for confirmation with AskUserQuestion.
+Do not ask from scratch: "I'm reading this as a CLI Tool plan." Offer the detected
+type first, marked (recommended), and up to 3 other plausible types from the list
+above; the user names another through Other.
 
 **STOP. Ask for product-type confirmation before deeper branch research.**
 After the answer, carry the confirmed type into Step 0A; do not treat an
@@ -369,7 +371,7 @@ For each stage (Discover, Install, Hello World, Real Usage, Debug, Upgrade):
 2. **Identify evidenced friction.** E.g., the README requires Docker but neither
    checks for it nor explains installation. Label predicted consequences.
 3. **Run all four Decision gate steps** before options. Ask only for an admitted
-   new or reopened choice, using this menu:
+   new or reopened choice, through step 4's AskUserQuestion, using this menu:
 
    > "Journey Stage: INSTALL
    >

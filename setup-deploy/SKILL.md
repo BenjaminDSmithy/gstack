@@ -407,7 +407,7 @@ After this runs once, `/land-and-deploy` reads CLAUDE.md and skips detection ent
 grep -A 20 "## Deploy Configuration" CLAUDE.md 2>/dev/null || echo "NO_CONFIG"
 ```
 
-If configuration already exists, show it and ask:
+If configuration already exists, show it and ask with AskUserQuestion:
 
 - **Context:** Deploy configuration already exists in CLAUDE.md.
 - **RECOMMENDATION:** Choose A to update if your setup changed.
@@ -517,14 +517,16 @@ If nothing detected:
 
 Use AskUserQuestion to gather the information:
 
-1. **How are deploys triggered?**
+1. **How are deploys triggered?** One call holds 4 options, so batch these and
+   drop none: ask A, B, C and "Manually, or no deploys at all"; on that, ask D or E.
    - A) Automatically on push to the default branch (Fly, Render, Vercel, Netlify, etc.)
    - B) Via GitHub Actions workflow
-   - C) Via a deploy script or CLI command (describe it)
+   - C) Via a deploy script or CLI command (I'll ask for it next)
    - D) Manually (SSH, dashboard, etc.)
    - E) This project doesn't deploy (library, CLI, tool)
 
-2. **What's the production URL?** (Free text — the URL where the app runs)
+2. **What's the production URL?** (Free text — the URL where the app runs; offer
+   any URL found in the repo, the likeliest first, and take the user's through Other)
 
 3. **How can gstack check if a deploy succeeded?**
    - A) HTTP health check at a specific URL (e.g., /health, /api/status)

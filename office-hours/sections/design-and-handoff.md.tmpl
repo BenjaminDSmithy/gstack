@@ -357,9 +357,8 @@ Share 2-3 resources from the pool below. For repeat users, resources compound by
 to accumulated session context, not just this session's category.
 
 **After sharing, close with the standing choice** (one line, not a ceremony):
-
-> Want these? I can open any of them — or say "never show me these again" and
-> this section disappears for good.
+it is option D, "Never show me these again", of the AskUserQuestion in step 3
+below, so this section can disappear for good.
 
 If the user opts out (any clear phrasing of never/stop showing these): run
 `~/.claude/skills/gstack/bin/gstack-config set founder_resources false`, then
@@ -459,16 +458,16 @@ echo '{"skill":"office-hours","event":"resources_shown","count":NUM_RESOURCES,"c
 
 Present the selected resources and ask: "Want me to open any of these in your browser?"
 
-Options:
-- A) Open all of them (I'll check them out later)
-- B) [Title of resource 1] — open just this one
-- C) [Title of resource 2] — open just this one
-- D) [Title of resource 3, if 3 were shown] — open just this one
-- E) Skip — I'll find them later
+Options (one call holds 4, so the per-resource choices are batched behind B, none dropped):
+- A) Open all of them (I'll check them out later) (recommended)
+- B) Open just one — then ask which, one option per resource shown
+- C) Skip — I'll find them later
+- D) Never show me these again
 
 If A: run `open URL1 && open URL2 && open URL3` (opens each in default browser).
-If B/C/D: run `open` on the selected URL only.
-If E: proceed to next-skill recommendations.
+If B: ask which with AskUserQuestion, one option per resource title, then run `open` on the selected URL only.
+If C: proceed to next-skill recommendations.
+If D: opt out as above (write and verify `founder_resources false`), then proceed to next-skill recommendations.
 
 ### Next-skill recommendations — hand the user into the loop
 

@@ -686,11 +686,11 @@ Append it to `$GSTACK_STATE_ROOT/projects/$SLUG/canary-history.jsonl` (the direc
 
 ### Phase 7: Baseline Update
 
-If the deploy is healthy, offer to update the baseline:
+If the deploy is healthy, offer to update the baseline with AskUserQuestion:
 
 - **Context:** Canary monitoring completed. The deploy is healthy.
 - **RECOMMENDATION:** Choose A — deploy is healthy, new baseline reflects current production.
-- A) Update baseline with current screenshots
+- A) Update baseline with current screenshots (recommended)
 - B) Keep old baseline
 
 If the user chooses A, copy the latest screenshots to the baselines directory and update `baseline.json`.

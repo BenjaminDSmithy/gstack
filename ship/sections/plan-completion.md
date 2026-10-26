@@ -224,7 +224,7 @@ The parent evaluates the completion checklist in priority order, including after
    - Any N: STOP and report that item as NOT DONE. Resume only after its required work is verified; no second deferral choice.
    - All Y or D: Continue. Embed `## Plan Completion — Manual Verifications` section in PR body listing each Y'd item with the user's free-text evidence and each D'd item with "intentionally dropped".
 
-   **Cap.** If there are more than 5 UNVERIFIABLE items, present them as a numbered list first and ask whether the user wants to (1) confirm each individually, (2) stop and reduce scope, or (3) explicitly accept blanket-confirmation with the warning that it lets unchecked items pass as verified. Default and recommended option is (1).
+   **Cap.** If there are more than 5 UNVERIFIABLE items, present them as a numbered list first, then ask with AskUserQuestion: (1) confirm each individually (recommended, listed first), (2) stop and reduce scope, or (3) explicitly accept blanket-confirmation with the warning that it lets unchecked items pass as verified. Default and recommended option is (1).
 
 3. **Only PARTIAL items (no NOT DONE, no UNVERIFIABLE):** Continue with a note in the PR body. Not blocking.
 

@@ -560,8 +560,8 @@ bun run ~/.claude/skills/gstack/bin/gstack-memory-ingest.ts --probe --sources tr
 bun run ~/.claude/skills/gstack/bin/gstack-memory-ingest.ts --probe --sources transcript --all-history
 ```
 
-If both report `Total files in window: 0`, ask yes/no: "Ingest coding-agent
-sessions as they appear?" Yes means `recent`, No stores `off`. Otherwise
+If both report `Total files in window: 0`, ask yes/no with AskUserQuestion:
+"Ingest coding-agent sessions as they appear?" Yes means `recent`, No stores `off`. Otherwise
 AskUserQuestion: name both sources (Claude Code and Codex sessions from every
 project on this machine that repo policy allows), the counts from the two
 probes, and the destination: the local brain (`gbrain_engine` from Step 1:
@@ -574,8 +574,8 @@ and skills stay usable meanwhile. Options:
 - C) Yes, only new sessions starting now (`new`)
 - E) No, never ingest transcripts (`off`)
 
-On any yes (the yes/no form included), ask a second, separate question:
-"Which repos' sessions?" A) every project repo your repo policy allows, or
+On any yes (the yes/no form included), ask a second, separate question with
+AskUserQuestion: "Which repos' sessions?" A) every project repo your repo policy allows, or
 B) only this repo (offer B only when `git remote get-url origin` succeeds).
 Store nothing until both answers are known; a cancel in between stores
 nothing. Then store the scope, then the value (never the letter; `new`

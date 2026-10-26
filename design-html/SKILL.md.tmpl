@@ -377,16 +377,17 @@ LOOP:
   2. If an approved mockup PNG exists, show it inline (Read tool) for visual comparison.
      If in plan-driven or freeform mode, skip this step.
 
-  3. AskUserQuestion (adjust wording based on mode):
+  3. AskUserQuestion (adjust wording based on mode), with options A) Done — ship it
+     (recommended) and B) Change something (describe it in Other):
      With mockup: "The HTML is live in your browser. Here's the approved mockup for comparison.
       Try: resize the window (text should reflow dynamically),
       click any text (it's editable, layout recomputes instantly).
-      What needs to change? Say 'done' when satisfied."
+      What needs to change?"
      Without mockup: "The HTML is live in your browser. Try: resize the window
       (text should reflow dynamically), click any text (it's editable, layout
-      recomputes instantly). What needs to change? Say 'done' when satisfied."
+      recomputes instantly). What needs to change?"
 
-  4. If "done" / "ship it" / "looks good" / "perfect" → exit loop, go to Step 5
+  4. If A, or Other says "done" / "ship it" / "looks good" / "perfect" → exit loop, go to Step 5
 
   5. Apply feedback using targeted Edit tool changes on the HTML file
      (do NOT regenerate the entire file — surgical edits only)

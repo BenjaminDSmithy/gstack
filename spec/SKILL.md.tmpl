@@ -83,7 +83,8 @@ confirm: "Flags: dedupe=ON, gate=ON, audit=OFF, execute=auto (plan mode = ...)."
 
 ### Phase 1: Understand the "Why" (+ optional --dedupe)
 
-**Step 1a (always):** Ask until you can crisply answer all five:
+**Step 1a (always):** Ask, through AskUserQuestion as **How to Ask Questions**
+below describes, until you can crisply answer all five:
 
 1. **Who** is affected? (end user role, automated system, internal team, all three?
    "Just me, solo dev" is a fine answer; don't dwell on this for solo cases.)
@@ -138,7 +139,8 @@ The dedupe check is best-effort. Never block Phase 2 on dedupe failure.
 
 ### Phase 2: Scope and Boundaries
 
-Ask until you can answer:
+Ask, through AskUserQuestion as **How to Ask Questions** below describes, until
+you can answer:
 
 1. **What is explicitly out of scope?** Lock this early — it prevents creep later.
 2. **What existing systems does this touch?** Files, tables, services, endpoints.
@@ -181,8 +183,10 @@ Then ask about whichever categories apply (skip ones that clearly don't):
 
 ### Phase 4: Draft Review
 
-Present a full draft issue and ask: **"Does this accurately capture what you want?
-What did I get wrong?"** Iterate until the user confirms.
+Present a full draft issue and ask with AskUserQuestion: **"Does this accurately
+capture what you want? What did I get wrong?"** Options: A) Accurate, continue
+(recommended), B) Needs changes (say what I got wrong in Other). Iterate until
+the user confirms.
 
 ### Phases 4.5 and 5: Quality Gate, then File the Spec (sequencing summary)
 
@@ -201,9 +205,11 @@ gate, file, archive, or spawn from this summary:
 
 ## How to Ask Questions
 
-- **3-5 questions per round, max.** Prioritize highest-ambiguity first.
-- **Number every question.** Don't bury them in paragraphs.
-- **End every message with your questions.** Last thing the user reads.
+- **3-5 questions per round, max.** Prioritize highest-ambiguity first. One
+  AskUserQuestion call holds up to 4; a fifth goes in the next call.
+- **Number every question** in its AskUserQuestion text. Don't bury them in paragraphs.
+- **End every message with your questions.** The AskUserQuestion call is the last
+  thing the user reads.
 - **Call out assumptions explicitly.** "I'm assuming this only affects the admin
   role — is that right?"
 - **Reference specific code when you can.** Don't ask "does this touch the
@@ -212,9 +218,10 @@ gate, file, archive, or spawn from this summary:
 - **Verify current state before proposing changes.** Check the code, cite what you
   found with file paths. Don't assume from memory.
 
-For multiple-choice questions where the user is picking from a known set, use
-`AskUserQuestion`. For open-ended interrogation, ask inline in the chat — the
-user can answer naturally.
+Every question goes through `AskUserQuestion`. For open-ended interrogation,
+offer the 2-3 likeliest answers you can derive from the code and the request
+(recommended first); the user answers naturally, in their own words, through
+Other.
 
 ---
 

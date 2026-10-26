@@ -991,7 +991,7 @@ Before replying to any comment, run the **Escalation Detection** algorithm from 
 
 1. **VALID & ACTIONABLE comments:** Use their Step 5a–5d disposition; do not ask a second fix question. Step 5c alone supplies A) Fix / B) Skip for ASK items. After a completed fix, use the **Fix reply template** with diff and explanation; cite the current diff if uncommitted, never invent a commit SHA. A Skip leaves the defect unresolved and grants no new fix permission. If evidence disproves the finding, reclassify it below.
 
-2. **FALSE POSITIVE comments:** These are reply decisions, not code approval. Show file:line (or [top-level]), summary, permalink and evidence, then ask:
+2. **FALSE POSITIVE comments:** These are reply decisions, not code approval. Show file:line (or [top-level]), summary, permalink and evidence, then ask with AskUserQuestion (the recommended option first):
    - A) Reply explaining why this is incorrect (recommended if clearly wrong)
    - B) Propose a code change
    - C) Ignore — don't reply, don't fix

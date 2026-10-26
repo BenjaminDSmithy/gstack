@@ -614,13 +614,13 @@ If a design doc is now found, read it and continue the review.
 If none was produced (user may have cancelled), proceed with standard review.
 
 **Mid-session detection (0A):** If the user cannot articulate a stable problem, says "I'm not sure"
-or is exploring rather than reviewing, offer `/office-hours`:
+or is exploring rather than reviewing, offer `/office-hours` with AskUserQuestion:
 
 > "It sounds like you're still figuring out what to build — that's totally fine, but
 > that's what /office-hours is designed for. Want to run /office-hours right now?
 > We'll pick up right where we left off."
 
-Options: A) Yes, run /office-hours now. B) No, keep going.
+Options: A) Yes, run /office-hours now (recommended). B) No, keep going.
 If they keep going, proceed normally — no guilt, no re-asking.
 
 If they choose A:

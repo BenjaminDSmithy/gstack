@@ -115,8 +115,6 @@ Explain in plain English: "When I merge, I'll check: has the code been reviewed 
 
 ### 1.5e: Dry-run confirmation
 
-Tell the user: "That's everything I detected. Take a look at the table above — does this match how your project actually deploys?"
-
 Present the full dry-run results to the user via AskUserQuestion:
 
 - **Re-ground:** "First deploy dry-run for [project] on branch [branch]. Above is what I detected about your deploy infrastructure. Nothing has been merged or deployed yet — this is just my understanding of your setup."
@@ -143,7 +141,7 @@ echo "${CURRENT_HASH}-${WORKFLOW_HASH}" > "$GSTACK_STATE_ROOT"/projects/$SLUG/la
 ```
 Continue to Step 2.
 
-**If B:** **STOP.** "Tell me what's different about your setup and I'll adjust. You can also run `/setup-deploy` to walk through the full configuration."
+**If B:** **STOP.** Ask with AskUserQuestion what is different about the setup, offering the 2-3 likeliest mismatches from the validation table (for example the platform, the production URL or the deploy trigger; the likeliest first, marked (recommended)); the user describes anything else through Other. Say that `/setup-deploy` walks through the full configuration.
 
 **If C:** **STOP.** "Running `/setup-deploy` will walk through your deploy platform, production URL, and health checks in detail. It saves everything to CLAUDE.md so I'll know exactly what to do next time. Run `/land-and-deploy` again when that's done."
 

@@ -586,7 +586,9 @@ Parse the user's input to determine which mode to run:
      If no project-scoped match, fall back to: `ls -t "$PLAN_ROOT"/*.md 2>/dev/null | head -1`
      but warn the user: "Note: this plan may be from a different project."
    - If a plan file exists, offer to review it
-   - Otherwise, ask: "What would you like to ask Codex?"
+   - Otherwise, ask with AskUserQuestion: "What would you like to ask Codex?" Offer
+     the 2-3 likeliest questions from this conversation (the likeliest first, marked
+     (recommended)); the user types their own through Other.
 4. `/codex <anything else>` — **Consult mode** (Step 2C), where the remaining text is the prompt
 
 The three modes are MUTUALLY EXCLUSIVE — at most one runs per invocation. Once

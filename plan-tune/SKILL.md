@@ -670,18 +670,20 @@ The user has asked to change a preference, either via the `/plan-tune` menu
 or directly ("stop asking me about test failure triage", "always ask me when
 scope expansion comes up", etc).
 
-1. Identify the `question_id` from the user's words. If ambiguous, ask:
-   "Which question? Here are recent ones: [list top 5 from the log]."
+1. Identify the `question_id` from the user's words. If ambiguous, ask with
+   AskUserQuestion: "Which question?" Offer the 4 most recent from the log (the
+   likeliest match first, marked (recommended)); an older one goes through Other.
 
 2. Normalize the intent to one of:
    - `never-ask` — "stop asking", "unnecessary", "ask less", "auto-decide this"
    - `always-ask` — "ask every time", "don't auto-decide", "I want to decide"
    - `ask-only-for-one-way` — "only on destructive stuff", "only on one-way doors"
 
-3. If the user's phrasing is clear, write directly. If ambiguous, confirm:
-   > "I read '<user's words>' as `<preference>` on `<question-id>`. Apply? [Y/n]"
+3. If the user's phrasing is clear, write directly. If ambiguous, confirm with
+   AskUserQuestion:
+   > "I read '<user's words>' as `<preference>` on `<question-id>`."
 
-   Only proceed after explicit Y.
+   Options: A) Apply it (recommended), B) Don't apply. Only proceed after an explicit A.
 
 4. Write:
    ```bash
@@ -716,9 +718,11 @@ is a trust boundary.
    - Specific number ("set scope to 0.8") → use it directly
 
 2. Confirm via AskUserQuestion:
-   > "Got it — update `declared.<dimension>` from `<old>` to `<new>`? [Y/n]"
+   > "Got it — update `declared.<dimension>` from `<old>` to `<new>`?"
 
-3. After Y, write:
+   Options: A) Update it (recommended), B) Leave it as is.
+
+3. After A, write:
    ```bash
    GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
    _PROFILE="$GSTACK_STATE_ROOT/developer-profile.json"
@@ -978,7 +982,8 @@ For background mode (e.g., the user wants to keep working):
   autonomy 0.4`. The skill interprets plain language; shortcuts exist for
   power users.
 - **Confirm before mutating `declared`.** Agent-interpreted free-form edits are
-  a trust boundary. Always show the intended change and wait for Y.
+  a trust boundary. Always show the intended change and wait for an explicit
+  yes in AskUserQuestion.
 - **User-origin gate on tune: events.** `source: "plan-tune"` is only valid
   when the user invoked this skill directly. For inline `tune:` from other
   skills, the originating skill uses `source: "inline-user"` after verifying

@@ -406,6 +406,10 @@ AskUserQuestion options:
 - D) Revise
 - E) Reject
 
+Six answers exceed one call's 4 options, so batch them and drop none: ask A, B,
+B2 and "Not yet — interrogate, revise or reject"; on that, ask C, D or E. With
+no User Challenges, B2 is omitted.
+
 **Option handling:**
 - A: mark APPROVED, write review logs, suggest /ship
 - B: ask which overrides, apply, then follow D's affected-phase rerun rule (including Eng last) before re-presenting the gate. Counts toward the same 3-cycle cap as D.

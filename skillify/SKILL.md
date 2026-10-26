@@ -409,12 +409,13 @@ match-path /scrape result (matched skills are already codified — there's
 nothing to skillify).
 
 If you find a candidate but the user is currently three turns past it
-discussing something unrelated, ask once before proceeding:
+discussing something unrelated, ask once with AskUserQuestion before proceeding:
 
 > "The last successful /scrape was '<intent line>' a few turns back.
 > Skillify that one?"
 
-A "yes" lets you continue. Anything else: refuse with the message above.
+Options: A) Yes, skillify that one (recommended), B) No. A lets you continue.
+Anything else: refuse with the message above.
 
 ## Step 2 — Propose name + triggers
 
@@ -672,7 +673,7 @@ If the test fails:
 
 ## Step 9 — Approval gate
 
-Tests passed. Now ask the user before committing:
+Tests passed. Now ask the user with AskUserQuestion before committing:
 
 ```
 D<N> — Commit skill "<name>" at <resolved-tier-path>?
@@ -711,7 +712,7 @@ console.log(`Committed: ${dest}`);
 ```
 
 If `commitSkill` throws "already exists" (tier-shadowing collision the
-user dismissed in step 2), report and ask whether to:
+user dismissed in step 2), report and ask with AskUserQuestion whether to:
 
 - Pick a different name (back to step 2)
 - `$B skill rm <name>` then retry

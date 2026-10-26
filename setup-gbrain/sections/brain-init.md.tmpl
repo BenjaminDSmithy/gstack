@@ -145,14 +145,16 @@ LAN, or a teammate's server). No local gbrain CLI install, no local DB.
 This skill registers the remote MCP and stops; ingestion + indexing happens
 on the brain host.
 
-**4a. Collect MCP URL.** Prompt the user:
+**4a. Collect MCP URL.** Ask with AskUserQuestion:
 
 ```
 Paste your gbrain MCP URL (e.g. https://wintermute.tail554574.ts.net:3131/mcp):
 ```
 
-Read with plain `read -r` (no secret hygiene needed — the URL alone isn't
-a credential). Validate it starts with `https://` (require TLS for any
+Offer any gbrain MCP URL already registered or configured on this machine (the
+likeliest first, marked (recommended)) and "Stop here — nothing is registered
+yet"; the user pastes their URL through Other (no secret hygiene needed — the
+URL alone isn't a credential). Validate it starts with `https://` (require TLS for any
 non-loopback host); refuse `http://` for non-localhost.
 
 **4b. Collect bearer token via the secret-read helper (never argv).**
@@ -184,7 +186,7 @@ Capture two values from the verify output for downstream steps:
 - `URL_FORM_SUPPORTED` (`true|false`) — passed to `gstack-artifacts-init` in
   Step 7 to control which form of the brain-admin hookup command is printed.
 
-**4d. (Path 4) Offer local PGLite for code search.** Ask:
+**4d. (Path 4) Offer local PGLite for code search.** Ask with AskUserQuestion:
 
 > D# — Want symbol-aware code search on this machine?
 > Project/branch/task: <one-sentence grounding using detected slug + branch>
