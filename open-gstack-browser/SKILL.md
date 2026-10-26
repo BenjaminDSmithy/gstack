@@ -172,7 +172,7 @@ fi
 ```
 
 If `NEEDS_SETUP`:
-1. Tell the user: "gstack browse needs a one-time build (~10 seconds). OK to proceed?" Then STOP and wait.
+1. Ask with AskUserQuestion: "gstack browse needs a one-time build (~10 seconds)." Options: A) Build it now (~10s) (recommended) — runs step 2; B) Skip the browser — no build, and the browser commands stay unavailable. Then STOP and wait for the answer; continue to step 2 only on A.
 2. Run: `cd <SKILL_DIR> && ./setup`
 3. If `bun` is not installed:
    ```bash

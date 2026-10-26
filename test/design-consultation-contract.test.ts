@@ -98,12 +98,12 @@ test('optional browser research has one unavailable branch and reuses its readin
   const ctx = context('claude');
   const fallback = generateBrowseFallback(ctx);
   expectMentions(fallback, [['do not', 'offer', 'build']], 'fallback');
-  expect(fallback).not.toContain('OK to proceed?');
+  expect(fallback).not.toContain('Build it now');
   const qaFallback = generateBrowseFallback(context('claude', 'qa'));
   expectTokens(qaFallback, ['**Browser access decision**'], 'qaFallback');
   expectMentions(qaFallback, [['no', 'cookie-import', 'authority']], 'qaFallback');
-  expect(qaFallback).not.toContain('OK to proceed?');
-  expect(generateBrowseFallback(context('claude', 'browse'))).toContain('OK to proceed?');
+  expect(qaFallback).not.toContain('Build it now');
+  expect(generateBrowseFallback(context('claude', 'browse'))).toContain('Build it now (~10s) (recommended)');
   const root = readFileSync(new URL('../design-consultation/SKILL.md.tmpl', import.meta.url), 'utf8');
   expectMentions(root, [['do not', 'build', 'offer']], 'root');
   expect(root).toContain('count its retained `sessions` entries');

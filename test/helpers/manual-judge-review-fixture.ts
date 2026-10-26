@@ -32,13 +32,19 @@ const LATER_WAVE_EDITS: Array<[string, string]> = [
   ['BUN_VERSION="1.4.2"', 'BUN_VERSION="1.3.10"'],
 ];
 
+// The gated-question sweep (2026-10-27: every question an AskUserQuestion)
+// reworded the shared one-time build ask; same line, different bytes.
+const LATER_GATED_QUESTION_EDITS: Array<[string, string]> = [
+  ['1. Ask with AskUserQuestion: "gstack browse needs a one-time build (~10 seconds)." Options: A) Build it now (~10s) (recommended) — runs step 2; B) Skip the browser — no build, and the browser commands stay unavailable. Then STOP and wait for the answer; continue to step 2 only on A.', '1. Tell the user: "gstack browse needs a one-time build (~10 seconds). OK to proceed?" Then STOP and wait.'],
+];
+
 export function approvedCookieWorkflowSource(source: string): string {
   let removedLines = 0;
   let historical = source
     .replace('sha256sum < "$tmpfile" | awk \'{print $(1)}\'', 'sha256sum "$tmpfile" | awk \'{print $1}\'')
     .replace('shasum -a 256 < "$tmpfile" | awk \'{print $(1)}\'', 'shasum -a 256 "$tmpfile" | awk \'{print $1}\'')
     .replace(LATER_BROWSER_BLOCK, block => { removedLines = block.split('\n').length - 1; return ''; });
-  for (const [later, earlier] of [...LATER_BROWSER_EDITS, ...LATER_PREAMBLE_EDITS, ...LATER_WAVE_EDITS]) historical = historical.replace(later, earlier);
+  for (const [later, earlier] of [...LATER_BROWSER_EDITS, ...LATER_PREAMBLE_EDITS, ...LATER_WAVE_EDITS, ...LATER_GATED_QUESTION_EDITS]) historical = historical.replace(later, earlier);
   return historical
     .replace(/(--- BEGIN FILE "BROWSER\.md" \(lines \d+-)(\d+)(; section\) ---)/, (_, head, end, tail) => `${head}${Number(end) - removedLines}${tail}`)
     .replace(/(--- BEGIN FILE "setup-browser-cookies\/SKILL\.md" \(lines )(\d+)-(\d+)(; entrypoint\) ---)/, (_, head, start, end, tail) => `${head}${APPROVED_ENTRYPOINT_START}-${APPROVED_ENTRYPOINT_START + Number(end) - Number(start)}${tail}`);

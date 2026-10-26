@@ -43,6 +43,8 @@ Layout: a \`D<N>\` title; an explicit reply line listing the offered selectors; 
 
 ### Format
 
+**Every question to the user is an AskUserQuestion.** Whenever this skill says to ask, offer, confirm, check with the user, or wait for an answer or approval, put that question as a decision brief in this format, routed by Tool resolution above: 2-4 concrete options, the recommended option first with its \`(recommended)\` label, each option saying what picking it does. Never put a question in prose and wait for a typed reply ("OK to proceed?", "say done", "type Y"), and never make a lettered A)/B)/C) list in chat the question itself; those forms belong only to the Conductor and failure-fallback paths above. When the answer is open (a URL, a name, feedback), still offer the 2-3 most likely concrete answers and let the user type their own through the tool's Other. This changes how a question is asked, never whether: add no question the skill does not ask, and drop none it does.
+
 Every AskUserQuestion is a decision brief and must be sent as tool_use, not prose — unless the documented failure fallback above applies (interactive session + the call is unavailable/erroring), in which case the prose fallback is the correct output.
 ${openQuestions ? `
 **Open-question prose form (\`Q<N>\`)** — for open-ended questions with no fixed option set (the Phase 2A/2B diagnostic questions) when you are in prose:

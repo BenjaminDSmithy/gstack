@@ -168,7 +168,7 @@ describe('QA caller authority in pure host renders', () => {
       for (const caller of callers) {
         const fallback = RESOLVERS.BROWSE_FALLBACK(context(host.name, caller));
         expect(fallback).toContain('Browser access decision');
-        expect(fallback).not.toContain('OK to proceed?');
+        expect(fallback).not.toContain('Build it now');
         expect(fallback).not.toContain('run `cd <SKILL_DIR>');
         expect(fallback).not.toContain('An authenticated page needs /setup-browser-cookies');
         expect(fallback).toContain('$B snapshot -i');
@@ -223,9 +223,10 @@ describe('QA caller authority in pure host renders', () => {
 
     test(`${host.name}: non-QA fallback retains its existing setup and human sign-in flow`, () => {
       const fallback = RESOLVERS.BROWSE_FALLBACK(context(host.name, 'browse'));
-      expect(fallback).toContain('OK to proceed?');
+      expect(fallback).toContain('AskUserQuestion');
+      expect(fallback).toContain('Build it now (~10s) (recommended)');
       expect(fallback).toMatch(/stop for the answer, then run `cd <SKILL_DIR> && \.\/setup`/i);
-      expect(fallback.indexOf('OK to proceed?')).toBeLessThan(fallback.indexOf('cd <SKILL_DIR> && ./setup'));
+      expect(fallback.indexOf('Build it now (~10s) (recommended)')).toBeLessThan(fallback.indexOf('cd <SKILL_DIR> && ./setup'));
       expect(fallback).toContain('An authenticated page needs /setup-browser-cookies');
       expect(fallback).toContain('$B handoff');
       expect(fallback).toContain('$B resume');

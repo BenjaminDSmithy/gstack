@@ -401,7 +401,7 @@ fi
 # WRITING_STYLE_PENDING; the script now computes it from the marker files).
 if [ -f "$_GH/.writing-style-prompt-pending" ] && [ ! -f "$_GH/.writing-style-prompted" ]; then
   _emit_block writing-style-migration <<EOI
-Ask once about writing style:
+Ask once about writing style with AskUserQuestion:
 
 > v1 prompts are simpler: first-use jargon glosses, outcome-framed questions, shorter prose. Keep default or restore terse?
 
@@ -417,7 +417,7 @@ fi
 # Lake intro (one-time; the offer is interactive, so the model acks).
 if [ "$_LAKE_SEEN" = "no" ]; then
   _emit_block lake-intro <<EOI
-Say: "gstack follows the **Boil the Ocean** principle — do the complete thing when AI makes marginal cost near-zero. Read more: https://garryslist.org/posts/boil-the-ocean" and offer to open it. Only run \`open https://garryslist.org/posts/boil-the-ocean\` if the user says yes. Always run: \`touch "$_GH/.completeness-intro-seen"\`.
+Say: "gstack follows the **Boil the Ocean** principle — do the complete thing when AI makes marginal cost near-zero. Read more: https://garryslist.org/posts/boil-the-ocean" and offer via AskUserQuestion: A) Open it (recommended) B) Not now. Only run \`open https://garryslist.org/posts/boil-the-ocean\` on A. Always run: \`touch "$_GH/.completeness-intro-seen"\`.
 EOI
 fi
 
@@ -445,7 +445,7 @@ fi
 # Proactive-suggestions opt-in (interactive).
 if [ "$_PROACTIVE_PROMPTED" = "no" ] && [ "$_TEL_PROMPTED" = "yes" ]; then
   _emit_block proactive-prompt <<EOI
-Ask once:
+Ask once with AskUserQuestion:
 
 > Let gstack proactively suggest skills, like /qa for "does this work?" or /investigate for bugs?
 

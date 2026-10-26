@@ -128,7 +128,7 @@ fi
 \`\`\`
 
 If \`NEEDS_SETUP\`:
-1. Tell the user: "gstack browse needs a one-time build (~10 seconds). OK to proceed?" Then STOP and wait.
+1. Ask with AskUserQuestion: "gstack browse needs a one-time build (~10 seconds)." Options: A) Build it now (~10s) (recommended) — runs step 2; B) Skip the browser — no build, and the browser commands stay unavailable. Then STOP and wait for the answer; continue to step 2 only on A.
 2. Run: \`cd <SKILL_DIR> && ./setup\`
 3. If \`bun\` is not installed:
    \`\`\`bash
@@ -184,7 +184,7 @@ ${qaCaller
     ? 'If `NEEDS_SETUP`, follow the **Browser access decision** above for ./setup authority. Without a ready browser, mark its probes blocked; never substitute unit tests or curl for the browser step.'
     : ctx.skillName === 'design-consultation'
     ? 'If `NEEDS_SETUP`: the browser is optional for this consultation. Do not offer or run a build. Say once that visual research is unavailable and skip Phase 2 Step 2; Step 1 still uses WebSearch when available. Continue with design knowledge for missing evidence, never unit tests or curl as a substitute for visual research.'
-    : 'If `NEEDS_SETUP`: tell the user "gstack\'s own browser needs a one-time build (~10 seconds). OK to proceed?", STOP for the answer, then run `cd <SKILL_DIR> && ./setup` (it installs bun when missing). If neither Aside nor `$B` is available after that, stop and say so — never substitute unit tests or curl for the browser step.'}`;
+    : 'If `NEEDS_SETUP`: ask with AskUserQuestion — "gstack\'s own browser needs a one-time build (~10 seconds)." — with options A) Build it now (~10s) (recommended) and B) Skip the browser (no build; this browser step is reported unavailable). STOP for the answer, then run `cd <SKILL_DIR> && ./setup` on A (it installs bun when missing). If neither Aside nor `$B` is available after that, stop and say so — never substitute unit tests or curl for the browser step.'}`;
   if (ctx.skillName === 'design-consultation') return `## Browser fallback: gstack's own headless browser
 
 For any non-READY BROWSER SETUP result or an explicit gstack-browser choice, use $B for approved, read-only visual research; otherwise skip this section. Say once which browser you use.
