@@ -4,7 +4,7 @@
   "eagerPerInvocation": {
     "autoplan": 16511,
     "benchmark": 7701,
-    "benchmark-models": 3825,
+    "benchmark-models": 4274,
     "browse": 8166,
     "browser-skills/hackernews-frontpage": 371,
     "canary": 13356,

@@ -353,7 +353,7 @@ If C:
 1. Run `$B status` and show the output
 2. If the server is not healthy, re-run Step 0 cleanup + Step 1 connect
 3. If the server IS healthy but the browser isn't visible, try `$B focus`
-4. If that fails, ask the user what they see (error message, blank screen, etc.)
+4. If that fails, ask what they see with AskUserQuestion: A) No browser window is visible, B) A window that stays blank; an error message or anything else goes through Other.
 
 ## Step 4: Demo
 
@@ -414,4 +414,6 @@ Tell the user:
 > - `/benchmark` measures performance in the headed browser
 
 Then proceed with whatever the user asked to do. If they didn't specify a task,
-ask what they'd like to test or browse.
+ask what they'd like to test or browse with AskUserQuestion: offer the 2-3
+likeliest targets from this conversation or repo (the likeliest first, marked
+(recommended)); the user types their own through Other.

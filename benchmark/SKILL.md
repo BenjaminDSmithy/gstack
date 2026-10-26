@@ -273,7 +273,8 @@ mkdir -p .gstack/benchmark-reports/baselines
 
 Use `--pages` when given. Otherwise open the URL, collect its same-origin `a[href]`
 links (skip logout/delete-style URLs), and propose the homepage plus up to 5 main
-navigation targets; confirm the list with the user before measuring.
+navigation targets; confirm the list with AskUserQuestion before measuring
+(Measure these pages (recommended) / Change the list, named in Other).
 
 If `--diff` mode:
 ```bash

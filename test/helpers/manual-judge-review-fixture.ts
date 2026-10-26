@@ -33,8 +33,11 @@ const LATER_WAVE_EDITS: Array<[string, string]> = [
 ];
 
 // The gated-question sweep (2026-10-27: every question an AskUserQuestion)
-// reworded the shared one-time build ask; same line, different bytes.
+// reworded the shared one-time build ask and the skill's storage-approval
+// and picker asks; same lines, different bytes.
 const LATER_GATED_QUESTION_EDITS: Array<[string, string]> = [
+  ['obtain explicit approval through AskUserQuestion (Import without clearing (recommended) / Clear the captured origin\'s storage).', 'obtain explicit approval.'],
+  ['Ask the user to choose browser, account/profile, and domains in the picker, then ask with AskUserQuestion: A) Done, I\'ve chosen in the picker (recommended), B) The link expired, open a new picker, C) Cancel the import.', 'Ask the user to choose browser, account/profile, and domains, then say when done.'],
   ['1. Ask with AskUserQuestion: "gstack browse needs a one-time build (~10 seconds)." Options: A) Build it now (~10s) (recommended) — runs step 2; B) Skip the browser — no build, and the browser commands stay unavailable. Then STOP and wait for the answer; continue to step 2 only on A.', '1. Tell the user: "gstack browse needs a one-time build (~10 seconds). OK to proceed?" Then STOP and wait.'],
 ];
 

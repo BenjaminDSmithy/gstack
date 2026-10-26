@@ -380,7 +380,8 @@ Metadata:
 
 Run `"$P" generate` when the user wants markdown as a PDF. If the user has a `.md`
 file open and says "make it look nice", propose `"$P" generate --cover --toc` and ask
-before running.
+with AskUserQuestion before running (Generate with cover and TOC (recommended) / Don't
+run it).
 
 ## Debugging
 

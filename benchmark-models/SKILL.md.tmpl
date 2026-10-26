@@ -56,16 +56,16 @@ Use AskUserQuestion with the preamble format:
 - **RECOMMENDATION:** A because benchmarking against a real skill exposes tool-use differences, not just raw generation.
 - **Options:**
   - A) Benchmark one of my gstack skills (we'll pick which skill next). Completeness: 10/10.
-  - B) Use an inline prompt — type it on the next turn. Completeness: 8/10.
-  - C) Point at a prompt file on disk — specify path on the next turn. Completeness: 8/10.
+  - B) Use an inline prompt — I'll ask for it next. Completeness: 8/10.
+  - C) Point at a prompt file on disk — I'll ask for the path next. Completeness: 8/10.
 
 If A: list top-level gstack skills that have SKILL.md files (from `find . -maxdepth 2 -name SKILL.md -not -path './.*'`), ask the user to pick one via a second AskUserQuestion. Use the picked SKILL.md path as the prompt file.
 
-If B: ask the user for the inline prompt. It never goes into a shell command: create a prompt file and write the prompt into it verbatim, then use the printed path as the prompt file.
+If B: ask for the inline prompt with AskUserQuestion, offering 2-3 short prompts drawn from this project (the likeliest first, marked (recommended)); the user types their own through Other. It never goes into a shell command: create a prompt file and write the prompt into it verbatim, then use the printed path as the prompt file.
 
 {{FREE_TEXT_FILE:PROMPT_FILE=benchmark-prompt}}
 
-If C: ask for the path. Verify it exists. Use as positional argument.
+If C: ask for the path with AskUserQuestion, offering up to 3 likely prompt files from the repo (the likeliest first, marked (recommended)); the user types another path through Other. Verify it exists. Use as positional argument.
 
 ---
 
@@ -85,7 +85,9 @@ If at least one is OK: AskUserQuestion:
 - **Options:**
   - A) All authed providers. Completeness: 10/10.
   - B) Only Claude. Completeness: 6/10 (no cross-model signal — use /ship's review for solo claude benchmarks instead).
-  - C) Pick two — specify on next turn. Completeness: 8/10.
+  - C) Pick two — I'll ask which next. Completeness: 8/10.
+
+If C: ask which two with AskUserQuestion, one option per pair of authed providers.
 
 ---
 

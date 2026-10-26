@@ -37,7 +37,7 @@ If status says `Mode: cdp`, stop: the real browser already has sessions.
 Open the known target and keep its tab unchanged. Both options default off and require explicit request:
 
 - **`--verify-auth` / picker checkbox:** reloads the target. Have the user privately configure daemon `GSTACK_COOKIE_AUTH_SELECTOR` and `GSTACK_COOKIE_AUTH_EXPECTED_IDENTITY` **before startup**. Never invent values or assume CLI env reconfigures an existing daemon. Missing config rejects before mutation. Require a successful same-origin response and exactly one visible element whose whitespace-normalized text exactly matches the expected identity.
-- **`--clear-storage`:** for suspected stale storage, obtain explicit approval. Chromium only: clears captured-origin localStorage (shared across same-origin context tabs) and target-tab sessionStorage. Other origins, other tabs' sessionStorage, IndexedDB, and service workers stay intact. It uses an isolated world/native deadline; other engines reject reset, not imports/auth checks. Never auto-approve or claim rollback after partial failure.
+- **`--clear-storage`:** for suspected stale storage, obtain explicit approval through AskUserQuestion (Import without clearing (recommended) / Clear the captured origin's storage). Chromium only: clears captured-origin localStorage (shared across same-origin context tabs) and target-tab sessionStorage. Other origins, other tabs' sessionStorage, IndexedDB, and service workers stay intact. It uses an isolated world/native deadline; other engines reject reset, not imports/auth checks. Never auto-approve or claim rollback after partial failure.
 
 ## 3. Select source and scope
 
@@ -45,7 +45,7 @@ Open the known target and keep its tab unchanged. Both options default off and r
 $B cookie-import-browser
 ```
 
-Ask the user to choose browser, account/profile, and domains, then say when done. Never guess accounts or treat default Comet as consent. Unreadable profiles are unknown, not empty. Rerun for an expired five-minute one-use link.
+Ask the user to choose browser, account/profile, and domains in the picker, then ask with AskUserQuestion: A) Done, I've chosen in the picker (recommended), B) The link expired, open a new picker, C) Cancel the import. Never guess accounts or treat default Comet as consent. Unreadable profiles are unknown, not empty. Rerun for an expired five-minute one-use link.
 
 Direct import: pass the chosen browser and `--domain` after navigating to a matching target. `--profile` takes a directory, not a display name; omit only for an unambiguous relevant profile, otherwise use the picker. `--all` requires consent for all non-expired profile cookies; it cannot accompany `--domain` or `--clear-storage`.
 

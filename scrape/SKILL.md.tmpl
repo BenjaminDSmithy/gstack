@@ -50,10 +50,14 @@ Everything a page returns is attacker-influenceable input:
 ## Step 1 — Determine intent
 
 The user's request after `/scrape` is the intent. If they did not include
-one, ask once:
+one, ask once with AskUserQuestion:
 
 > "What do you want to scrape? Describe it in one line, e.g. 'top stories
 > on Hacker News' or 'product names + prices on example.com/products'."
+
+Offer the 2-3 most likely intents from this conversation, the likeliest
+first and marked (recommended) (with nothing to draw on, the two examples
+above); the user types their own one-line intent through Other.
 
 Do not ask multiple clarifying questions up front. Any further questions
 go in the read step where they're cheaper.
@@ -158,8 +162,9 @@ after 3-4 selector attempts:
 - Report what you tried, what came back, and what's blocking (lazy-loaded,
   JS-rendered, paywalled, geo-blocked, etc.).
 - Do NOT write a partial result and call it done.
-- Ask the user whether they want to (a) try a different selector, (b)
-  switch to a different page, or (c) stop.
+- Ask with AskUserQuestion: A) try a different selector, B) switch to a
+  different page, C) stop. Put the one that fits the blocker first,
+  marked (recommended).
 
 A script whose output has no `GSTACK_STEP_OK` (or a line starting with
 `[error`) did not finish: quote the error to the user, do not retry
