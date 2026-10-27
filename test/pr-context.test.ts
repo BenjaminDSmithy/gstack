@@ -1367,10 +1367,13 @@ describe('defaultGit and constants', () => {
     // test/spawnsync-timeout-tripwire.test.ts scans test trees only, and the
     // real runners are never spawned here (gh is always faked), so read the
     // source: each spawnSync/execSync/execFileSync call carries `timeout`.
+    // Upstream's pr-shots shares the name prefix but is not a /pr-prep helper
+    // (local reads only; see test/egress-receipt-wiring.test.ts NOT_PR_PREP).
+    const NOT_PR_PREP = new Set([path.join('lib', 'pr-shots.ts'), path.join('bin', 'gstack-pr-shots')]);
     const files = [
       ...fs.readdirSync(path.join(ROOT, 'lib')).filter(f => /^pr-.*\.ts$/.test(f)).map(f => path.join('lib', f)),
       ...fs.readdirSync(path.join(ROOT, 'bin')).filter(f => f.startsWith('gstack-pr-')).map(f => path.join('bin', f)),
-    ];
+    ].filter(rel => !NOT_PR_PREP.has(rel));
     expect(files).toContain(path.join('lib', 'pr-context.ts'));
     const unbounded: string[] = [];
     let calls = 0;
