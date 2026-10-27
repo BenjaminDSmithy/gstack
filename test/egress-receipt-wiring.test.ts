@@ -501,6 +501,10 @@ describe('egress receipt wiring tripwire', () => {
     ]) {
       expect(offending(clean, false), clean).toEqual([]);
     }
+    // Upstream's pr-shots (before/after PR images, v1.91.x) shares the name
+    // prefix but is not a /pr-prep helper: it only reads git (rev-parse,
+    // merge-base, cat-file, ls-files) and writes nothing off the machine.
+    const NOT_PR_PREP = new Set(['lib/pr-shots.ts', 'bin/gstack-pr-shots']);
     const files: string[] = [];
     for (const entry of fs.readdirSync(path.join(ROOT, 'lib'))) {
       if (/^pr-.*\.ts$/.test(entry) && entry !== 'pr-context.ts') files.push(`lib/${entry}`);
@@ -508,6 +512,8 @@ describe('egress receipt wiring tripwire', () => {
     for (const entry of fs.readdirSync(path.join(ROOT, 'bin'))) {
       if (entry.startsWith('gstack-pr-') && fs.lstatSync(path.join(ROOT, 'bin', entry)).isFile()) files.push(`bin/${entry}`);
     }
+    for (const rel of NOT_PR_PREP) expect(files, `${rel} moved; update NOT_PR_PREP`).toContain(rel);
+    files.splice(0, files.length, ...files.filter(rel => !NOT_PR_PREP.has(rel)));
     const offenders: string[] = [];
     for (const rel of files) {
       const src = read(rel);
