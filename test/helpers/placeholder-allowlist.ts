@@ -57,7 +57,7 @@ export const IDENTIFIER_PLACEHOLDERS: Record<string, IdentifierGrammar> = {
   '<summary-slug>': { grammar: ID, what: 'question summary as a kebab-case slug' },
   '<comment-id>': { grammar: NUM, what: 'GitHub comment id from the fetched JSON' },
   '<opened-at>': { grammar: NUM, what: 'EARLY_PR_OPENED_AT epoch seconds printed by gstack-greptile-early open' },
-  '<pr-number>': { grammar: NUM, what: 'PR/MR number from the open-PR lookup or the early-PR create output' },
+  '<pr-number>': { grammar: NUM, what: 'PR/MR number from the open-PR lookup or the early-PR create output; for /pr-prep the upstream PR (the digits of a bare number or a pull URL, never #N)' },
   '<new-version>': { grammar: /^[0-9]+(?:\.[0-9]+)*$/, what: 'NEW_VERSION from the version bump (dot-separated digits)' },
   '<issue-number>': { grammar: /^[0-9]*$/, what: 'filed issue number, or empty when none was filed' },
   '<check-number>': { grammar: NUM, what: 'canary check number' },
@@ -206,7 +206,7 @@ export const IDENTIFIER_PLACEHOLDERS: Record<string, IdentifierGrammar> = {
   },
 
   // /pr-prep: the upstream PR and repo, and values the pr-* helpers printed.
-  '<pr-number>': { grammar: NUM, what: 'upstream PR number (the digits of a bare number or a pull URL, never #N)' },
+  // '<pr-number>' is shared with /ship's open-PR lookup (defined above, NUM).
   '<upstream-repo>': { grammar: GH_REPO, what: 'upstream repo as owner/name' },
   '<PR_PREP_BASE repo>': { grammar: GH_REPO, what: 'owner/name before the @ on the audit\'s PR_PREP_BASE line' },
   '<PR_PREP_BASE sha>': { grammar: OBJECT_ID, what: 'base commit on the audit\'s PR_PREP_BASE line' },

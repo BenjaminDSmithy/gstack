@@ -40,7 +40,9 @@ describe('spawnPty', () => {
   test.skipIf(process.platform !== 'darwin')('the child cannot start while the spawning thread is held', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-pty-spawn-'));
     const marker = path.join(dir, 'started');
-    let startedWhileHeld: boolean | null = null;
+    // Widened on purpose: TS cannot see the callback assign it and would
+    // narrow a plain `null` initialiser to the literal type.
+    let startedWhileHeld = null as boolean | null;
     try {
       const result = await runPty(
         ['/bin/sh', '-c', ': > "$1"; printf "ran<end>"; exit 7', 'sh', marker],
