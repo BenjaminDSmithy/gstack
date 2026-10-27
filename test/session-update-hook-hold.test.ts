@@ -1,8 +1,15 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { execFileSync, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+
+// Fork: every update here also runs the fork's whole-tree hook gate
+// (bin/gstack-gate-incoming: a throwaway worktree plus scripts/hook-syntax.sh).
+// Measured 2026-10-27 at load ~60: these cases already reach 4.9s on pristine
+// upstream, the gate adds a median 157ms (up to 768ms), and three then crossed
+// bun's 5s default. waitFor's own 15s deadline still bounds each wait.
+setDefaultTimeout(30_000);
 
 // The auto-updater fast-forwards the live checkout before setup runs, and
 // Claude Code runs hooks straight from that checkout, so setup's parse gate
@@ -175,6 +182,12 @@ describe.skipIf(process.platform === 'win32')('gstack-session-update: the incomi
     for (const f of ['gstack-session-update', 'gstack-state-root.sh', 'gstack-egress-lib.sh', 'gstack-egress-receipt', 'gstack-bun-version.sh', 'gstack-path-spelling.sh', 'gstack-ff-update']) {
       fs.copyFileSync(path.join(ROOT, 'bin', f), path.join(bin, f));
     }
+    // Fork: the updater also runs the whole-tree gate (bin/gstack-gate-incoming
+    // with this install's scripts/hook-syntax.sh) and holds when it is missing,
+    // so the installed copy carries both, as a real install does.
+    fs.copyFileSync(path.join(ROOT, 'bin', 'gstack-gate-incoming'), path.join(bin, 'gstack-gate-incoming'));
+    fs.mkdirSync(path.join(fx.base, 'scripts'), { recursive: true });
+    fs.copyFileSync(path.join(ROOT, 'scripts', 'hook-syntax.sh'), path.join(fx.base, 'scripts', 'hook-syntax.sh'));
     fs.writeFileSync(path.join(bin, 'gstack-hook-check'), `#!/usr/bin/env bash\n${checker}\n`, { mode: 0o755 });
     return path.join(bin, 'gstack-session-update');
   }

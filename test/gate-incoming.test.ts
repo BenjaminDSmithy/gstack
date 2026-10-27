@@ -105,6 +105,9 @@ function makeFixture(): Fx {
   write(seed, 'bin/gstack-patch-names', '#!/usr/bin/env bash\nexit 0\n', 0o755);
   write(seed, 'bin/gstack-gate-incoming', fs.readFileSync(HELPER, 'utf-8'), 0o755);
   write(seed, 'scripts/hook-syntax.sh', fs.readFileSync(CHECKER, 'utf-8'), 0o755);
+  // Step 4 moves the install through upstream's bin/gstack-ff-update after
+  // the gate passes, so the install carries it like a real one does.
+  write(seed, 'bin/gstack-ff-update', fs.readFileSync(path.join(ROOT, 'bin', 'gstack-ff-update'), 'utf-8'), 0o755);
   write(seed, 'setup', '#!/bin/sh\necho ran >> "${SETUP_MARK:-/dev/null}"\n', 0o755);
   write(seed, HOOK, GOOD_HOOK, 0o755);
   git(seed, 'init', '-q', '-b', 'main');
@@ -544,17 +547,23 @@ describe('gstack-session-update gates the incoming tree before it moves the chec
     expect(line).toContain('NOT checked');
   }, TEST_TIMEOUT_MS);
 
-  test('a conflicting autostash pop leaves no conflict markers live, keeps the stash, and still sets up', async () => {
+  test('a conflicting local edit leaves no conflict markers live, is shelved in a rescue ref, and still sets up', async () => {
     const fx = makeFixture();
-    const sha = advance(fx, { 'SKILL.md': '# top v2\nname: qa\nbody line\n' });
-    write(fx.install, 'SKILL.md', '# top LOCAL\nname: qa\nbody line\n');
+    // Not SKILL.md: gstack-ff-update discards that render footprint as
+    // regenerable instead of shelving it, so the conflict is in a tracked
+    // file it must keep.
+    const sha = advance(fx, { 'bin/gstack-patch-names': '#!/usr/bin/env bash\n# v2\nexit 0\n' });
+    write(fx.install, 'bin/gstack-patch-names', '#!/usr/bin/env bash\n# LOCAL\nexit 0\n', 0o755);
     expect(runSessionUpdate(fx).status).toBe(0);
     const log = await waitForLog(fx);
-    expect(log).toMatch(/AUTOSTASH_CONFLICT_RECOVERED tree_reset=1 kept_stash=[0-9a-f]{40} kept_ref=refs\/stash/);
+    // Upstream's gstack-ff-update does the move: the conflicting edit is
+    // shelved in a rescue ref, not a stash.
+    const rescued = log.match(/AUTOSTASH_CONFLICT_RECOVERED tree_reset=1 kept_stash=([0-9a-f]{40}) kept_ref=refs\/gstack\/rescue\/\1\b/);
+    expect(rescued, log).not.toBeNull();
     expect(log).toContain('UPDATED from=');
     expect(head(fx)).toBe(sha);
-    expect(fs.readFileSync(path.join(fx.install, 'SKILL.md'), 'utf8')).not.toContain(LT);
-    expect(git(fx.install, 'stash', 'list')).toContain('autostash');
+    expect(fs.readFileSync(path.join(fx.install, 'bin/gstack-patch-names'), 'utf8')).not.toContain(LT);
+    expect(git(fx.install, 'for-each-ref', '--format=%(refname)', 'refs/gstack/rescue/')).toBe(`refs/gstack/rescue/${rescued![1]}`);
     expect(fs.readFileSync(fx.mark, 'utf8')).toBe('ran\n');
   }, TEST_TIMEOUT_MS);
 });
@@ -576,7 +585,9 @@ function runBlock(fx: Fx, marker: string, home = path.join(fx.base, 'home')) {
   const r = spawnSync('bash', ['-c', blockAfter(marker)], {
     cwd: fx.base,
     encoding: 'utf8',
-    env: { ...GIT_ENV, HOME: home, INSTALL_DIR: fx.install, TMPDIR: fx.tmp, SETUP_MARK: fx.mark },
+    // UPSTREAM_REF as Step 4 prints it for an install on the main channel;
+    // the fallback block requires it carried forward.
+    env: { ...GIT_ENV, HOME: home, INSTALL_DIR: fx.install, TMPDIR: fx.tmp, SETUP_MARK: fx.mark, UPSTREAM_REF: 'origin/main' },
     timeout: SPAWN_TIMEOUT_MS,
   });
   return { code: r.status ?? -1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
@@ -705,7 +716,7 @@ describe('/gstack-upgrade Step 4 gates origin/main before the install moves', ()
     advance(fx, { [HOOK]: BROKEN_HOOK });
     fs.rmSync(path.join(fx.install, 'bin', 'gstack-gate-incoming'));
     git(fx.install, 'fetch', '-q');
-    const fallback = runBlock(fx, 'The block re-gates `origin/main`');
+    const fallback = runBlock(fx, 'The block re-gates the channel');
     expect(fallback.code).toBe(1);
     // The copy ran and refused the broken hook: a verdict, not a missing helper.
     expect(fallback.stderr).toContain('HOOK_GATE_REFUSED: nothing stashed or reset (gate exit 1)');
@@ -719,11 +730,18 @@ describe('/gstack-upgrade Step 4 gates origin/main before the install moves', ()
     git(fx.install, 'add', 'local.txt');
     git(fx.install, 'commit', '-q', '-m', 'local commit');
     const before = head(fx);
+    // A clean release routes the diverged install to the fallback.
+    advance(fx, { VERSION: '1.1.0\n' });
+    const clean = runBlock(fx, '**For git installs**');
+    expect(clean.stdout).toContain('FF_REFUSED');
+    expect(clean.stdout).toContain('not a fast-forward');
+    // A broken one is refused by the gate before any fast-forward is tried.
     advance(fx, { [HOOK]: BROKEN_HOOK });
     const main = runBlock(fx, '**For git installs**');
-    expect(main.stdout).toContain('FF_REFUSED');
-    expect(main.stdout).toContain('not a fast-forward');
-    const fallback = runBlock(fx, 'The block re-gates `origin/main`');
+    expect(main.code).toBe(1);
+    expect(main.stderr).toContain('HOOK_GATE_REFUSED');
+    expect(main.stdout).not.toContain('FF_REFUSED');
+    const fallback = runBlock(fx, 'The block re-gates the channel');
     expect(fallback.code).toBe(1);
     expect(fallback.stderr).toContain('HOOK_GATE_REFUSED');
     expect(head(fx)).toBe(before);
