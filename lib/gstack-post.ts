@@ -390,13 +390,22 @@ export function confirmationToken(fields: Record<string, unknown>, parts: Array<
   return h.digest("hex").slice(0, 24);
 }
 
-/** The argv that sends one operation; `stdin` carries the body where the CLI reads it from "-". */
-function command(kind: HostKind, op: Op, n: string | undefined, req: Request, title?: string, body?: string): { cmd: string; args: string[]; stdin?: string } {
+/**
+ * The argv that sends one operation; `stdin` carries the body where the CLI
+ * reads it from "-".
+ *
+ * `gh api` takes its host from GH_HOST, else gh's only login, else github.com,
+ * never from the repository it fills `{owner}/{repo}` from, so every `gh api`
+ * call names origin's host: with logins on github.com and an Enterprise host,
+ * an Enterprise origin's write would otherwise reach the same-named repo on
+ * github.com. The `gh pr`/`gh issue` subcommands follow the repository itself.
+ */
+function command(kind: HostKind, op: Op, n: string | undefined, req: Request, host: string, title?: string, body?: string): { cmd: string; args: string[]; stdin?: string } {
   if (kind === "github") {
     switch (op) {
       case "pr-comment": return { cmd: "gh", args: ["pr", "comment", n!, "--body-file=-"], stdin: body };
       case "issue-comment": return { cmd: "gh", args: ["issue", "comment", n!, "--body-file=-"], stdin: body };
-      case "reply": return { cmd: "gh", args: ["api", "--method=POST", `repos/{owner}/{repo}/pulls/${n}/comments/${req.to}/replies`, "--field=body=@-"], stdin: body };
+      case "reply": return { cmd: "gh", args: ["api", `--hostname=${host}`, "--method=POST", `repos/{owner}/{repo}/pulls/${n}/comments/${req.to}/replies`, "--field=body=@-"], stdin: body };
       case "pr-title": return { cmd: "gh", args: ["pr", "edit", n!, `--title=${title}`] };
       case "pr-body": return { cmd: "gh", args: ["pr", "edit", n!, "--body-file=-"], stdin: body };
       case "pr-create": return { cmd: "gh", args: ["pr", "create", `--base=${req.base}`, ...(req.head ? [`--head=${req.head}`] : []), `--title=${title}`, "--body-file=-", ...(req.draft ? ["--draft"] : [])], stdin: body };
@@ -415,10 +424,10 @@ function command(kind: HostKind, op: Op, n: string | undefined, req: Request, ti
 }
 
 /** `gh pr edit` can fail on the retired projectCards GraphQL field; the REST PATCH sends the same bytes. */
-function restEdit(op: Op, n: string, title?: string, body?: string) {
+function restEdit(op: Op, n: string, host: string, title?: string, body?: string) {
   return op === "pr-title"
-    ? { cmd: "gh", args: ["api", "--method=PATCH", `repos/{owner}/{repo}/pulls/${n}`, `--raw-field=title=${title}`] }
-    : { cmd: "gh", args: ["api", "--method=PATCH", `repos/{owner}/{repo}/pulls/${n}`, "--field=body=@-", "--silent"], stdin: body };
+    ? { cmd: "gh", args: ["api", `--hostname=${host}`, "--method=PATCH", `repos/{owner}/{repo}/pulls/${n}`, `--raw-field=title=${title}`] }
+    : { cmd: "gh", args: ["api", `--hostname=${host}`, "--method=PATCH", `repos/{owner}/{repo}/pulls/${n}`, "--field=body=@-", "--silent"], stdin: body };
 }
 
 function readBackTitle(env: PostEnv, kind: HostKind, n: string): string | undefined {
@@ -430,11 +439,11 @@ function readBackTitle(env: PostEnv, kind: HostKind, n: string): string | undefi
   try { return String(JSON.parse(r.stdout).title); } catch { return undefined; }
 }
 
-function send(env: PostEnv, kind: HostKind, req: Request, n: string | undefined, title?: string, body?: string): number {
-  let c = command(kind, req.op, n, req, title, body);
+function send(env: PostEnv, kind: HostKind, host: string, req: Request, n: string | undefined, title?: string, body?: string): number {
+  let c = command(kind, req.op, n, req, host, title, body);
   let r = env.run(c.cmd, c.args, c.stdin);
   if (r.status !== 0 && kind === "github" && (req.op === "pr-title" || req.op === "pr-body") && /projectCards/.test(r.stderr)) {
-    c = restEdit(req.op, n!, title, body);
+    c = restEdit(req.op, n!, host, title, body);
     r = env.run(c.cmd, c.args, c.stdin);
   }
   if (r.status !== 0) {
@@ -514,7 +523,7 @@ export function runPost(argv: string[], env: PostEnv, configBin = "gstack-config
         return EXIT.confirm;
       }
     }
-    return send(env, remote.kind, req, n, title, body);
+    return send(env, remote.kind, remote.host, req, n, title, body);
   } catch (e) {
     if (!(e instanceof UsageError)) throw e;
     env.err(`gstack-post: ${e.message} (gstack-post --help shows usage)\n`);

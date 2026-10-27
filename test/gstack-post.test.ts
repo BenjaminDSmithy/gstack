@@ -79,7 +79,7 @@ describe("gstack-post posts through argv, never a shell string", () => {
     const files = { "/t": "v1.2.3 fix: title", "/b": "line one\nline two" };
     const gh = (argv: string[]) => { const f = fakeEnv({ files }); expect(run(argv, f)).toBe(0); return f.posts()[0]!; };
     expect(gh(["issue-comment", "3", "--body-file", "/b"]).args).toEqual(["issue", "comment", "3", "--body-file=-"]);
-    expect(gh(["reply", "4", "--to", "991", "--body-file", "/b"]).args).toEqual(["api", "--method=POST", "repos/{owner}/{repo}/pulls/4/comments/991/replies", "--field=body=@-"]);
+    expect(gh(["reply", "4", "--to", "991", "--body-file", "/b"]).args).toEqual(["api", "--hostname=github.com", "--method=POST", "repos/{owner}/{repo}/pulls/4/comments/991/replies", "--field=body=@-"]);
     expect(gh(["pr-body", "5", "--body-file", "/b"])).toEqual({ cmd: "gh", args: ["pr", "edit", "5", "--body-file=-"], input: files["/b"] });
     expect(gh(["issue-create", "--title-file", "/t", "--body-file", "/b"]).args).toEqual(["issue", "create", "--title=v1.2.3 fix: title", "--body-file=-"]);
     const gl = (argv: string[]) => { const f = fakeEnv({ files, remote: "https://gitlab.com/grp/sub/proj.git" }); expect(run(argv, f)).toBe(0); return f.posts()[0]!; };
@@ -286,7 +286,24 @@ describe("gstack-post reports CLI failures and repairs known edit failures", () 
   test("the projectCards GraphQL failure falls back to the REST PATCH with the same bytes", () => {
     const f = fakeEnv({ files: { "/b": "new body" }, respond: c => (c.args[1] === "edit" ? { status: 1, stderr: "GraphQL: repository.pullRequest.projectCards is deprecated" } : undefined) });
     expect(run(["pr-body", "6", "--body-file", "/b"], f)).toBe(EXIT.posted);
-    expect(f.posts().at(-1)).toEqual({ cmd: "gh", args: ["api", "--method=PATCH", "repos/{owner}/{repo}/pulls/6", "--field=body=@-", "--silent"], input: "new body" });
+    expect(f.posts().at(-1)).toEqual({ cmd: "gh", args: ["api", "--hostname=github.com", "--method=PATCH", "repos/{owner}/{repo}/pulls/6", "--field=body=@-", "--silent"], input: "new body" });
+  });
+
+  // `gh api` takes its host from GH_HOST, else gh's only login, else
+  // github.com, never from the repository it fills {owner}/{repo} from. An
+  // Enterprise origin's REST write and reply must name that host, or they
+  // reach the same-named repo on github.com.
+  test("an Enterprise origin's REST fallback and reply name origin's host", () => {
+    const ghe = (c: Call) =>
+      c.cmd === "gh" && c.args[0] === "repo" ? { status: 0, stdout: "https://ghe.example.com/acme/widget\n" }
+      : c.args[1] === "edit" ? { status: 1, stderr: "GraphQL: repository.pullRequest.projectCards is deprecated" }
+      : undefined;
+    const f = fakeEnv({ remote: "git@ghe.example.com:acme/widget.git", files: { "/b": "new body" }, respond: ghe });
+    expect(run(["pr-body", "6", "--body-file", "/b", "--replace"], f)).toBe(EXIT.posted);
+    expect(f.posts().at(-1)!.args.slice(0, 3)).toEqual(["api", "--hostname=ghe.example.com", "--method=PATCH"]);
+    const g = fakeEnv({ remote: "git@ghe.example.com:acme/widget.git", files: { "/b": "ok" }, respond: ghe });
+    expect(run(["reply", "4", "--to", "991", "--body-file", "/b"], g)).toBe(EXIT.posted);
+    expect(g.posts().at(-1)!.args.slice(0, 3)).toEqual(["api", "--hostname=ghe.example.com", "--method=POST"]);
   });
 
   test("a title that does not read back is retried once, then reported", () => {
