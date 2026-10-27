@@ -53,7 +53,10 @@ function runSetupWithBun(version: string) {
   fs.writeFileSync(path.join(stub, 'bun'), [
     '#!/usr/bin/env bash',
     `if [ "$1" = "--version" ]; then printf '%s\\n' '${version}'; exit 0; fi`,
-    `if [ "$1" = "-e" ]; then exec '${process.execPath}' "$@"; fi`,
+    // Fork: the hook parse gate (scripts/hook-syntax.sh) runs its payload check
+    // as `bun --no-env-file --config=<cfg> -e ...` (GSTA-56), so -e is not
+    // always the first argument.
+    `if [ "$1" = "-e" ] || { [ "$1" = "--no-env-file" ] && [ "$3" = "-e" ]; }; then exec '${process.execPath}' "$@"; fi`,
     `echo "$*" >> '${calls}'`,
     'echo stubbed-bun-stop >&2',
     'exit 1',
