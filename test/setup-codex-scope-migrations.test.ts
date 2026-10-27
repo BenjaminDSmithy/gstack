@@ -4,6 +4,11 @@ import { cpSync, existsSync, lstatSync, readFileSync, realpathSync, rmSync, syml
 import { dirname, join } from 'node:path';
 import { cleanupFixtures, cleanupSeed, owned, fixtureWriteFileSync, fixtureCopyFileSync, fixtureMkdirSync, fixtureUtimesSync, tree, fixture, install } from './helpers/install-fixture';
 
+// Fork: setup also runs the fork's hook parse gate over the whole tree (31s at
+// load ~230, measured 2026-10-27), and at load ~220 these setup runs took 70-81s
+// against a 60s spawn budget (23 killed on the fork, 2 upstream). Budgets
+// doubled, as 129bac4b7 did for test/setup-install-registry.test.ts.
+
 afterEach(cleanupFixtures);
 afterAll(cleanupSeed);
 
@@ -35,7 +40,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     expect(readFileSync(join(f.global, 'gstack-claude/SKILL.md'), 'utf8')).toBe(oldBytes);
     expect(realpathSync(join(local, 'gstack-claude-code/SKILL.md'))).toBe(join(f.source, '.agents/skills/gstack-claude-code/SKILL.md'));
     expect(lstatSync(join(local, 'gstack-claude'), { throwIfNoEntry: false })).toBeUndefined();
-  }, 90_000);
+  }, 180_000);
 
   for (const nested of [false, true]) for (const global of [false, true]) for (const windows of [false, true]) {
     test(`named ${nested ? 'ancestor' : 'source'} overlap: logical local=${!global}, Windows=${windows}`, () => {
@@ -57,7 +62,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
       const env = global ? { ...f.env, CODEX_HOME: join(f.project, '.agents') } : f.env;
       const before = tree(f.dir);
       const result = spawnSync('bash', [join(f.source, 'setup'), '--host', 'codex', ...(global ? ['--global'] : []), '--no-team', '--no-plan-tune-hooks', '--no-timeline-stop-hook'], {
-        cwd: f.other, env, encoding: 'utf8', timeout: 60_000,
+        cwd: f.other, env, encoding: 'utf8', timeout: 120_000,
       });
       if (windows) {
         expect(result.status, result.stdout + result.stderr).toBe(1);
@@ -67,7 +72,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
         expect(result.status, result.stdout + result.stderr).toBe(0);
         expect(readFileSync(join(physical, 'uncommitted-proof'), 'utf8')).toBe('Do not erase this checkout.\n');
       }
-    }, 90_000);
+    }, 180_000);
   }
 
   for (const target of ['source', 'project', 'root-sidecar']) for (const host of target === 'root-sidecar' ? ['codex'] : ['codex', 'claude']) test(`generated namespace alias to ${target} refuses before writes, host=${host}`, () => {
@@ -84,12 +89,12 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     if (target === 'root-sidecar') fixtureWriteFileSync(join(f.dir, 'commands/uname'), '#!/bin/sh\nprintf "MINGW64_NT-10.0\\n"\n', { mode: 0o755 });
     const before = tree(f.dir);
     const result = spawnSync('bash', [join(f.source, 'setup'), '--host', host, '--no-team', '--no-plan-tune-hooks', '--no-timeline-stop-hook'], {
-      cwd: f.other, env: f.env, encoding: 'utf8', timeout: 60_000,
+      cwd: f.other, env: f.env, encoding: 'utf8', timeout: 120_000,
     });
     expect(result.status, result.stdout + result.stderr).toBe(1);
     expect(result.stderr).toContain(target === 'root-sidecar' ? 'Codex sidecar' : 'Codex generated skill write');
     expect(tree(f.dir)).toEqual(before);
-  }, 90_000);
+  }, 180_000);
 
   for (const target of ['absolute-generation-alias', 'occupied-relocation']) for (const windows of [false, true]) {
     test(`direct global checkout preflights ${target} before moving, Windows=${windows}`, () => {
@@ -109,12 +114,12 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
       if (windows) fixtureWriteFileSync(join(f.dir, 'commands/uname'), '#!/bin/sh\nprintf "MINGW64_NT-10.0\\n"\n', { mode: 0o755 });
       const before = tree(f.dir);
       const result = spawnSync('bash', [join(direct, 'setup'), '--host', 'codex', '--no-team', '--no-plan-tune-hooks', '--no-timeline-stop-hook'], {
-        cwd: f.other, env: f.env, encoding: 'utf8', timeout: 60_000,
+        cwd: f.other, env: f.env, encoding: 'utf8', timeout: 120_000,
       });
       expect(result.status, result.stdout + result.stderr).toBe(1);
       expect(result.stderr).toContain(target === 'absolute-generation-alias' ? 'post-relocation generation namespace' : 'checkout relocation');
       expect(tree(f.dir)).toEqual(before);
-    }, 90_000);
+    }, 180_000);
   }
 
   test('Claude-only setup cannot prune a bannered stale skill inside its source checkout', () => {
@@ -125,12 +130,12 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     const env = { ...f.env, CODEX_HOME: f.source };
     const before = tree(f.dir);
     const result = spawnSync('bash', [join(f.source, 'setup'), '--host', 'claude', '--no-team', '--no-plan-tune-hooks', '--no-timeline-stop-hook'], {
-      cwd: f.other, env, encoding: 'utf8', timeout: 60_000,
+      cwd: f.other, env, encoding: 'utf8', timeout: 120_000,
     });
     expect(result.status, result.stdout + result.stderr).toBe(1);
     expect(result.stderr).toContain('Codex stale host cleanup');
     expect(tree(f.dir)).toEqual(before);
-  }, 90_000);
+  }, 180_000);
 
   test('a dangling owned legacy Codex link reaches the rename migration', () => {
     const f = fixture('ordinary');
@@ -146,7 +151,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     expect(lstatSync(old, { throwIfNoEntry: false })).toBeUndefined();
     expect(readFileSync(join(f.global, 'gstack-claude-code/SKILL.md'), 'utf8')).toContain('name: claude-code');
     expect(readFileSync(join(f.global, 'custom/SKILL.md'), 'utf8')).toBe('User-owned skill.\n');
-  }, 90_000);
+  }, 180_000);
 
   for (const explicit of [false, true]) for (const windows of [false, true]) {
     test(`global handwritten runtime is refused before writes, explicit=${explicit}, Windows=${windows}`, () => {
@@ -159,13 +164,13 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
       if (windows) fixtureWriteFileSync(join(f.dir, 'commands/uname'), '#!/bin/sh\nprintf "MINGW64_NT-10.0\\n"\n', { mode: 0o755 });
       const before = tree(f.dir);
       const result = spawnSync('bash', [join(f.source, 'setup'), '--host', 'codex', ...(explicit ? ['--global'] : []), '--no-team', '--no-plan-tune-hooks', '--no-timeline-stop-hook'], {
-        cwd: f.other, env: f.env, encoding: 'utf8', timeout: 60_000,
+        cwd: f.other, env: f.env, encoding: 'utf8', timeout: 120_000,
       });
       expect(result.status, result.stdout + result.stderr).toBe(1);
       expect(result.stderr).toContain(`global Codex runtime ${runtime} is a real user-owned skill`);
       expect(result.stderr).toContain('choose another CODEX_HOME');
       expect(tree(f.dir)).toEqual(before);
-    }, 90_000);
+    }, 180_000);
   }
 
   for (const prior of ['managed', 'partial']) test(`global ${prior} runtime remains refreshable`, () => {
@@ -180,7 +185,7 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     expect(existsSync(join(runtime, 'prior-asset'))).toBe(false);
     expect(readFileSync(join(runtime, 'SKILL.md'), 'utf8')).toContain('<!-- AUTO-GENERATED from');
     expect(realpathSync(join(runtime, 'bin'))).toBe(join(f.source, 'bin'));
-  }, 90_000);
+  }, 180_000);
 
   test('Claude-only setup leaves a global handwritten runtime untouched', () => {
     const f = fixture('ordinary');
@@ -191,11 +196,11 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     fixtureWriteFileSync(join(runtime, 'user-notes'), 'Keep these notes.\n');
     const before = tree(runtime);
     const result = spawnSync('bash', [join(f.source, 'setup'), '--host', 'claude', '--no-team', '--no-plan-tune-hooks', '--no-timeline-stop-hook'], {
-      cwd: f.other, env: f.env, encoding: 'utf8', timeout: 60_000,
+      cwd: f.other, env: f.env, encoding: 'utf8', timeout: 120_000,
     });
     expect(result.status, result.stdout + result.stderr).toBe(0);
     expect(tree(runtime)).toEqual(before);
-  }, 90_000);
+  }, 180_000);
 
   test('Unix rename does not overwrite a source checkout registered as another skill', () => {
     const f = fixture('ordinary');
@@ -210,12 +215,12 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     }
     const before = tree(f.dir);
     const result = spawnSync('bash', [join(source, 'setup'), '--host', 'codex', '--no-team', '--no-plan-tune-hooks', '--no-timeline-stop-hook'], {
-      cwd: f.other, env: f.env, encoding: 'utf8', timeout: 60_000,
+      cwd: f.other, env: f.env, encoding: 'utf8', timeout: 120_000,
     });
     expect(result.status, result.stdout + result.stderr).toBe(1);
     expect(result.stderr).toContain('Codex rename workflow write');
     expect(tree(f.dir)).toEqual(before);
-  }, 90_000);
+  }, 180_000);
 
   for (const alias of ['SKILL leaf', 'metadata parent']) test(`direct relocation refuses a generated absolute ${alias} before moving source`, () => {
     const f = fixture('ordinary');
@@ -235,12 +240,12 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     }
     const before = tree(f.dir);
     const result = spawnSync('bash', [join(direct, 'setup'), '--host', 'codex', '--no-team', '--no-plan-tune-hooks', '--no-timeline-stop-hook'], {
-      cwd: f.other, env: f.env, encoding: 'utf8', timeout: 60_000,
+      cwd: f.other, env: f.env, encoding: 'utf8', timeout: 120_000,
     });
     expect(result.status, result.stdout + result.stderr).toBe(1);
     expect(result.stderr).toContain('post-relocation generated alias');
     expect(tree(f.dir)).toEqual(before);
-  }, 90_000);
+  }, 180_000);
 
   test('managed rename detaches a metadata parent link without touching its source', () => {
     const f = fixture('ordinary');
@@ -263,5 +268,5 @@ describe.skipIf(process.platform === 'win32')('setup Codex destination follows r
     expect(lstatSync(join(installed, 'agents')).isDirectory()).toBe(true);
     expect(readFileSync(join(sourceAgents, 'user-notes'), 'utf8')).toBe('Preserve source metadata.\n');
     expect(existsSync(join(installed, 'agents/openai.yaml'))).toBe(true);
-  }, 90_000);
+  }, 180_000);
 });
