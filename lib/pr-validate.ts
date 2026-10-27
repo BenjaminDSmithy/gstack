@@ -302,7 +302,9 @@ export interface Selection {
   missingDeclared: string[];
 }
 
-// `from '…'`, `import '…'`, `import('…')`, `require('…')` with a relative specifier.
+// A relative specifier after `from`, a side-effect `import`, `import(...)` or
+// `require(...)`. (Spelled without quotes: test/setup-production-deps.test.ts
+// reads a quoted `from` in a comment as a package import.)
 const IMPORT_RE = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|^\s*import\s+)(['"])(\.{1,2}\/[^'"\n]+)\1/gm;
 // Any other relative path literal: path.join(import.meta.dir, '../src/x.ts'), new URL('../src/x.ts', import.meta.url).
 const REL_LITERAL_RE = /(['"`])(\.{1,2}\/[^'"`\n$]+)\1/g;
