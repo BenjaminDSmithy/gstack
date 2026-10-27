@@ -5590,7 +5590,6 @@ Garry for each; revisit 2026-10-29 unless a date says otherwise.
   `test/setup-codex-scope-namespaces.test.ts` are next. Split
   each by describe block, rerun `bun run test:ubicloud --record-durations` and
   delete the entries. **Effort:** S each. **Priority:** P2.
-**Priority:** P3. **Depends on:** none. **Effort:** S.
 
 ### P2: fork-sync preconditions that assert repo facts from evidence they never gathered (measured 2026-09-28)
 
