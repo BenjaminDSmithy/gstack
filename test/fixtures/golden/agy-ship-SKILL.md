@@ -108,6 +108,8 @@ Completeness: use `Completeness: N/10` only when options differ in coverage. 10 
 
 Accepted shortcuts leave a trail: when the user selects an option that is BOTH Completeness ≤ 7 AND a durable-scope call (architecture or scope-cut, never a turn-level choice), log it via `gstack-decision-log` with the ceiling and the upgrade trigger in the rationale, and, while implementing that option (same edit, no follow-up question), mark each cut corner in code with `gstack-shortcut(dec-<id>): <ceiling>, upgrade when <trigger>` in the language's comment syntax. Never agent-initiated: the marker exists only downstream of the user's explicit choice. /retro harvests these into a debt ledger, joined on the decision id.
 
+Single-select is the DEFAULT — options are mutually exclusive. Set `multiSelect: true` only when every option is an independently-selectable atom whose pro/con/effort stands alone; then score `Completeness: <atom>=X/10` per atom. Bundles or combinations of the same underlying items (`E1+E3`, `All three`, `E1 only`, `Defer all`) are mutually exclusive by construction — `multiSelect: false`, score per option LETTER, and never write "Multi-select" into the question text. Tell: a defer/none option or a do-everything option in the list proves the question is single-select. With 5+ independent atoms use the split chain below, not multiSelect.
+
 `Pros / cons:` in question text; descriptions use literal ✅/❌ bullets, not Pro:/Con:. Each real option: ≥2 pros and ≥1 con, ≥40 chars each. One-way/destructive escape: `✅ No cons — this is a hard-stop choice`.
 
 Neutral posture: `Recommendation: <default> — this is a taste call, no strong preference either way`; `(recommended)` STAYS on the default option for AUTO_DECIDE.
@@ -146,6 +148,7 @@ Before calling AskUserQuestion, verify:
 - [ ] ELI10 paragraph present (stakes line too)
 - [ ] Recommendation line present with concrete reason
 - [ ] Completeness scored (coverage) OR kind-note present (kind)
+- [ ] `multiSelect: false` unless every option is an independently-selectable atom (bundles/combinations ⇒ single-select)
 - [ ] `Pros / cons:` in question; options: ≥2 ✅, ≥1 ❌, ≥40 chars/bullet (or escape)
 - [ ] (recommended) label on one option (even for neutral-posture)
 - [ ] Dual-scale effort labels on effort-bearing options (human/CC)
@@ -669,7 +672,93 @@ For diffs >200 lines (`git diff origin/<base> --stat | tail -1`), recommend
 
 For Design Review: run `source <(~/.gemini/antigravity-cli/skills/gstack/bin/gstack-diff-scope <base> 2>/dev/null)`. If `SCOPE_FRONTEND=true` and no design review exists, mention: "Design Review not run — Step 9 includes the lite check; consider /design-review for a full visual audit."
 
-Continue to Step 2 without asking; Step 9 applies the review gates.
+Continue to Step 1.5 without asking; Step 9 applies the review gates.
+
+---
+
+## Step 1.5: Upstream duplicate audit (pr-prep gate)
+
+Catches the case where a contributor's branch would file a PR that
+duplicates an already-open upstream PR or issue. Without this gate
+the duplicate gets filed and is closed days later, costing reviewer
+time + contributor goodwill.
+
+Skip on:
+- Forks that don't have a tracked upstream remote
+- Branches where the base is the user's own fork (no upstream to dup)
+- Explicit `--skip-pr-prep` flag
+
+Otherwise run the gate. First the precondition probe:
+
+```bash
+_PP_REPORT="${GSTACK_PR_PREP_REPORT:-/tmp/ship-pr-prep-$(git rev-parse --show-toplevel | git hash-object --stdin | cut -c1-8).json}"
+if gh repo view --json nameWithOwner -q .nameWithOwner >/dev/null 2>&1; then
+  echo "PR_PREP_GATE: run"
+else
+  echo "PR_PREP_GATE: skip (no upstream repo detected)"
+fi
+rm -f "$_PP_REPORT"
+echo "PR_PREP_REPORT: $_PP_REPORT"
+```
+
+The report path is keyed on the repo root, so two ships running in
+different worktrees of the same project never read each other's verdict.
+Bash blocks run in separate shells: every block that touches the report
+re-derives the path with the same line, and pr-prep's Step 5b does too.
+
+If `PR_PREP_GATE` is `skip`, continue to Step 2.
+
+If it is `run`, invoke the pr-prep skill with the Skill tool and NO
+arguments (that is its audit; a host without a Skill tool reads
+`~/.gemini/antigravity-cli/skills/gstack/pr-prep/SKILL.md` and follows the audit), under
+its `/ship` contract (its Step 7):
+
+- Treat `GSTACK_FROM_SHIP` as set: skip pr-prep's own AskUserQuestion
+  confirmations, it is ship that owns the gate decision
+- Its Step 5b writes the report (`worst`: EXACT_DUP|UNVERIFIED|OVERLAP|
+  SIBLING|CLEAN) before returning here, including on EXACT_DUP
+
+Then enforce the gate on that report:
+
+```bash
+_PP_REPORT="${GSTACK_PR_PREP_REPORT:-/tmp/ship-pr-prep-$(git rev-parse --show-toplevel | git hash-object --stdin | cut -c1-8).json}"
+if [ ! -f "$_PP_REPORT" ]; then
+  PR_PREP_WORST=UNVERIFIED
+  echo "[ship] pr-prep produced no report — PR_PREP_WORST: UNVERIFIED (audit did not clear the branch)" >&2
+else
+  PR_PREP_WORST=$(jq -r '.worst // "UNVERIFIED"' "$_PP_REPORT" 2>/dev/null || echo UNVERIFIED)
+  jq -r '.summary // empty' "$_PP_REPORT" 2>/dev/null || true
+  echo "PR_PREP_WORST: $PR_PREP_WORST"
+fi
+```
+
+If the report is missing but the inline audit you just ran bucketed any
+commit EXACT_DUP, treat `PR_PREP_WORST` as `EXACT_DUP`. A lost report
+must never un-block a duplicate.
+
+If `PR_PREP_WORST` is `EXACT_DUP` and `--skip-pr-prep` was not passed,
+ABORT ship and print:
+
+```
+✗ Ship aborted: pr-prep found exact duplicate upstream work.
+  Resolution paths:
+    1. Close your version, comment on the upstream PR with your angle
+    2. Cherry-pick unique parts to a new branch + file separately
+    3. Override with /ship --skip-pr-prep if coordinated with the upstream PR author
+```
+
+`UNVERIFIED` means an upstream search did not run (or the report is unreadable):
+say the audit did NOT clear the branch, then continue. `OVERLAP` / `SIBLING` /
+`CLEAN` are informational — continue to Step 2.
+
+Note: the report is read again in Step 19 (PR body assembly) to
+surface SIBLING / OVERLAP findings as a collapsed "Upstream context"
+section in the PR body. SIBLING context helps reviewers triage faster;
+it does NOT block ship.
+
+If the pr-prep skill is not installed (older gstack install), fall
+through with a stderr warn and continue. Don't hard-fail ship on a
+missing skill.
 
 ---
 
@@ -1043,6 +1132,83 @@ states its reason and nothing more. Otherwise continue to Step 17.
 ---
 
 ## Step 17: Push
+
+**Upstream PR check — before anything is pushed.** A PR on a repo that
+`origin` is not (a fork PR to someone else's project) is the owner's to write to.
+The check reads the upstream from origin's URL (its GitHub fork parent, plus every
+other remote on origin's GitHub host, the only host where the branch this step
+pushes can head a PR), never from gh's default repo. Steps 10, 18 and 19 run bare
+`gh`, which acts on gh's default repo on any host (`gh pr` and `gh api` take
+`GH_REPO` first, `gh repo view` ignores it), so when origin is not a fork the
+check asks gh for both: `none` needs each to be origin's own, and any other is
+asked like an upstream and named on an `UPSTREAM_PR_DEFAULT` line. A GitHub
+Enterprise host counts when gh has a login there, even one that cannot answer
+now (that stops below; a gh before 2.81 lacks `auth status --json`, so only its
+own words for a missing login rule a host out, and a gh that does not run counts
+a host if `hosts.yml` or `GH_HOST` names it or that file cannot be checked); its
+repos print as `<host>/<owner>/<name>`, which /pr-prep's watch poll refuses
+(exit 2), so the owner handles that PR by hand:
+
+```bash
+_ghrepo() {
+  _u=$(printf '%s' "$_u" | tr 'A-Z' 'a-z'); _a=0
+  case "$_u" in (ssh://*|git+ssh://*|ssh+git://*) _a=1; _u=${_u#*://} ;; (*://*) _u=${_u#*://} ;; (*:*) _a=1; _u=${_u%%:*}/${_u#*:} ;; (*) return 1 ;; esac
+  _h=${_u%%/*}; _h=${_h##*@}; _h=${_h%%:*}; _u=${_u#*/}; _u=${_u#/}; _u=${_u%/}; _u=${_u%.git}
+  case "$_u" in (*/*/*|*[!a-z0-9._/-]*) return 1 ;; (?*/?*) ;; (*) return 1 ;; esac
+  [ "$_a" = 0 ] || case "$_h" in (github.com|*.github.com) ;; (*) _s=$(ssh -G "$_h" 2>/dev/null | sed -n 's/^hostname //p' | tr 'A-Z' 'a-z'); _h=${_s:-$_h} ;; esac
+  case "$_h" in (github.com|*.github.com) printf '%s\n' "$_u"; return 0 ;; (""|*[!a-z0-9.-]*) return 1 ;; esac
+  case "$(gh auth status --hostname "$_h" --json hosts --jq '.hosts|length' 2>/dev/null)" in ([1-9]*) ;; (0) return 1 ;;
+    (*) command -v gh >/dev/null || return 1
+      if gh --version >/dev/null 2>&1; then case "$(gh auth status --hostname "$_h" 2>&1)" in (*"not logged into any"*|*"not found among authenticated"*) return 1 ;; esac
+      else _g=${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/hosts.yml; echo "UPSTREAM_PR_NOTE: gh does not run; $_h counts if hosts.yml or GH_HOST names it, or that file cannot be checked" >&2
+        [ "$(printf '%s' "$GH_HOST" | tr 'A-Z' 'a-z')" = "$_h" ] || { [ -e "$_g" ] || { _d=$_g; while [ ! -e "${_d:-/}" ] && [ ! -L "${_d:-/}" ]; do case "$_d" in (*/*) _d=${_d%/*} ;; (*) _d=.; break ;; esac; done; [ ! -x "${_d:-/}" ] || return 1; }
+          grep -qxF "$_h:" "$_g"; [ $? != 1 ] || return 1; }; fi ;; esac
+  printf '%s/%s\n' "$_h" "$_u"
+}
+_u=$(git remote get-url --push origin 2>/dev/null); _FORK=$(_ghrepo) || { echo "UPSTREAM_PR: none"; exit 0; }
+_UP=$(gh repo view "$_FORK" --json nameWithOwner,parent -q '.nameWithOwner + " " + (if .parent then .parent.owner.login + "/" + .parent.name else "" end)' 2>/dev/null | tr 'A-Z' 'a-z') && [ -n "$_UP" ] || { echo "UPSTREAM_PR: lookup failed origin ($_FORK) - STOP"; exit 1; }
+case "$_FORK" in (*/*/*) _P=${_FORK%%/*}/ ;; (*) _P="" ;; esac
+_O=$_P${_UP%% *}; _SEEN=" $_FORK $_O "; _NEW=${_UP#* }; _NEW=${_NEW:+$_P$_NEW}; _OPEN=""
+_prs() { gh pr list --repo "$_C" --head <branch-name> --state open --json number -q '.[].number'; }
+_ask() {
+  case "$_SEEN" in (*" $_C "*) return 0 ;; esac; _SEEN="$_SEEN$_C "
+  if _N=$(_prs 2>/dev/null); then [ -z "$_N" ] || _OPEN="$_OPEN$(printf '%s\n' "$_N" | tr '\n' ' ')$_C "; return 0; fi
+  [ -n "$_R" ] && case "$(_prs 2>&1 >/dev/null)" in (*"Could not resolve to a Repository"*) echo "UPSTREAM_PR_SKIP: remote $_R ($_C) not found on GitHub; not checked"; return 0 ;; esac
+  echo "UPSTREAM_PR: lookup failed ${_R:+remote }${_R:-$_L} ($_C) - STOP"; exit 1
+}
+_L="fork parent"; _R=""; _C=$_NEW; [ -z "$_C" ] || _ask
+for _R in $(git remote); do [ "$_R" = origin ] || { _C=$(_u=$(git remote get-url "$_R" 2>/dev/null); _ghrepo) && case "$_C" in (*/*/*) [ "${_C%%/*}/" = "$_P" ] ;; (*) [ -z "$_P" ] ;; esac && _ask; }; done
+_L="gh's default repo"; _R=""
+for _D in "" ${GH_REPO:+"$GH_REPO"}; do [ -n "$_OPEN$_NEW" ] || { _C=$(_u=$(gh repo view ${_D:+"$_D"} --json url -q .url 2>/dev/null); _ghrepo) || { echo "UPSTREAM_PR: lookup failed $_L - STOP"; exit 1; }
+  [ "$_C" = "$_O" ] || { echo "UPSTREAM_PR_DEFAULT: $_L is $_C, not origin's $_O"; _NEW=$_C; _ask; }; }; _L=GH_REPO; done
+if [ -n "$_OPEN" ]; then echo "UPSTREAM_PR: open ${_OPEN% }"; elif [ -n "$_NEW" ]; then echo "UPSTREAM_PR: new $_NEW"; else echo "UPSTREAM_PR: none"; fi
+```
+
+- `none`: continue below.
+- `new <repo>`: push below, then skip Steps 18-19: a PR on someone else's
+  repo opens only on the owner's instruction naming the branch, through
+  `/pr-prep open` (draft, upstream's template). Print that handoff, then Step 20.
+- `open <number> <repo>`: /ship never writes to that PR. Do not push and
+  skip Steps 18-19 (a fresh body would drop the owner's screenshot and ticked
+  boxes). Print the handoff:
+  `~/.gemini/antigravity-cli/skills/gstack/bin/gstack-pr-watch poll --pr <number> --repo <repo>`
+  must exit 0 before the owner pushes, then `/pr-prep body` refreshes the
+  description. Then Step 20.
+- `lookup failed`: STOP; an unknown PR state never means no PR. The line names
+  what gh could not read (origin, the fork parent, a remote or gh's default
+  repo): repair gh (itself, after an `UPSTREAM_PR_NOTE` line), its login or
+  network, fix or remove that remote, or point gh's default at origin (below),
+  then rerun.
+- An `UPSTREAM_PR_NOTE` line: gh is installed but does not run (`gh --version`
+  fails): its hosts file decided the host. Report it so the owner can repair gh.
+- An `UPSTREAM_PR_SKIP` line names a remote whose repo gh cannot find (deleted,
+  renamed, or private and out of this login's reach). It went unchecked; report
+  it so the owner can fix or remove the remote.
+- An `UPSTREAM_PR_DEFAULT` line: origin is not a fork, but Steps 10, 18 and 19
+  would act on the other repo it names, so the verdict is that repo's. Add to the
+  handoff `gh repo set-default <origin's repo>` (the line names it), or
+  `unset GH_REPO` when the line names GH_REPO, which points them at origin for a
+  rerun; that is the owner's to run.
 
 **Credential pre-push guard — run before the push:**
 
