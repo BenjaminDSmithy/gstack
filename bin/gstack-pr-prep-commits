@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 import { commitsMain } from '../lib/pr-prep-commits';
 
 // process.exit() discards stdout still buffered in a pipe: past 64 KiB a

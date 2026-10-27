@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 import { watchMain } from '../lib/pr-watch';
 
 // process.exit() discards stdout still buffered in a pipe: past 64 KiB (many

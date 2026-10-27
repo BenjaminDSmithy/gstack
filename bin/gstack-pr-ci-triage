@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 import { triageMain } from '../lib/pr-ci-triage';
 
 process.exit(await triageMain(process.argv.slice(2)));

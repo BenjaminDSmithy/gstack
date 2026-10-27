@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /**
  * fork-sync — keep a gstack install that carries its own commits current with
  * upstream, and stop to ask a human whenever that cannot be done mechanically.

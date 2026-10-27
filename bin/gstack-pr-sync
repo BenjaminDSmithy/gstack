@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 import { syncMain } from '../lib/pr-sync';
 
 // process.exit() discards stdout still buffered in a pipe: past 64 KiB a

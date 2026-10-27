@@ -136,6 +136,9 @@
 # exist to exercise the absent-interpreter paths.
 HOOK_SYNTAX_PYTHON="${HOOK_SYNTAX_PYTHON:-python3}"
 HOOK_SYNTAX_BUN="${HOOK_SYNTAX_BUN:-bun}"
+# GSTA-56: the payload check runs inside the tree it checks, so its Bun reads
+# no .env and no bunfig.toml from there (a bunfig preload would run first).
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 
 # Run as `bun -e` in place of `bun build`, so one process both parses a
 # payload and names what it imports. Same bundle: target bun, npm packages
@@ -396,7 +399,7 @@ _hook_syntax_check_bun() {
     return
   fi
   [ "$queued" -eq 1 ] || HOOK_SYNTAX_CHECKED=$((HOOK_SYNTAX_CHECKED + 1))
-  if ! out=$("$HOOK_SYNTAX_BUN" -e "$HOOK_SYNTAX_BUN_JS" "$1" 2>&1); then
+  if ! out=$("$HOOK_SYNTAX_BUN" --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e "$HOOK_SYNTAX_BUN_JS" "$1" 2>&1); then
     printf 'hook-syntax: FAILS TO PARSE %s\n' "$1" >&2
     printf '%s\n' "$out" >&2
     return 1
@@ -442,9 +445,8 @@ _hook_syntax_check_bun() {
 
 # Find what every queued shell file hands to bun, and parse each of those. One
 # grep over all of them; the shape is `bun "$VAR/<rel>"`, with or without
-# `exec`, `run` and bun options before the path (upstream's shims pass
-# `--no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}"`), resolved
-# against the shim's own directory. VAR is HERE, or
+# `exec`, `run` and bun options before the path (upstream's shims pass Bun's
+# isolation flags there), resolved against the shim's own directory. VAR is HERE, or
 # a variable the same file sets from its own directory; any other variable
 # names somewhere else, and the path is not followed.
 _hook_syntax_payloads() {

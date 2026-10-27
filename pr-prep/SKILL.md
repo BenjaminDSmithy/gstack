@@ -851,7 +851,7 @@ else
       echo "[pr-prep] CODEX SKIPPED: usage limit hit at $sha — no second opinion for it or any later CLEAN commit. This is NOT a pass."
       break
     fi
-    bun ~/.claude/skills/gstack/lib/outside-review-result.ts --label "Codex pr-prep $sha" \
+    bun --no-env-file --config=/dev/null ~/.claude/skills/gstack/lib/outside-review-result.ts --label "Codex pr-prep $sha" \
       --exit "$rc" --stderr "$_CX/$sha.log" structured "$_CX/$sha.md" > "$_CX/$sha.verdict" 2>/dev/null
     case "$?" in
       0|3)
