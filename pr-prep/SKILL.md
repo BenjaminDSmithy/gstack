@@ -807,7 +807,7 @@ cannot review a named commit with custom instructions: `--base` and
 used with '[PROMPT]'"), and a bare prompt reviews the UNCOMMITTED working
 tree, not the commit the prompt names — on a clean tree that is a review of
 nothing. `codex exec -` reads the prompt on stdin and the commit itself
-with `git show`, in the sandbox `_gstack_codex_sandbox_mode` picks
+with `git show`, in the sandbox `gstack-codex-probe select-model` prints
 (read-only unless `GSTACK_CODEX_NO_SANDBOX=1`).
 
 Set `CLEAN_COMMIT_SHAS` to the CLEAN commits' full SHAs, one per line. The
@@ -826,8 +826,10 @@ if ! command -v codex >/dev/null 2>&1; then
    Install via 'brew install codex' or pin a fork-specific reviewer in
    your skill config."
 else
-  source ~/.claude/skills/gstack/bin/gstack-codex-probe || exit 1
-  _gstack_codex_sandbox_mode
+  _CODEX_PROBE=~/.claude/skills/gstack/bin/gstack-codex-probe
+_CODEX_OUT=$("$_CODEX_PROBE" select-model exec) || exit 1
+_CODEX_SEL=$(echo "$_CODEX_OUT" | sed -n 's/^CODEX_SEL: //p')
+_CODEX_SANDBOX_MODE=$(echo "$_CODEX_OUT" | sed -n 's/^CODEX_SANDBOX: //p')
   _CX=$(mktemp -d "${TMPDIR:-/tmp}/gstack-pr-prep-codex.XXXXXX")
   printf '%s\n' "$CLEAN_COMMIT_SHAS" | tr -s ' \t' '\n\n' | while IFS= read -r sha; do
     [ -n "$sha" ] || continue
@@ -841,7 +843,7 @@ else
       touching conditionals or dispatchers. Tag each issue P0/P1/P2 with
       file:line, or answer NO_FINDINGS if there are none. Do not modify any
       file." > "$_CX/$sha.prompt"
-    codex exec - -C "$_REPO_ROOT" -s "${_GSTACK_CODEX_SANDBOX:?}" -o "$_CX/$sha.md" \
+    codex exec - -C "$_REPO_ROOT" -s "${_CODEX_SANDBOX_MODE:?}" -c "model=\"${_CODEX_SEL:?}\"" -c skills.include_instructions=false -o "$_CX/$sha.md" \
       < "$_CX/$sha.prompt" > "$_CX/$sha.log" 2>&1
     rc=$?
     review_bytes=0

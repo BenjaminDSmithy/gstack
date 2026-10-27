@@ -334,7 +334,11 @@ describe('pr-prep Step 4.4: codex second opinion', () => {
       expect(b).not.toMatch(/codex review\s+"/);
       expect(b).not.toMatch(/codex review\s+--(base|commit)\s+\S+\s+"/);
     }
-    expect(CODEX_BLOCK).toContain('codex exec - -C "$_REPO_ROOT" -s "${_GSTACK_CODEX_SANDBOX:?}"');
+    // The sandbox and model come from the executed probe (upstream's
+    // {{CODEX_SELECT:exec}}), never from a sourced one.
+    expect(CODEX_BLOCK).toContain('_CODEX_OUT=$("$_CODEX_PROBE" select-model exec) || exit 1');
+    expect(CODEX_BLOCK).toContain('codex exec - -C "$_REPO_ROOT" -s "${_CODEX_SANDBOX_MODE:?}" -c "model=\\"${_CODEX_SEL:?}\\""');
+    expect(CODEX_BLOCK).not.toMatch(/source [^\n]*gstack-codex-probe/);
     expect(CODEX_BLOCK).toContain('< "$_CX/$sha.prompt"');
     expect(CODEX_BLOCK).toContain('outside-review-result.ts');
     expect(CODEX_BLOCK).not.toMatch(/for sha in \$/);
