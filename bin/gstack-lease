@@ -36,9 +36,9 @@
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd -P)"
 # shellcheck source=bin/gstack-install-verdict.sh
-. "$BIN/gstack-install-verdict.sh" 2>/dev/null || gstack_source_root() { (cd "$1/.." && pwd -P); }
+[ -r "$BIN/gstack-install-verdict.sh" ] && . "$BIN/gstack-install-verdict.sh" 2>/dev/null || gstack_source_root() { (cd "$1/.." && pwd -P); }
 # shellcheck source=bin/gstack-harness-pid.sh
-. "$BIN/gstack-harness-pid.sh" 2>/dev/null || gstack_harness_pid() { printf '%s\n' "$1"; }
+[ -r "$BIN/gstack-harness-pid.sh" ] && . "$BIN/gstack-harness-pid.sh" 2>/dev/null || gstack_harness_pid() { printf '%s\n' "$1"; }
 
 VERB="${1:-}"; [ $# -gt 0 ] && shift
 ROOT="" PID="" EXCLUDE="" FROM=""

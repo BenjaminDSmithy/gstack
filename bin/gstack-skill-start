@@ -61,7 +61,7 @@ done
 # lease and the session marker name the same pid). Without the helper the
 # immediate parent stands.
 # shellcheck source=bin/gstack-harness-pid.sh
-. "$(dirname "$0")/gstack-harness-pid.sh" 2>/dev/null || gstack_harness_pid() { printf '%s\n' "$1"; }
+[ -r "$(dirname "$0")/gstack-harness-pid.sh" ] && . "$(dirname "$0")/gstack-harness-pid.sh" 2>/dev/null || gstack_harness_pid() { printf '%s\n' "$1"; }
 if [ -z "$PARENT_PID" ]; then
   PARENT_PID=$(gstack_harness_pid "$PPID")
 fi
@@ -430,7 +430,7 @@ elif [ -d "$_GH/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
     # The merge writes the artifacts repo's git state, so it takes the drain
     # lock every gstack writer shares; when a drain holds it, the pull waits
     # for the next start (no stamp).
-    . "$_BIN/gstack-brain-lock.sh" 2>/dev/null || true
+    [ -r "$_BIN/gstack-brain-lock.sh" ] && . "$_BIN/gstack-brain-lock.sh" 2>/dev/null || true
     if command -v _receipted_git >/dev/null 2>&1 && command -v gstack_brain_lock_acquire >/dev/null 2>&1 \
         && gstack_brain_lock_acquire "$_GH" try; then
       # Non-interactive + slow-network bounded (same guards as gstack-update-check):

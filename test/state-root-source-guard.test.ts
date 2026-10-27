@@ -42,7 +42,11 @@ interface Site { rel: string; line: number; text: string }
  * What a script needs to reach its source line with the twin missing. Most
  * need nothing; these exit earlier on an empty env.
  */
-const REACH: Record<string, { args?: string[]; env?: (tmp: string) => Record<string, string>; prep?: (tmp: string) => void; unreachable?: string }> = {
+type Outcome = { status: number | null; stdout: string; stderr: string };
+// `ok` replaces the reinstall-line check for an executable whose first twin
+// has a stub fallback (the twin is optional) or that stops at its own
+// preflight first: the run must end THAT way, never in a silent exit.
+const REACH: Record<string, { args?: string[]; env?: (tmp: string) => Record<string, string>; prep?: (tmp: string) => void; unreachable?: string; ok?: (r: Outcome) => boolean }> = {
   'bin/gstack-brain-enqueue': { args: ['entry.md'] },
   'bin/gstack-relink': { env: tmp => ({ GSTACK_INSTALL_DIR: path.join(tmp, 'tree') }) },
   'gstack-upgrade/migrations/v1.17.0.0.sh': {
@@ -53,6 +57,16 @@ const REACH: Record<string, { args?: string[]; env?: (tmp: string) => Record<str
     },
   },
   'bin/gstack-repo-mode': { unreachable: 'reaches its source only after gstack-slug resolves a slug, and gstack-slug needs the same twin' },
+  // Upstream executables added after v1.91.33 (fork rekey 2026-10-27).
+  // Optional doctor components (stub fallback), then its own checkout preflight.
+  'bin/gstack-capy-install': { ok: r => r.status === 3 && /is not a gstack checkout/.test(r.stderr) },
+  'bin/gstack-codex-probe': { unreachable: 'its first source sits in a subcommand path (no args prints usage, exit 64), and bash --posix rejects the file\'s process substitution before anything runs' },
+  // A missing twin is a doctor row on stdout (status 1), not the reinstall line.
+  'bin/gstack-doctor': { ok: r => r.status === 1 && /gstack-state-root\.sh is missing/.test(r.stdout) },
+  // Stub fallbacks: with the twins gone the script still runs to its own output.
+  'bin/gstack-lease': { ok: r => r.status === 0 && r.stderr === '' && r.stdout.includes('gstack-lease') },
+  'bin/gstack-update-channel.sh': { ok: r => r.status === 0 && r.stderr === '' && r.stdout.trim() === 'main' },
+  'bin/gstack-upgrade': { ok: r => r.status === 3 && /is not a gstack checkout/.test(r.stderr) },
 };
 
 function headBytes(abs: string, n: number): string {
@@ -205,7 +219,8 @@ describe('sourced twin missing', () => {
           const r = runCaptured([...lane.argv, script, ...(reach.args ?? [])], tmp, {
             cwd: path.join(tmp, 'cwd'), env: { ...scrubbedEnv(tmp), ...reach.env?.(tmp) },
           });
-          const ok = failOpen
+          const ok = reach.ok ? reach.ok(r)
+            : failOpen
             ? r.status === 0 && r.stderr === ''
             : r.status === 1 && /is missing\. fix: reinstall with \.\/setup or \/gstack-upgrade/.test(r.stderr);
           const wroteHome = listTree(path.join(tmp, 'home')).join('\n') !== homeBefore.join('\n');

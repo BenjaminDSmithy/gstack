@@ -74,7 +74,7 @@ stop() { # CODE MESSAGE FIX — print and exit 3 before ./setup
   exit 3
 }
 # Result-code anchors come from the generated table (lib/result-codes.ts).
-. "$SELF/bin/gstack-doctor-components.sh" 2>/dev/null || { gstack_result_anchor() { return 1; }; gstack_doctor_install_profile() { return 1; }; }
+[ -r "$SELF/bin/gstack-doctor-components.sh" ] && . "$SELF/bin/gstack-doctor-components.sh" 2>/dev/null || { gstack_result_anchor() { return 1; }; gstack_doctor_install_profile() { return 1; }; }
 PROFILE=0; [ -n "$FOR" ] && gstack_doctor_install_profile "$FOR" && PROFILE=1
 now() { date +%s; }
 T0=$(now); ORIG_PWD=$(pwd)
@@ -124,9 +124,9 @@ elif [ -n "${GSTACK_CAPY_CLONED:-}" ]; then
 else
   say "reusing $ROOT ($(head -1 "$ROOT/VERSION")); never reset or pulled"
 fi
-. "$ROOT/bin/gstack-bun-version.sh" || stop INSTALL_PREFLIGHT_FAILED "$ROOT/bin/gstack-bun-version.sh is missing" "re-clone gstack"
-. "$ROOT/bin/gstack-install-verdict.sh" || stop INSTALL_PREFLIGHT_FAILED "$ROOT/bin/gstack-install-verdict.sh is missing" "re-clone gstack"
-. "$ROOT/bin/gstack-node-runtime.sh" || stop INSTALL_PREFLIGHT_FAILED "$ROOT/bin/gstack-node-runtime.sh is missing" "re-clone gstack"
+[ -r "$ROOT/bin/gstack-bun-version.sh" ] && . "$ROOT/bin/gstack-bun-version.sh" || stop INSTALL_PREFLIGHT_FAILED "$ROOT/bin/gstack-bun-version.sh is missing" "re-clone gstack"
+[ -r "$ROOT/bin/gstack-install-verdict.sh" ] && . "$ROOT/bin/gstack-install-verdict.sh" || stop INSTALL_PREFLIGHT_FAILED "$ROOT/bin/gstack-install-verdict.sh is missing" "re-clone gstack"
+[ -r "$ROOT/bin/gstack-node-runtime.sh" ] && . "$ROOT/bin/gstack-node-runtime.sh" || stop INSTALL_PREFLIGHT_FAILED "$ROOT/bin/gstack-node-runtime.sh is missing" "re-clone gstack"
 
 # 2. Preflight: tools, then Bun through the one resolution contract
 # (gstack_bun_resolve: the project's exact pin and gstack's install default in

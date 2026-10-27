@@ -79,7 +79,7 @@ VERSION_FILE="$GSTACK_DIR/VERSION"
 # Channel (bin/gstack-update-channel.sh, docs/releases.md): a stable install
 # compares with refs/heads/stable, the weekly release, so it is not told every
 # hour that main moved. A missing helper means main.
-. "$GSTACK_DIR/bin/gstack-update-channel.sh" 2>/dev/null || gstack_update_channel() { echo main; }
+[ -r "$GSTACK_DIR/bin/gstack-update-channel.sh" ] && . "$GSTACK_DIR/bin/gstack-update-channel.sh" 2>/dev/null || gstack_update_channel() { echo main; }
 CHANNEL=$(gstack_update_channel "$GSTACK_DIR" 2>/dev/null) || CHANNEL=main
 case "$CHANNEL" in stable|main) ;; *) CHANNEL=main ;; esac
 REMOTE_RAW_BASE="${GSTACK_REMOTE_RAW_BASE:-https://raw.githubusercontent.com/garrytan/gstack}"

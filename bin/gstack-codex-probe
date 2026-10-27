@@ -296,7 +296,7 @@ _gstack_codex_consent() {
   [ "${1:-0}" = 1 ] && return 0
   local _out _detail
   _out=$(
-    . "$_GSTACK_CODEX_BIN/gstack-state-root.sh" 2>/dev/null || { printf 'unreadable:the gstack state-root helper could not be loaded'; exit 0; }
+    [ -r "$_GSTACK_CODEX_BIN/gstack-state-root.sh" ] && . "$_GSTACK_CODEX_BIN/gstack-state-root.sh" 2>/dev/null || { printf 'unreadable:the gstack state-root helper could not be loaded'; exit 0; }
     gstack_state_root_select; gstack_legacy_root_select
     for _r in "$_gstack_sr_root" "$_gstack_legacy_root"; do
       [ -n "$_r" ] || continue

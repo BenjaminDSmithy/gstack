@@ -60,12 +60,12 @@ bounded() { if command -v timeout >/dev/null 2>&1; then timeout "${GSTACK_UPGRAD
 # Egress receipts (_receipted_git), fail-open like the session-start updater:
 # a user-run upgrade must not die over an audit-log hiccup.
 # shellcheck source=bin/gstack-egress-lib.sh
-. "$ROOT/bin/gstack-egress-lib.sh" 2>/dev/null || _receipted_git() { shift 5; "$@"; }
+[ -r "$ROOT/bin/gstack-egress-lib.sh" ] && . "$ROOT/bin/gstack-egress-lib.sh" 2>/dev/null || _receipted_git() { shift 5; "$@"; }
 
 # Git for Windows answers --show-toplevel as C:/x while pwd -P in Git Bash is
 # /c/x; compare the paths, not their spellings.
 # shellcheck source=bin/gstack-path-spelling.sh
-. "$ROOT/bin/gstack-path-spelling.sh" 2>/dev/null || gstack_path_same() { [ "$1" = "$2" ]; }
+[ -r "$ROOT/bin/gstack-path-spelling.sh" ] && . "$ROOT/bin/gstack-path-spelling.sh" 2>/dev/null || gstack_path_same() { [ "$1" = "$2" ]; }
 TOPLEVEL=$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null)
 [ -f "$ROOT/VERSION" ] && [ -f "$ROOT/setup" ] && [ -n "$TOPLEVEL" ] && gstack_path_same "$TOPLEVEL" "$ROOT" \
   || refuse "$ROOT is not a gstack checkout" "run gstack-upgrade from a git checkout of https://github.com/garrytan/gstack"
@@ -83,7 +83,7 @@ DEFAULT=$(_receipted_git open gstack-upgrade "${HOST:-unknown}" gstack-self-upda
 # the default branch's history, so the fast-forward rules below are unchanged.
 # Before the first release is cut origin has no stable, and main is followed.
 # shellcheck source=bin/gstack-update-channel.sh
-. "$ROOT/bin/gstack-update-channel.sh" 2>/dev/null || gstack_update_channel() { echo main; }
+[ -r "$ROOT/bin/gstack-update-channel.sh" ] && . "$ROOT/bin/gstack-update-channel.sh" 2>/dev/null || gstack_update_channel() { echo main; }
 CHANNEL=$(gstack_update_channel "$ROOT" 2>/dev/null) || CHANNEL=main
 FOLLOW=$DEFAULT
 if [ "$CHANNEL" = stable ]; then

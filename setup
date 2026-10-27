@@ -4846,7 +4846,7 @@ fi
 # see and Git Bash reports as "Permission denied". Probe each compiled binary.
 _windows_launch_summary() {
   local rel detail shell wsl
-  . "$SOURCE_GSTACK_DIR/bin/gstack-launch-probe.sh" || return 0
+  [ -r "$SOURCE_GSTACK_DIR/bin/gstack-launch-probe.sh" ] && . "$SOURCE_GSTACK_DIR/bin/gstack-launch-probe.sh" || return 0
   gstack_launch_probe_all "$SOURCE_GSTACK_DIR" ".exe"
   if [ -n "$_glp_blocked" ]; then
     case "$(uname -s)" in

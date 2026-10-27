@@ -57,7 +57,7 @@ STATE_DIR="$(gstack_state_root; printf x)"; STATE_DIR="${STATE_DIR%x}"
 # Update channel (docs/releases.md): a team install follows refs/heads/stable,
 # the weekly tagged release, unless update_channel says main. A missing
 # helper means main, the behaviour before channels existed.
-. "$(cd "$(dirname "$0")" && pwd)/gstack-update-channel.sh" 2>/dev/null || {
+[ -r "$(cd "$(dirname "$0")" && pwd)/gstack-update-channel.sh" ] && . "$(cd "$(dirname "$0")" && pwd)/gstack-update-channel.sh" 2>/dev/null || {
   gstack_update_channel() { echo main; }
   gstack_update_channel_refspec() { :; }
   gstack_update_channel_missing() { return 1; }
@@ -71,7 +71,7 @@ FF_UPDATE="$(cd "$(dirname "$0")" && pwd)/gstack-ff-update"
 LEASE="$(cd "$(dirname "$0")" && pwd)/gstack-lease"
 RESCUE_FILE="$STATE_DIR/session-update-rescues"
 # Path spelling (Git Bash /c/x vs native C:/x) for the held-reason prefix strip.
-. "$(cd "$(dirname "$0")" && pwd)/gstack-path-spelling.sh" 2>/dev/null || { gstack_path_shell() { printf '%s\n' "$1"; }; gstack_path_native() { printf '%s\n' "$1"; }; }
+[ -r "$(cd "$(dirname "$0")" && pwd)/gstack-path-spelling.sh" ] && . "$(cd "$(dirname "$0")" && pwd)/gstack-path-spelling.sh" 2>/dev/null || { gstack_path_shell() { printf '%s\n' "$1"; }; gstack_path_native() { printf '%s\n' "$1"; }; }
 THROTTLE_SECONDS=3600  # 1 hour
 
 log_entry() {
@@ -290,7 +290,7 @@ fi
 # harness pid now, the same way bin/gstack-skill-start names the pid it leases:
 # once this hook exits, the background updater's $$ names a dead process and
 # an ancestry walk from it excludes nothing.
-. "$(cd "$(dirname "$0")" && pwd)/gstack-harness-pid.sh" 2>/dev/null || gstack_harness_pid() { printf '%s\n' "$1"; }
+[ -r "$(cd "$(dirname "$0")" && pwd)/gstack-harness-pid.sh" ] && . "$(cd "$(dirname "$0")" && pwd)/gstack-harness-pid.sh" 2>/dev/null || gstack_harness_pid() { printf '%s\n' "$1"; }
 CALLER_PID=$(gstack_harness_pid "$PPID")
 
 # ── Fork to background: zero latency on session start ──

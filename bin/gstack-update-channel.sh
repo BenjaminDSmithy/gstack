@@ -70,7 +70,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   _uc_ch=$(gstack_update_channel "$_uc_root")
   if [ "$_uc_fetch" -eq 0 ]; then printf '%s\n' "$_uc_ch"; exit 0; fi
   # Egress receipts for the fetches below, fail-open like /gstack-upgrade's own.
-  . "$(dirname "$0")/gstack-egress-lib.sh" 2>/dev/null || _receipted_git() { shift 5; "$@"; }
+  [ -r "$(dirname "$0")/gstack-egress-lib.sh" ] && . "$(dirname "$0")/gstack-egress-lib.sh" 2>/dev/null || _receipted_git() { shift 5; "$@"; }
   _uc_host=$(git -C "$_uc_root" remote get-url origin 2>/dev/null); _uc_host=${_uc_host#*://}; _uc_host=${_uc_host#*@}; _uc_host=${_uc_host%%[/:]*}
   export GIT_TERMINAL_PROMPT=0
   if [ "$_uc_ch" = stable ]; then
