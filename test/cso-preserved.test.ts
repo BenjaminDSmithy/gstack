@@ -96,7 +96,9 @@ describe('CSO v3 always-loaded policy', () => {
   });
 
   test('controller stays compact without moving proof policy behind a section read', () => {
-    expect(Buffer.byteLength(template())).toBeLessThan(18_000);
+    // Fork: +31B for the frontmatter's `disable-model-invocation: true`
+    // (18,026 on v1.91.262, upstream 17,995).
+    expect(Buffer.byteLength(template())).toBeLessThan(18_050);
     expect(Buffer.byteLength(controller())).toBeLessThan(20_000);
     expect(Buffer.byteLength(controller() + domain())).toBeLessThan(36_000);
     const frontmatter = controller().match(/^---\n([\s\S]*?)\n---/)![1];
