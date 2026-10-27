@@ -53,6 +53,9 @@ async function withAgent(script: string[], pidFiles: string[], body: (ctx: { age
       env: {
         ...process.env,
         BROWSE_STATE_FILE: stateFile,
+        // Fork: owned by this test process, so a shard kill cannot orphan it
+        // (browse/test/terminal-agent-owner-watchdog.test.ts).
+        BROWSE_OWNER_PID: String(process.pid),
         BROWSE_SERVER_PORT: '0',
         BROWSE_TERMINAL_BINARY: terminalCli,
         GSTACK_STATE_ROOT: stateDir,
