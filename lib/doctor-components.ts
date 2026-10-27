@@ -184,6 +184,9 @@ export const SKILL_REQUIREMENTS: Readonly<Record<string, SkillRequirement>> = {
   'ios-sync': CLAUDE_ONLY,
   'landing-report': CLAUDE_ONLY,
   learn: CLAUDE_ONLY,
+  // Fork-only skill: gh and git; its Codex second opinion runs only when
+  // the codex CLI is installed.
+  'pr-prep': { requires: ['claude'], optional: ['codex-cli'] },
   retro: CLAUDE_ONLY,
   'setup-deploy': CLAUDE_ONLY,
   'setup-gbrain': CLAUDE_ONLY,
