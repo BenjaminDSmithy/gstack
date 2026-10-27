@@ -63,11 +63,12 @@ const RATIO = Number(process.env.GSTACK_SIZE_BUDGET_RATIO) || DEFAULT_RATIO;
 // and reasoned. Every other skill keeps the default.
 const SKILL_RATIO: Record<string, { ratio: number; reason: string }> = {
   'gstack-upgrade': {
-    ratio: 1.77,
+    ratio: 1.90,
     reason: 'fork: hook parse gate on every fast-forward (Step 4 +3,597B), fork-install routing (Step 0 +1,298B) '
       + 'and host-aware install detection (Step 2 +1,057B) over upstream\'s 21,845B render; '
       + 'measured 28,036 / 16,077 = 1.744 (2026-10-05, v1.91.24.0). Same +6,191B over upstream\'s 22,170B '
-      + 'render: 28,361 / 16,077 = 1.764 (2026-10-08, v1.91.33.0)',
+      + 'render: 28,361 / 16,077 = 1.764 (2026-10-08, v1.91.33.0). +6,373B over upstream\'s 24,099B render (Step 4 gates the '
+      + 'channel commit before gstack-ff-update): 30,472 / 16,077 = 1.895 (2026-10-27, v1.91.262.0)',
   },
 };
 

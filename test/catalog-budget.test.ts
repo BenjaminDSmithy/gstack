@@ -62,8 +62,11 @@ import { skillCensus } from './helpers/skill-census';
  * New-skill ratchet: previous ceiling 1,251 + ceil(150 / 4) = 1,289
  * token-equivalents (5,156 bytes), leaving 6 bytes. Existing descriptions
  * are unchanged.
+ * Fork (v1.91.262 rekey, 2026-10-27): the fork-only pr-prep skill measures
+ * 5,198 bytes = 1,300 token-equivalents on this tree, 11 over upstream's
+ * ceiling, so the fork's ceiling is the measurement.
  */
-const CATALOG_BUDGET_TOKEN_EQUIVALENTS = 1_289;
+const CATALOG_BUDGET_TOKEN_EQUIVALENTS = 1_300;
 
 // Largest today: design-consultation at 229 bytes. A description that needs
 // more than 260 bytes is a body paragraph, not a catalog entry.
