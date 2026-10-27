@@ -856,12 +856,13 @@ _link_runtime_dists() {
 
 # _copy_runtime_skill_refs RENDER_SKILLS ROOT — skills that read another
 # skill's instructions as "$GSTACK_ROOT/<skill>/SKILL.md" get that host's
-# rendered copy there: plan-eng-review's inline office-hours step (#2449) and
-# the plan-design-review sections. Real-file copies, like every SKILL.md in a
+# rendered copy there: plan-eng-review's inline office-hours step (#2449),
+# the plan-design-review sections, and (fork) /ship's Step 1.5 pr-prep gate on
+# a host without a Skill tool. Real-file copies, like every SKILL.md in a
 # runtime root, and only the SKILL.md, never the skill's source directory.
 _copy_runtime_skill_refs() {
   local s
-  for s in office-hours plan-design-review; do
+  for s in office-hours plan-design-review pr-prep; do
     [ -f "$1/gstack-$s/SKILL.md" ] || continue
     mkdir -p "$2/$s"
     _copy_skill_md "$1/gstack-$s/SKILL.md" "$2/$s/SKILL.md"
