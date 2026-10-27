@@ -275,7 +275,7 @@ describe('Greptile replies through the real review/greptile-triage.md blocks', (
     expect(fence(doc, 'GREPTILE_DIR=$(mktemp -d')).toContain('"$GREPTILE_DIR/line.json"');
   });
 
-  for (const [kind, block, args] of [['line-level', lineBlock, ['api', '--method=POST', 'repos/{owner}/{repo}/pulls/7/comments/123/replies', '--field=body=@-']], ['top-level', topBlock, ['pr', 'comment', '7', '--body-file=-']]] as const) {
+  for (const [kind, block, args] of [['line-level', lineBlock, ['api', '--hostname=github.com', '--method=POST', 'repos/{owner}/{repo}/pulls/7/comments/123/replies', '--field=body=@-']], ['top-level', topBlock, ['pr', 'comment', '7', '--body-file=-']]] as const) {
     test(`${kind}: a hostile reply posts byte for byte and nothing in it runs`, () => {
       const s = sandbox(`greptile-${kind}`);
       const canary = path.join(s.dir, 'PWNED');
