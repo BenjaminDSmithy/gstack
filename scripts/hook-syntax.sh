@@ -442,13 +442,15 @@ _hook_syntax_check_bun() {
 
 # Find what every queued shell file hands to bun, and parse each of those. One
 # grep over all of them; the shape is `bun "$VAR/<rel>"`, with or without
-# `exec` and `run`, resolved against the shim's own directory. VAR is HERE, or
+# `exec`, `run` and bun options before the path (upstream's shims pass
+# `--no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}"`), resolved
+# against the shim's own directory. VAR is HERE, or
 # a variable the same file sets from its own directory; any other variable
 # names somewhere else, and the path is not followed.
 _hook_syntax_payloads() {
   [ "${#HOOK_SYNTAX_SHELLS[@]}" -gt 0 ] || return 0
   local hits rest hit shim f text line calls call var rel strict rc=0 tab=$'\t'
-  hits=$(LC_ALL=C grep -nHE 'bun[[:space:]]+(run[[:space:]]+)?"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/' -- "${HOOK_SYNTAX_SHELLS[@]}" 2>/dev/null)
+  hits=$(LC_ALL=C grep -nHE 'bun[[:space:]]+((--[A-Za-z0-9-]+(=("[^"]*"|[^[:space:]"]*))?)[[:space:]]+)*(run[[:space:]]+)?"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/' -- "${HOOK_SYNTAX_SHELLS[@]}" 2>/dev/null)
   [ -n "$hits" ] || return 0
   rest="$hits"
   while [ -n "$rest" ]; do
@@ -494,11 +496,11 @@ _hook_syntax_payloads() {
 _hook_syntax_bun_calls() {
   local LC_ALL=C text="$1"
   local comment_re='^[[:space:]]*#'
-  local bun_re='bun[[:space:]]+(run[[:space:]]+)?"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/([^"]+)"'
+  local bun_re='bun[[:space:]]+((--[A-Za-z0-9-]+(=("[^"]*"|[^[:space:]"]*))?)[[:space:]]+)*(run[[:space:]]+)?"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/([^"]+)"'
   HOOK_SYNTAX_CALLS=''
   [[ $text =~ $comment_re ]] && return 0
   while [[ $text =~ $bun_re ]]; do
-    HOOK_SYNTAX_CALLS="$HOOK_SYNTAX_CALLS${BASH_REMATCH[2]}"$'\t'"${BASH_REMATCH[3]}$HOOK_SYNTAX_NL"
+    HOOK_SYNTAX_CALLS="$HOOK_SYNTAX_CALLS${BASH_REMATCH[6]}"$'\t'"${BASH_REMATCH[7]}$HOOK_SYNTAX_NL"
     text="${text#*"${BASH_REMATCH[0]}"}"
   done
   return 0

@@ -144,7 +144,8 @@ function payloadOf(shimText: string): string | null {
   for (const m of shimText.matchAll(/^\s*(?:export\s+|readonly\s+|local\s+)?([A-Za-z_]\w*)="\$\(cd "\$\(dirname "\$(?:0|\{BASH_SOURCE\[0\]\}|BASH_SOURCE)"\)"/gm)) ownDir.add(m[1]);
   for (const line of shimText.split('\n')) {
     if (/^\s*#/.test(line)) continue;
-    const m = line.match(/bun\s+(?:run\s+)?"\$\{?([A-Za-z_]\w*)\}?\/([^"]+)"/);
+    // Bun options may precede the path (upstream's shims pass --no-env-file --config=...).
+    const m = line.match(/bun\s+(?:--[\w-]+(?:=(?:"[^"]*"|[^\s"]*))?\s+)*(?:run\s+)?"\$\{?([A-Za-z_]\w*)\}?\/([^"]+)"/);
     if (m && ownDir.has(m[1])) return m[2];
   }
   return null;
