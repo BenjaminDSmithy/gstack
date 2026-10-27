@@ -12,6 +12,8 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { generateUpgradeRoot } from '../scripts/resolvers/utility';
+import type { TemplateContext } from '../scripts/resolvers/types';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const FF = path.join(ROOT, 'bin', 'gstack-ff-update');
@@ -384,12 +386,18 @@ describe.skipIf(process.platform === 'win32')('gstack-ff-update: callers', () =>
       fs.writeFileSync(path.join(fx.seed, f), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     }
     fs.copyFileSync(FF, path.join(fx.seed, 'bin', 'gstack-ff-update'));
+    // Fork: Step 4 parse-gates the incoming commit first (bin/gstack-gate-incoming
+    // with scripts/hook-syntax.sh), so the install ships both, as a real one does.
+    fs.copyFileSync(path.join(ROOT, 'bin', 'gstack-gate-incoming'), path.join(fx.seed, 'bin', 'gstack-gate-incoming'));
+    fs.mkdirSync(path.join(fx.seed, 'scripts'), { recursive: true });
+    fs.copyFileSync(path.join(ROOT, 'scripts', 'hook-syntax.sh'), path.join(fx.seed, 'scripts', 'hook-syntax.sh'));
     const base = release(fx, {}, '1.0.1');
     git(fx.install, 'merge', '-q', '--ff-only', base);
     write(fx, 'notes.txt', 'top LOCAL\nmiddle\nbottom\n');
     const target = release(fx, { 'notes.txt': 'top UPSTREAM\nmiddle\nbottom\n' });
     const tmpl = fs.readFileSync(path.join(ROOT, 'gstack-upgrade', 'SKILL.md.tmpl'), 'utf8');
-    const block = tmpl.slice(tmpl.indexOf('**For git installs**')).match(/```bash\n([\s\S]*?)\n```/)![1]!.replaceAll('{{SETUP_COMMAND}}', './setup');
+    const block = tmpl.slice(tmpl.indexOf('**For git installs**')).match(/```bash\n([\s\S]*?)\n```/)![1]!.replaceAll('{{SETUP_COMMAND}}', './setup')
+      .replaceAll('{{UPGRADE_ROOT}}', generateUpgradeRoot({ host: 'claude' } as TemplateContext));
     const r = spawnSync('bash', ['-c', block], { cwd: fx.base, encoding: 'utf8', env: { ...isolatedEnv(fx.base), INSTALL_DIR: fx.install }, timeout: 60_000 });
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(r.stdout).toContain('FF_OK');
